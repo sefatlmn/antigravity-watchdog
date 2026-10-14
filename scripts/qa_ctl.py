@@ -2762,24 +2762,27 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
 
 def main() -> int:
     cache_ls_env()
-    parser = argparse.ArgumentParser(description="Antigravity QA Watchdog Controller")
+    p_common = argparse.ArgumentParser(add_help=False)
+    p_common.add_argument("--json", action="store_true", help="Output JSON")
+
+    parser = argparse.ArgumentParser(description="Antigravity QA Watchdog Controller", parents=[p_common])
     sub = parser.add_subparsers(dest="cmd")
 
-    p_status = sub.add_parser("status", help="Show QA Watchdog status and jobs")
+    p_status = sub.add_parser("status", help="Show QA Watchdog status and jobs", parents=[p_common])
     p_status.add_argument("--repo", default="", help="Optional repository path filter")
-    p_status.add_argument("--json", action="store_true", help="Output JSON")
 
     p_sync = sub.add_parser(
         "sync",
         help="Scan git history across workspace & nested repos and resolve the youngest commit",
+        parents=[p_common],
     )
     p_sync.add_argument("--repo", action="append", default=[], help="Workspace or repository path(s) to sync")
 
-    p_prep = sub.add_parser("prepare", help="Prepare isolated Git worktree for a commit")
+    p_prep = sub.add_parser("prepare", help="Prepare isolated Git worktree for a commit", parents=[p_common])
     p_prep.add_argument("--repo", required=True)
     p_prep.add_argument("--sha", default="YOUNGEST")
 
-    p_queue = sub.add_parser("queue", help="Queue a commit for QA Watchdog review")
+    p_queue = sub.add_parser("queue", help="Queue a commit for QA Watchdog review", parents=[p_common])
     p_queue.add_argument("--repo", required=True)
     p_queue.add_argument("--sha", default="YOUNGEST")
     p_queue.add_argument("--base-sha", default="")
@@ -2787,7 +2790,7 @@ def main() -> int:
     p_queue.add_argument("--no-dispatch", action="store_true")
     p_queue.add_argument("--force", action="store_true")
 
-    p_comp = sub.add_parser("complete", help="Mark a QA Watchdog review job complete")
+    p_comp = sub.add_parser("complete", help="Mark a QA Watchdog review job complete", parents=[p_common])
     p_comp.add_argument("--repo", required=True)
     p_comp.add_argument("--sha", required=True)
     p_comp.add_argument("--verdict", default="PASS")
@@ -2795,56 +2798,54 @@ def main() -> int:
     p_comp.add_argument("--bugs-count", type=int, default=0)
     p_comp.add_argument("--fixes-committed", default="false")
 
-    p_apply = sub.add_parser("apply-fix", help="Cherry-pick or merge a fix/qa-<sha> branch into current branch")
+    p_apply = sub.add_parser("apply-fix", help="Cherry-pick or merge a fix/qa-<sha> branch into current branch", parents=[p_common])
     p_apply.add_argument("--repo", required=True)
     p_apply.add_argument("--sha", required=True)
     p_apply.add_argument("--mode", choices=["cherry-pick", "merge"], default="cherry-pick")
 
-    p_pause = sub.add_parser("pause", help="Pause automatic QA Watchdog triggers")
-    p_resume = sub.add_parser("resume", help="Resume automatic QA Watchdog triggers")
+    p_pause = sub.add_parser("pause", help="Pause automatic QA Watchdog triggers", parents=[p_common])
+    p_resume = sub.add_parser("resume", help="Resume automatic QA Watchdog triggers", parents=[p_common])
 
-    p_disp = sub.add_parser("dispatch", help="Dispatch a queued QA Watchdog review job")
+    p_disp = sub.add_parser("dispatch", help="Dispatch a queued QA Watchdog review job", parents=[p_common])
     p_disp.add_argument("--job-id", default="", help="Specific job ID to dispatch")
 
-    p_base = sub.add_parser("init-baseline", help="Initialize baseline commit SHA for a repository")
+    p_base = sub.add_parser("init-baseline", help="Initialize baseline commit SHA for a repository", parents=[p_common])
     p_base.add_argument("--repo", required=True)
 
     # Next Steps commands
-    p_ns = sub.add_parser("next-steps", help="Synthesize up to 4 structured /plan proposals for repository")
+    p_ns = sub.add_parser("next-steps", help="Synthesize up to 4 structured /plan proposals for repository", parents=[p_common])
     p_ns.add_argument("--repo", required=True)
     p_ns.add_argument("--force", action="store_true")
-    p_ns.add_argument("--json", action="store_true")
 
-    p_disp_ns = sub.add_parser("dispatch-synthesis", help="Dispatch an on-demand agent to synthesize next steps")
+    p_disp_ns = sub.add_parser("dispatch-synthesis", help="Dispatch an on-demand agent to synthesize next steps", parents=[p_common])
     p_disp_ns.add_argument("--repo", required=True)
 
-    p_chk_ns = sub.add_parser("check-synthesis", help="Check status of next steps synthesis and return proposals")
+    p_chk_ns = sub.add_parser("check-synthesis", help="Check status of next steps synthesis and return proposals", parents=[p_common])
     p_chk_ns.add_argument("--repo", required=True)
 
-    p_cmp_ns = sub.add_parser("complete-synthesis", help="Mark next steps synthesis as completed")
+    p_cmp_ns = sub.add_parser("complete-synthesis", help="Mark next steps synthesis as completed", parents=[p_common])
     p_cmp_ns.add_argument("--repo", required=True)
 
-    p_cancel_ns = sub.add_parser("cancel-synthesis", help="Cancel / stop ongoing next steps synthesis")
+    p_cancel_ns = sub.add_parser("cancel-synthesis", help="Cancel / stop ongoing next steps synthesis", parents=[p_common])
     p_cancel_ns.add_argument("--repo", required=True)
 
-    p_goal = sub.add_parser("goal", help="Get or set project goal")
+    p_goal = sub.add_parser("goal", help="Get or set project goal", parents=[p_common])
     p_goal.add_argument("--repo", required=True)
     p_goal.add_argument("--set", dest="set_goal", default="")
     p_goal.add_argument("--clear", action="store_true")
 
-    p_conv = sub.add_parser("conversations", help="List Antigravity conversations associated with repository")
+    p_conv = sub.add_parser("conversations", help="List Antigravity conversations associated with repository", parents=[p_common])
     p_conv.add_argument("--repo", required=True)
-    p_conv.add_argument("--json", action="store_true")
 
-    p_trans = sub.add_parser("transcript", help="Get recent user requests from a conversation transcript")
+    p_trans = sub.add_parser("transcript", help="Get recent user requests from a conversation transcript", parents=[p_common])
     p_trans.add_argument("--conversation-id", required=True)
     p_trans.add_argument("--limit", type=int, default=5)
 
-    p_exec = sub.add_parser("execute-plan", help="Launch or prepare agent prompt for an approved next step plan")
+    p_exec = sub.add_parser("execute-plan", help="Launch or prepare agent prompt for an approved next step plan", parents=[p_common])
     p_exec.add_argument("--repo", required=True)
     p_exec.add_argument("--plan-id", required=True)
 
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
     if args.cmd == "sync":
         res = sync_git_history(args.repo or [])

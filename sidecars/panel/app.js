@@ -1378,11 +1378,22 @@ async function init() {
   if (btnSendChat) btnSendChat.addEventListener('click', sendReportToChat);
 
   // Initialize workspace URIs & listeners
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlParamRepo = urlParams.get('repo') || urlParams.get('workspace');
+  if (urlParamRepo) {
+    workspaceUris = [urlParamRepo];
+    selectedRepoPath = urlParamRepo;
+    userExplicitlySelectedRepo = true;
+  }
+
   if (sidecar?.getWorkspaceUris) {
     try {
-      workspaceUris = await sidecar.getWorkspaceUris();
+      const uris = await sidecar.getWorkspaceUris();
+      if (uris && uris.length > 0) {
+        workspaceUris = uris;
+      }
     } catch {
-      workspaceUris = [];
+      if (!urlParamRepo) workspaceUris = [];
     }
     if (sidecar.onWorkspaceChange) {
       sidecar.onWorkspaceChange((uris) => {

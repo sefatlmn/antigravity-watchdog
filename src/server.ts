@@ -97,6 +97,12 @@ export function startDashboardServer(preferredPort = 4198): Promise<DashboardSer
           return;
         }
 
+        if (pathname === "/preload.js") {
+          res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8" });
+          res.end("// Standalone preload stub\nwindow.sidecar = window.sidecar || {};");
+          return;
+        }
+
         if (pathname === "/app.js") {
           sendFile(res, join(PANEL_DIR, "app.js"), "application/javascript; charset=utf-8");
           return;
@@ -108,8 +114,12 @@ export function startDashboardServer(preferredPort = 4198): Promise<DashboardSer
         }
 
         if (pathname === "/api/dashboard" || pathname === "/api/status") {
-          const repo = url.searchParams.get("repo") || undefined;
-          const status = await getStatus(repo);
+          let repo = url.searchParams.get("repo");
+          if (!repo && req.method === "POST") {
+            const body = await parseJsonBody(req);
+            repo = body.repo || body.repo_path || (Array.isArray(body.workspaceUris) ? body.workspaceUris[0] : undefined);
+          }
+          const status = await syncRepo(repo || undefined);
           sendJson(res, status);
           return;
         }
