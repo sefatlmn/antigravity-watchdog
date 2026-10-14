@@ -2,7 +2,7 @@
 
 Post-commit QA auditing and next steps planning for Google Antigravity and OpenCode Desktop.
 
-Runs visual and code verification in isolated Git worktrees, tests UI in headless Playwright, records fixes to isolated `fix/qa-<sha>` branches, and proposes milestone-aligned next steps in a companion web panel.
+Runs visual and code verification in isolated Git worktrees, tests UI in headless Playwright, records fixes to isolated `fix/qa-<sha>` branches, and proposes milestone-aligned next steps.
 
 ## Requirements
 
@@ -15,7 +15,7 @@ Runs visual and code verification in isolated Git worktrees, tests UI in headles
 
 ## Installation
 
-### Method 1: Google Antigravity
+### Method 1: Google Antigravity (Visual Companion Panel)
 
 Clone the repository into your Antigravity plugins directory:
 
@@ -28,13 +28,13 @@ To enable:
 2. Ensure `qa-watchdog` is enabled.
 3. The companion panel opens from the side pane or runs as a sidecar dashboard.
 
-The root of this repository is a native Antigravity plugin containing the lifecycle stop hook (`hooks.json`), agent rules (`rules/AGENTS.md`), agent skills (`skills/qa-watchdog/`, `skills/next-steps/`), CLI engines (`scripts/`), and the sidecar panel (`sidecars/panel/`).
+The root of this repository is a native Antigravity plugin containing the lifecycle stop hook (`hooks.json`), agent rules (`rules/AGENTS.md`), agent skills (`skills/qa-watchdog/`, `skills/next-steps/`), CLI engines (`scripts/`), and the sidecar UI panel (`sidecars/panel/`).
 
 ---
 
-### Method 2: OpenCode Desktop
+### Method 2: OpenCode Desktop (Chat-Driven Plugin)
 
-The OpenCode plugin is maintained as a dedicated package in `packages/opencode/`.
+OpenCode does not host webview sidecars. The OpenCode integration is packaged as a pure, UI-less plugin in `packages/opencode/` that operates entirely through chat commands and native agent tools.
 
 #### 1. Build the Package
 
@@ -62,15 +62,32 @@ Or install via the OpenCode CLI:
 opencode plugin add /path/to/qa-watchdog/packages/opencode
 ```
 
-#### OpenCode Features
+#### 3. Chat Commands in OpenCode
 
-- **Slash Commands**:
-  - `/watchdog`: Displays active watchdog telemetry and dashboard link.
-  - `/next-steps`: Synthesizes 4 forward-looking implementation plans.
-  - `/next-steps cancel`: Cancels an active synthesis turn.
-- **Native Tools**: `qa_watchdog_status`, `qa_watchdog_audit`, `qa_watchdog_apply_fix`, `qa_watchdog_next_steps`, `qa_watchdog_cancel_synthesis`, `qa_watchdog_dashboard`.
+- **`/watchdog`**:
+  - `/watchdog`: Formatted status report with current repo, branch, latest audit verdict, and available fix branches.
+  - `/watchdog audit [notes]`: Trigger a QA review on the latest commit in an isolated worktree.
+  - `/watchdog apply-fix [sha]`: Merge confirmed bug fixes from `fix/qa-<sha>` onto your working branch.
+  - `/watchdog pause`: Pause automatic background post-commit reviews.
+  - `/watchdog resume`: Resume automatic background reviews.
+
+- **`/next-steps`**:
+  - `/next-steps`: Synthesizes and prints 4 structured implementation proposals directly into chat.
+  - `/next-steps execute <id>`: Loads the approved plan specification into the session for implementation.
+  - `/next-steps refresh`: Forces a fresh context synthesis and generates new proposals.
+  - `/next-steps cancel`: Cancels an ongoing next steps synthesis turn.
+  - `/next-steps goal <text>`: Sets the milestone goal (or `/next-steps goal clear`).
+
+- **Native Tools Available to Agents**:
+  - `qa_watchdog_status`
+  - `qa_watchdog_audit`
+  - `qa_watchdog_apply_fix`
+  - `qa_watchdog_next_steps`
+  - `qa_watchdog_execute_plan`
+  - `qa_watchdog_cancel_synthesis`
+  - `qa_watchdog_goal`
+
 - **Background Hook**: Automatically audits new commits on session `idle` in isolated worktrees.
-- **Interactive Panel**: Companion dashboard server runs at `http://127.0.0.1:4198`.
 
 ---
 
@@ -78,7 +95,7 @@ opencode plugin add /path/to/qa-watchdog/packages/opencode
 
 - **Stop Hook**: When an agent finishes a turn and commits code, Watchdog detects the commit.
 - **Isolated Worktree**: Audits run in detached worktrees under `~/.gemini/antigravity/qa_watchdog/worktrees/` so your working branch is never modified.
-- **Fix Branch**: Reproducible test or lint fixes are committed to `fix/qa-<short_sha>`. Apply them to your working branch with one click in the panel or via CLI.
+- **Fix Branch**: Reproducible test or lint fixes are committed to `fix/qa-<short_sha>`. Apply them to your working branch with one click in Antigravity or via `/watchdog apply-fix` in OpenCode.
 - **Next Steps**: Synthesizes 4 forward-looking implementation plans in `.antigravity/next_steps/` based on repo goals, commits, and handoffs.
 
 ---

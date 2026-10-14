@@ -3,74 +3,247 @@ import { Schema } from "effect";
 import {
   getStatus,
   prepareWorktree,
+  queueAudit,
   applyFix,
   pauseWatchdog,
   resumeWatchdog,
   synthesizeNextSteps,
   cancelSynthesis,
+  manageGoal,
+  executePlan,
   triggerStopHook,
   syncRepo,
 } from "./bridge.js";
-import { startDashboardServer, DashboardServer } from "./server.js";
 
 export default Plugin.define({
   id: "qa-watchdog",
 
   async setup(ctx) {
-    let dashboardServer: DashboardServer | null = null;
     const abortController = new AbortController();
 
-    // 1. Start local dashboard server for the Watchdog UI panel
-    try {
-      dashboardServer = await startDashboardServer(4198);
-      console.log(`[QA Watchdog] Local dashboard active at ${dashboardServer.url}`);
-    } catch (err: any) {
-      console.warn(`[QA Watchdog] Could not start dashboard server: ${err.message}`);
-    }
-
-    // 2. Register slash commands
+    // 1. Register slash commands (CLI/chat-only interface)
     try {
       await ctx.command.transform((editor) => {
+        // /watchdog command
         editor.add({
           name: "watchdog",
-          description: "Show QA Watchdog status or open the visual dashboard",
-          execute: async ({ sessionID }) => {
-            const status = await getStatus(ctx.location.directory);
-            const statusText = status.paused ? "PAUSED" : "ACTIVE";
-            const url = dashboardServer ? dashboardServer.url : "http://127.0.0.1:4198";
+          description: "QA Watchdog management: status, audit, apply-fix, pause, resume",
+          execute: async ({ sessionID, prompt }) => {
+            const dir = ctx.location.directory;
+            const text = (prompt?.text || "").trim();
+            const args = text.split(/\s+/).filter(Boolean);
+            const sub = (args[0] || "").toLowerCase();
+
+            if (sub === "pause") {
+              await pauseWatchdog();
+              await ctx.session.synthetic({
+                sessionID,
+                text: "QA Watchdog paused. Automatic post-commit background reviews are disabled.",
+              });
+              return;
+            }
+
+            if (sub === "resume") {
+              await resumeWatchdog();
+              await ctx.session.synthetic({
+                sessionID,
+                text: "QA Watchdog resumed. Automatic post-commit background reviews are active.",
+              });
+              return;
+            }
+
+            if (sub === "audit") {
+              const comment = args.slice(1).join(" ");
+              const sync = await syncRepo(dir);
+              const sha = sync.bestRepo?.headSha || "HEAD";
+              await prepareWorktree(dir, sha);
+              await queueAudit(dir, sha, comment || undefined);
+              await ctx.session.synthetic({
+                sessionID,
+                text: `Queued QA Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
+              });
+              return;
+            }
+
+            if (sub === "apply-fix" || sub === "apply") {
+              const targetSha = args[1];
+              const sync = await syncRepo(dir);
+              const sha = targetSha || sync.bestRepo?.lastFixSha || sync.bestRepo?.headSha;
+              if (!sha) {
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: "No fix branch specified. Usage: `/watchdog apply-fix <sha>`",
+                });
+                return;
+              }
+              try {
+                const res = await applyFix(dir, sha);
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: `Applied fixes from \`fix/qa-${sha.slice(0, 7)}\` to the working branch.\n${res.message || "Successfully applied fix."}`,
+                });
+              } catch (err: any) {
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: `Failed to apply fix: ${err.message}`,
+                });
+              }
+              return;
+            }
+
+            // Default: formatted status report
+            const status = await getStatus(dir);
+            const sync = await syncRepo(dir);
+            const repoInfo = sync.bestRepo || {};
+            const paused = Boolean(status.paused);
+            const jobs = status.jobs || [];
+            const latestJob = jobs[0];
+
+            let output = `## QA Watchdog Status: ${paused ? "PAUSED" : "ACTIVE"}\n\n`;
+            output += `- **Repository**: \`${repoInfo.repoName || dir}\` (\`${repoInfo.branch || "main"}\`)\n`;
+            output += `- **Head Commit**: \`${(repoInfo.headSha || "").slice(0, 7)}\` - ${repoInfo.headSubject || "No commits"}\n`;
+
+            if (latestJob) {
+              const shortSha = latestJob.shortSha || latestJob.sha?.slice(0, 7);
+              output += `\n### Latest Audit (\`${shortSha}\`)\n`;
+              output += `- **Verdict**: ${latestJob.verdict || "UNKNOWN"}\n`;
+              output += `- **Status**: ${latestJob.status || "completed"}\n`;
+              if (latestJob.summary) {
+                output += `- **Summary**: ${latestJob.summary}\n`;
+              }
+              if (latestJob.fixSha || latestJob.fixBranch) {
+                output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/qa-${shortSha}`}\` (Run \`/watchdog apply-fix ${shortSha}\`)\n`;
+              }
+            } else {
+              output += `\nNo recent audits recorded.\n`;
+            }
+
+            output += `\n---\n**Available Commands**:\n`;
+            output += `- \`/watchdog audit [notes]\`: Run QA review on latest commit\n`;
+            output += `- \`/watchdog apply-fix [sha]\`: Apply fixes from isolated branch\n`;
+            output += `- \`/watchdog pause\` / \`/watchdog resume\`: Toggle background reviews\n`;
+
             await ctx.session.synthetic({
               sessionID,
-              text: `QA Watchdog Status: ${statusText}\nDashboard: ${url}\nTracked Repositories: ${Object.keys(status.repos || {}).length}\nRecent Jobs: ${status.jobs?.length || 0}`,
+              text: output,
             });
           },
         });
 
+        // /next-steps command
         editor.add({
           name: "next-steps",
-          description: "Synthesize or cancel next-step implementation plans (e.g. /next-steps, /next-steps cancel)",
+          description: "Synthesize, inspect, or execute forward-looking next steps plans",
           execute: async ({ sessionID, prompt }) => {
             const dir = ctx.location.directory;
-            const text = (prompt?.text || "").toLowerCase().trim();
-            if (text.includes("cancel") || text.includes("stop")) {
+            const text = (prompt?.text || "").trim();
+            const args = text.split(/\s+/).filter(Boolean);
+            const sub = (args[0] || "").toLowerCase();
+
+            if (sub === "cancel" || sub === "stop") {
               const res = await cancelSynthesis(dir);
               if (res.conversationId) {
                 try {
                   await ctx.session.interrupt({ sessionID: res.conversationId });
                 } catch {
-                  // external or completed session
+                  // external or finished session
                 }
               }
               await ctx.session.synthetic({
                 sessionID,
-                text: `Next steps refresh cancelled. ${res.notifiedChat ? "Respective chat notified." : ""}`,
+                text: `Next steps synthesis cancelled.${res.notifiedChat ? " Respective synthesizer turn notified." : ""}`,
               });
               return;
             }
-            const proposals = await synthesizeNextSteps(dir, true);
-            const count = proposals.proposals?.length || 0;
+
+            if (sub === "goal") {
+              const goalText = args.slice(1).join(" ");
+              if (goalText.toLowerCase() === "clear") {
+                await manageGoal(dir, undefined, true);
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: "Repository goal cleared.",
+                });
+                return;
+              }
+              if (goalText) {
+                await manageGoal(dir, goalText);
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: `Repository goal set to: "${goalText}"`,
+                });
+                return;
+              }
+              const res = await manageGoal(dir);
+              await ctx.session.synthetic({
+                sessionID,
+                text: res.goal ? `Current milestone goal: "${res.goal}"` : "No goal currently set. Usage: `/next-steps goal <text>`",
+              });
+              return;
+            }
+
+            if (sub === "execute" || sub === "plan") {
+              const planId = args[1] || "1";
+              const planRes = await executePlan(dir, planId);
+              if (!planRes.ok || !planRes.prompt) {
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: `Could not load proposal plan #${planId}. ${planRes.error || "File not found."}`,
+                });
+                return;
+              }
+
+              await ctx.session.synthetic({
+                sessionID,
+                text: `### Approved Plan #${planId}: ${planRes.title}\n\n${planRes.prompt}`,
+              });
+              return;
+            }
+
+            // Default: synthesize and display proposals in chat
+            const force = sub === "refresh" || sub === "force";
+            const proposalsRes = await synthesizeNextSteps(dir, force);
+            const proposals = proposalsRes.proposals || [];
+            const goal = proposalsRes.goal || proposalsRes.projectGoal;
+
+            let output = `## Proposed Next Steps\n\n`;
+            if (goal) {
+              output += `**Milestone Goal**: "${goal}"\n\n`;
+            }
+
+            if (proposals.length === 0) {
+              output += `No proposals available. Run \`/next-steps refresh\` to analyze repository context and synthesize proposals.\n`;
+            } else {
+              proposals.forEach((p: any, idx: number) => {
+                const num = p.id || idx + 1;
+                const tag = p.category || p.tag || "Feature";
+                const diff = p.difficulty ? ` · ${p.difficulty}` : "";
+                const dur = p.estimatedDuration ? ` · ~${p.estimatedDuration}` : "";
+                output += `### ${num}. [${tag}] ${p.title}${diff}${dur}\n`;
+                if (p.summary || p.description) {
+                  output += `${p.summary || p.description}\n`;
+                }
+                if (Array.isArray(p.objectives) && p.objectives.length > 0) {
+                  p.objectives.slice(0, 3).forEach((obj: string) => {
+                    output += `- ${obj}\n`;
+                  });
+                }
+                if (Array.isArray(p.affectedFiles) && p.affectedFiles.length > 0) {
+                  output += `*Files*: ${p.affectedFiles.map((f: string) => `\`${f}\``).join(", ")}\n`;
+                }
+                output += `*Execute*: \`/next-steps execute ${num}\`\n\n`;
+              });
+            }
+
+            output += `---\n**Available Commands**:\n`;
+            output += `- \`/next-steps execute <id>\`: View approved plan and begin implementation\n`;
+            output += `- \`/next-steps refresh\`: Re-analyze project and generate fresh proposals\n`;
+            output += `- \`/next-steps cancel\`: Cancel active synthesis turn\n`;
+            output += `- \`/next-steps goal <text>\`: Set repository goal\n`;
+
             await ctx.session.synthetic({
               sessionID,
-              text: `Synthesized ${count} next-step implementation proposals for repository:\n${JSON.stringify(proposals, null, 2)}`,
+              text: output,
             });
           },
         });
@@ -79,7 +252,7 @@ export default Plugin.define({
       console.warn(`[QA Watchdog] Command registration skipped: ${err.message}`);
     }
 
-    // 3. Register custom tools
+    // 2. Register native tools
     try {
       await ctx.tool.transform((editor) => {
         editor.add({
@@ -108,10 +281,11 @@ export default Plugin.define({
           }),
           execute: async (input) => {
             await prepareWorktree(input.repo, input.sha);
+            await queueAudit(input.repo, input.sha, input.comment);
             const status = await getStatus(input.repo);
             return {
               output: status,
-              content: `Prepared isolated worktree for commit ${input.sha} on branch fix/qa-${input.sha.slice(0, 7)}`,
+              content: `Prepared isolated worktree and queued audit for commit ${input.sha}`,
             };
           },
         });
@@ -150,8 +324,25 @@ export default Plugin.define({
         });
 
         editor.add({
+          name: "qa_watchdog_execute_plan",
+          description: "Load an approved implementation plan by ID for active coding execution",
+          input: Schema.Struct({
+            repo: Schema.optional(Schema.String),
+            planId: Schema.String,
+          }),
+          execute: async (input) => {
+            const targetRepo = input.repo || ctx.location.directory;
+            const result = await executePlan(targetRepo, input.planId);
+            return {
+              output: result,
+              content: JSON.stringify(result, null, 2),
+            };
+          },
+        });
+
+        editor.add({
           name: "qa_watchdog_cancel_synthesis",
-          description: "Cancel or stop an ongoing Next Steps refresh and interrupt the synthesis agent session",
+          description: "Cancel or stop an ongoing Next Steps refresh and interrupt the synthesis turn",
           input: Schema.Struct({
             repo: Schema.optional(Schema.String),
           }),
@@ -162,7 +353,7 @@ export default Plugin.define({
               try {
                 await ctx.session.interrupt({ sessionID: result.conversationId });
               } catch {
-                // external or completed session
+                // external or finished session
               }
             }
             return {
@@ -173,14 +364,19 @@ export default Plugin.define({
         });
 
         editor.add({
-          name: "qa_watchdog_dashboard",
-          description: "Get the local URL for the QA Watchdog interactive dashboard panel",
-          input: Schema.Struct({}),
-          execute: async () => {
-            const url = dashboardServer ? dashboardServer.url : "http://127.0.0.1:4198";
+          name: "qa_watchdog_goal",
+          description: "Inspect or configure the repository milestone goal",
+          input: Schema.Struct({
+            repo: Schema.optional(Schema.String),
+            goal: Schema.optional(Schema.String),
+            clear: Schema.optional(Schema.Boolean),
+          }),
+          execute: async (input) => {
+            const targetRepo = input.repo || ctx.location.directory;
+            const result = await manageGoal(targetRepo, input.goal, Boolean(input.clear));
             return {
-              output: { url },
-              content: `QA Watchdog dashboard is available at: ${url}`,
+              output: result,
+              content: JSON.stringify(result, null, 2),
             };
           },
         });
@@ -189,21 +385,21 @@ export default Plugin.define({
       console.warn(`[QA Watchdog] Tool registration skipped: ${err.message}`);
     }
 
-    // 4. Update agents with QA Watchdog instructions
+    // 3. Update agent instructions
     try {
       await ctx.agent.transform((editor) => {
         editor.update("build", (agent) => {
           if (agent.system) {
             agent.system +=
-              "\n\n[QA Watchdog Guideline]: When making commits, ensure clean commit messages. The QA Watchdog monitors commits in an isolated git worktree without touching your working tree.";
+              "\n\n[QA Watchdog Guideline]: When making commits, ensure clean commit messages. The QA Watchdog monitors commits in an isolated git worktree without touching your working tree. Use /watchdog to check review verdicts and /next-steps to view proposed implementation plans.";
           }
         });
       });
     } catch {
-      // agent transform fallback
+      // fallback
     }
 
-    // 5. Subscribe to session lifecycle events to run post-commit reviews
+    // 4. Subscribe to session lifecycle events to run post-commit reviews
     void (async () => {
       try {
         const stream = ctx.event.subscribe({ signal: abortController.signal });
@@ -213,7 +409,6 @@ export default Plugin.define({
             if (data?.status?.type === "idle") {
               const workspaceDir = (event as any).location?.directory || ctx.location.directory;
               if (workspaceDir) {
-                // Trigger the QA stop hook asynchronously
                 triggerStopHook({
                   fullyIdle: true,
                   terminationReason: "model_stop",
@@ -229,12 +424,9 @@ export default Plugin.define({
       }
     })();
 
-    // 6. Return cleanup handler
+    // 5. Cleanup handler
     return async () => {
       abortController.abort();
-      if (dashboardServer) {
-        await dashboardServer.close().catch(() => {});
-      }
     };
   },
 });
