@@ -3,6 +3,80 @@
 const sidecar = window.sidecar;
 const $ = (id) => document.getElementById(id);
 
+// Theme Synchronization & Adaptation for Antigravity Host Themes
+function isColorLight(colorStr) {
+  if (!colorStr) return false;
+  colorStr = colorStr.trim().toLowerCase();
+  if (colorStr.startsWith('#')) {
+    let hex = colorStr.slice(1);
+    if (hex.length === 3) {
+      hex = hex.split('').map((c) => c + c).join('');
+    }
+    if (hex.length >= 6) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 135;
+    }
+  }
+  const rgbMatch = colorStr.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (rgbMatch) {
+    const r = parseInt(rgbMatch[1], 10);
+    const g = parseInt(rgbMatch[2], 10);
+    const b = parseInt(rgbMatch[3], 10);
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 135;
+  }
+  return false;
+}
+
+function applyThemeFromPayload(payload = {}) {
+  const cssVars = payload.cssVariables || {};
+  for (const [key, value] of Object.entries(cssVars)) {
+    if (key.startsWith('--') && value) {
+      document.documentElement.style.setProperty(key, value);
+    }
+  }
+
+  let isLight = false;
+  if (payload.themeType === 'light') {
+    isLight = true;
+  } else if (payload.themeType === 'dark') {
+    isLight = false;
+  } else {
+    const bgVal = cssVars['--background'] || getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
+    if (bgVal) {
+      isLight = isColorLight(bgVal);
+    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+      isLight = true;
+    }
+  }
+
+  const mode = isLight ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', mode);
+  document.documentElement.classList.toggle('theme-light', isLight);
+  document.documentElement.classList.toggle('theme-dark', !isLight);
+  document.documentElement.style.colorScheme = mode;
+}
+
+// Initial theme probe & message event listener
+window.addEventListener('message', (event) => {
+  if (event.data?.type === 'theme-change') {
+    applyThemeFromPayload(event.data.payload);
+  }
+});
+
+if (window.matchMedia) {
+  try {
+    const mql = window.matchMedia('(prefers-color-scheme: light)');
+    mql.addEventListener('change', () => {
+      applyThemeFromPayload();
+    });
+  } catch {}
+}
+
+applyThemeFromPayload();
+
+
 let workspaceUris = [];
 let currentDashboard = null;
 let selectedRepoPath = '';

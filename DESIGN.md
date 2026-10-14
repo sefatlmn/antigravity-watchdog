@@ -134,8 +134,14 @@ A calibrated dark-mode palette balancing deep obsidian tones with functional, hi
 - **Foreground Primary** (`#f8fafc`): Headings, active tabs, and primary readable copy.
 - **Foreground Body** (`#e2e8f0`): Summary prose, descriptions, and proposal narratives.
 - **Foreground Muted** (`#94a3b8`): Metadata labels, relative timestamps, and secondary controls.
-- **Border Default** (`rgba(255, 255, 255, 0.08)`): Standard structural surface outlines.
-- **Border Active** (`rgba(255, 255, 255, 0.16)`): Hovered cards, focused inputs, and active interactive borders.
+- **Border Default** (`var(--border)`): Standard structural surface outlines, automatically adapting to dark and light modes.
+- **Border Active** (`var(--border-strong-translucent)`): Hovered cards, focused inputs, and active interactive borders.
+
+### Antigravity Adaptive Theming
+The design system dynamically synchronizes with Google Antigravity's active host theme (Dark Theme, Light Theme, or custom high-contrast palettes) via two cooperating mechanisms:
+1. **Host Event Synchronization:** Listens for `theme-change` postMessage payloads sent by the Antigravity desktop Electron shell (`payload.themeType` and `payload.cssVariables`), dynamically assigning `--background`, `--foreground`, `--primary`, `--card`, `--border`, and `--muted`.
+2. **Semantic `color-mix()` Derivations:** Uses CSS `color-mix(in srgb, var(--foreground) X%, transparent)` for all overlays, borders, hover states, and chip backgrounds. This guarantees mathematically balanced contrast across any host theme without requiring manual theme overrides.
+3. **Pristine Mode Fallbacks:** Provides explicit calibrated light mode tokens (`[data-theme="light"]`, `.theme-light`, `@media (prefers-color-scheme: light)`) pairing clean white cards (`#ffffff`) with subtle slate borders (`#e2e8f0`) and high-contrast typography (`#0f172a`, `#64748b`), while dark mode preserves the Command Bridge obsidian palette (`#0b0f19`, `#131b2e`).
 
 ### Named Rules
 **The Beacon Accent Rule.** Vibrant blue (`#2563eb`) and telemetry cyan (`#38bdf8`) are strictly reserved for actionable triggers and live commit telemetry. They are never used as full decorative background fills for passive cards or containers.
