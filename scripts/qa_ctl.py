@@ -1026,15 +1026,20 @@ def load_goal(repo_root: Path) -> Dict[str, Any]:
         source_label = f"{doc_type_label} ({handoff['rel_path']})"
         clean_sum = re.sub(r"<!--.*?-->", "", summary).strip()
         if clean_sum and len(clean_sum) > 15:
+            # Full summary without arbitrary character limit
+            if title.lower() in clean_sum.lower()[:len(title) + 10]:
+                full_goal = clean_sum
+            else:
+                full_goal = f"{title}: {clean_sum}"
             return {
-                "goal": f"{title} - {clean_sum[:130]}",
+                "goal": full_goal,
                 "source": source_label,
                 "updatedAt": now_iso(),
             }
         elif uncompleted:
             clean_unc = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", uncompleted[0]).strip()
             return {
-                "goal": f"{title} - Next: {clean_unc[:100]}",
+                "goal": f"{title} - Next: {clean_unc}",
                 "source": source_label,
                 "updatedAt": now_iso(),
             }
@@ -1056,13 +1061,19 @@ def load_goal(repo_root: Path) -> Dict[str, Any]:
 
     # 4. Full README
     readme = parse_full_readme(repo_root)
-    if readme.get("found") and readme.get("tagline"):
-        title_str = readme.get("title") or repo_root.name
-        return {
-            "goal": f"{title_str} - {readme['tagline'][:120]}",
-            "source": "README.md",
-            "updatedAt": now_iso(),
-        }
+    if readme.get("found"):
+        tagline = readme.get("tagline") or readme.get("overview")
+        if tagline:
+            title_str = readme.get("title") or repo_root.name
+            if title_str.lower() in tagline.lower()[:len(title_str) + 10]:
+                full_goal = tagline
+            else:
+                full_goal = f"{title_str} - {tagline}"
+            return {
+                "goal": full_goal,
+                "source": "README.md",
+                "updatedAt": now_iso(),
+            }
 
     # 5. Conversation intent
     convs = get_project_conversations(repo_root)
@@ -1072,9 +1083,10 @@ def load_goal(repo_root: Path) -> Dict[str, Any]:
             reqs = get_conversation_user_requests(c["conversationId"], limit=1)
             if reqs:
                 first_req = reqs[0].split("\n")[0].strip()
+                first_req = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", first_req).strip()
                 if len(first_req) > 12:
                     return {
-                        "goal": first_req[:140],
+                        "goal": first_req,
                         "source": f"Conversation ({c.get('title') or 'Earliest Prompt'})",
                         "updatedAt": now_iso(),
                     }
@@ -1167,7 +1179,7 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
                     "repo": str(repo_root),
                     "commitSha": head_sha,
                     "shortSha": short_sha,
-                    "goal": cached.get("goal") or load_goal(repo_root),
+                    "goal": load_goal(repo_root),
                     "proposals": cached["proposals"],
                     "conversationsCount": len(get_project_conversations(repo_root)),
                     "cached": True,
@@ -1274,20 +1286,28 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
     for cat in ranked_cats:
         if cat == "feature":
             # Target primary deliverable from handoff or latest chat directive
-            primary_task = pending_tasks[0] if pending_tasks else (latest_user_directive[:80] if latest_user_directive else f"Expand core capabilities of {repo_root.name}")
+            primary_task = pending_tasks[0] if pending_tasks else (latest_user_directive if latest_user_directive else f"Expand core capabilities of {repo_root.name}")
             source_attribution = f"Derived from {handoff.get('rel_path') or 'recent project directives'}"
             target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
+
+            clean_task_title = primary_task
+            if len(clean_task_title) > 85:
+                clean_task_title = clean_task_title[:85].rsplit(" ", 1)[0]
+
+            clean_goal_ref = goal_text
+            if len(clean_goal_ref) > 130:
+                clean_goal_ref = clean_goal_ref[:130].rsplit(" ", 1)[0] + "..."
 
             proposals_meta.append({
                 "category": "feature",
                 "badge": "Milestone",
                 "difficulty": "Medium",
                 "estimatedTime": "30m",
-                "title": f"Advance Milestone: {primary_task[:60].strip('.')}",
+                "title": f"Advance Milestone: {clean_task_title.strip('.')}",
                 "subtitle": f"{source_attribution}: {primary_task}",
-                "summary": f"Sequential development milestone advancing '{goal_text[:80]}'. Builds upon recent commit {short_sha} ({subject}) to deliver the next critical feature.",
+                "summary": f"Sequential development milestone advancing '{clean_goal_ref}'. Builds upon recent commit {short_sha} ({subject}) to deliver the next critical feature.",
                 "goals": [
-                    f"Implement core logic for: '{primary_task[:70]}'",
+                    f"Implement core logic for: '{clean_task_title}'",
                     f"Integrate changes with existing modules in {', '.join(target_files[:2])}",
                     f"Verify behavior against requirements in {handoff.get('rel_path') or 'project specification'}",
                 ],
