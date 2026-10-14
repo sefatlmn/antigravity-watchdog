@@ -1,20 +1,48 @@
 ---
 name: next-steps
-description: Autonomous post-commit planning and next-step proposer. Inspects repository state, compares commits against initial project goals, and formulates up to 4 structured implementation plans adhering to the Antigravity /plan methodology.
+description: Autonomous post-commit planning and next-step proposer. Ingests project handoffs, specifications, package manifests, full codebase trees, AST symbols, and all Antigravity chat transcripts to formulate 4 project-grounded implementation plans adhering to the /plan methodology.
 ---
 
 # Next Steps Planner
 
-This skill empowers Antigravity agents to inspect codebases and project history to propose the next logical implementation steps.
+This skill empowers Antigravity agents to inspect codebases and project history to propose genuine, project-tailored implementation steps instead of generic boilerplate.
 
-## Core Capabilities
-1. **Goal Discovery**: Extracts the project's overarching mission from `.antigravity/next_steps/goal.json`, `README.md`, initial commits, or conversation history.
-2. **Conversation Awareness**: Leverages context from all previous Antigravity conversations associated with this workspace.
-3. **4-Tier Proposal Generation**:
-   - 🎯 **Core Milestone**: Logical sequential progression toward the primary goal.
-   - 🛡️ **Robustness & Error Handling**: Guardrails, boundary checks, input validation.
-   - ⚡ **DX & Automated Testing**: Regression tests, test harnesses, CI verification.
-   - ✨ **Polish & Micro-Interactions**: UX flow, responsive styling, loading states.
-4. **Implementation Plans**:
-   - Each proposal writes an implementation plan to `.antigravity/next_steps/plan-<id>-<slug>.md`.
-   - Adheres strictly to the `/plan` methodology with Mermaid diagrams, clickable file links, diff blocks, and automated verification plans.
+## 4-Pillar Project Intelligence Pipeline
+
+1. **Pillar 1: Handoff & Specification Ingestion (Primary Ground Truth)**
+   - Specifically scans for `HANDOFF.md`, `project_handoff.md`, `WALKTHROUGH.md`, `PRODUCT.md`, `ROADMAP.md`, `TODO.md`, `ARCHITECTURE.md`, `SPECIFICATION.md`, and `SPEC.md`.
+   - Extracts uncompleted milestones (`- [ ]`), completed items (`- [x]`), next steps sections, and architecture guidelines.
+   - When a handoff document exists, it serves as the highest-priority source of truth for upcoming deliverables.
+
+2. **Pillar 2: Manifests & Full Readme Analysis**
+   - Parses package manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`) to extract dependencies, project descriptions, scripts, and exact test runner commands (`npm test`, `pytest`, `cargo test`, etc.).
+   - Parses the complete `README.md` (overview, features, architecture, roadmap, and current status).
+
+3. **Pillar 3: Deep Codebase & AST/Symbol Traversal**
+   - Scans the repository tree to classify architecture layers: entry points, UI components, backend/logic modules, test files, and configuration files.
+   - Collects active `TODO`, `FIXME`, and `BUG` markers with exact file paths and line numbers.
+   - Evaluates the velocity and trajectory of the last 15 commits and uncommitted dirty working-tree files.
+
+4. **Pillar 4: All-Chats & Transcript Synthesizer**
+   - Discovers all linked Antigravity conversations across the workspace (including ad-hoc sessions by inspecting transcript logs for repository file references).
+   - Extracts chronological user requests, latest directives, corrections, and uncompleted checklist items from past artifacts (`implementation_plan.md`, `walkthrough.md`, `task.md`).
+
+## Dynamic Category Selection
+
+Instead of forcing rigid static categories, the synthesizer evaluates scoring signals across the codebase to dynamically select the top 4 most impactful categories from:
+- `feature` (Milestone): Next sequential deliverable directly advancing handoff items or user directives.
+- `architecture` (Architecture): Modular decoupling, schema formalization, and separation of concerns.
+- `robustness` (Robustness): Parameter validation, edge case handling, and addressing active TODO markers.
+- `performance` (Performance): Latency optimization, pagination, memory footprint, and query/cache tuning.
+- `testing` (DX & Tests): Regression tests and mock fixtures using the project's actual detected test runner.
+- `security` (Security): Boundary validation, path sanitization, and subprocess safety.
+- `ux` (Polish & UX): Layout polish, feedback states, loading spinners, and design token consistency.
+- `api` (API & DX): CLI ergonomics, flag validation, API contracts, and developer documentation.
+
+## Plan Formulation Standard
+
+Each proposal writes a complete implementation plan to `.antigravity/next_steps/plan-<id>-<slug>.md`:
+- Conforms strictly to Antigravity's `/plan` standard.
+- Contains Mermaid flowcharts, absolute clickable `file:///` links, and realistic implementation code diff blocks.
+- Employs project-specific automated test commands and manual verification checklists.
+- Can be launched with 1 click via Antigravity AgentAPI (`agentapi new-conversation`).

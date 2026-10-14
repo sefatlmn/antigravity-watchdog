@@ -339,7 +339,7 @@ def resolve_git_root(path_str: str) -> Optional[Path]:
 
 
 # -----------------------------------------------------------------------------
-# Next Steps & Goal Discovery Engine
+# 4-Pillar Project Intelligence & Next Steps Synthesizer
 # -----------------------------------------------------------------------------
 
 def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
@@ -349,6 +349,7 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
     1. Direct folder matching in `conversation_summaries.db` (workspace_uris containing repo path or repo name)
     2. Parent workspace folders up to home
     3. Project resource mapping in ~/.gemini/config/projects/*.json
+    4. Transcript content search (fallback when workspace_uris was left empty)
     """
     if not CONVERSATION_SUMMARIES_DB.exists():
         return []
@@ -413,10 +414,28 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
                         matches = True
                         break
 
-            # 3. Fallback: check repo_name match in workspace_uris or title
+            # 3. Fallback: check repo_name match in workspace_uris, title, or preview
             if not matches and repo_name and len(repo_name) > 3:
-                if repo_name in (w_uris or "") or (title and repo_name.lower() in title.lower()):
+                combined_text = f"{title or ''} {preview or ''} {w_uris or ''}".lower()
+                if repo_name.lower() in combined_text:
                     matches = True
+
+            # 4. Deep fallback: inspect transcript header/cwd if workspace_uris was blank
+            if not matches:
+                t_file = BRAIN_DIR / cid / ".system_generated" / "logs" / "transcript.jsonl"
+                if t_file.exists():
+                    try:
+                        with open(t_file, "r", encoding="utf-8", errors="ignore") as tf:
+                            lines_checked = 0
+                            for line in tf:
+                                if repo_str in line or (repo_name in line and len(repo_name) > 4):
+                                    matches = True
+                                    break
+                                lines_checked += 1
+                                if lines_checked > 60:
+                                    break
+                    except Exception:
+                        pass
 
             if matches:
                 seen_ids.add(cid)
@@ -455,7 +474,7 @@ def get_conversation_user_requests(conv_id: str, limit: int = 5) -> List[str]:
                         content = step.get("content", "")
                         m = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
                         req_text = m.group(1).strip() if m else content.strip()
-                        if req_text and req_text not in requests:
+                        if req_text and not req_text.startswith("Comments on artifact URI:") and req_text not in requests:
                             requests.append(req_text)
                 except Exception:
                     pass
@@ -464,11 +483,530 @@ def get_conversation_user_requests(conv_id: str, limit: int = 5) -> List[str]:
     return requests[-limit:]
 
 
+def deep_analyze_conversations(repo_root: Path, convs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Pillar 4: Deeply analyze user requests, instructions, and past plan artifacts
+    across all linked project conversations.
+    """
+    intel: Dict[str, Any] = {
+        "all_requests": [],
+        "latest_directive": "",
+        "pending_tasks": [],
+        "completed_tasks": [],
+        "recent_complaints": [],
+        "total_chats_analyzed": len(convs),
+    }
+
+    recent_requests: List[str] = []
+    seen_reqs = set()
+
+    for c in convs[:10]:
+        cid = c.get("conversationId")
+        if not cid:
+            continue
+
+        # 1. Collect requests from transcript
+        reqs = get_conversation_user_requests(cid, limit=6)
+        for r in reqs:
+            cleaned = re.sub(r"\s+", " ", r).strip()
+            # Strip slash command prefixes like /impeccable, /plan, /audit
+            cleaned = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", cleaned).strip()
+            if cleaned and cleaned not in seen_reqs and len(cleaned) > 5:
+                seen_reqs.add(cleaned)
+                recent_requests.append(cleaned)
+                # Check for user complaints or bug indicators
+                lower_r = cleaned.lower()
+                if any(k in lower_r for k in ("broken", "doesn't work", "does not work", "fix", "error", "fails", "stuck", "overhaul", "glitch", "crash")):
+                    intel["recent_complaints"].append(cleaned[:120])
+
+        # 2. Inspect brain directory artifacts for pending / completed tasks
+        brain_path = BRAIN_DIR / cid
+        if brain_path.exists():
+            for art_name in ("implementation_plan.md", "walkthrough.md", "task.md"):
+                art_file = brain_path / art_name
+                if art_file.exists():
+                    try:
+                        content = art_file.read_text(encoding="utf-8", errors="ignore")
+                        for line in content.splitlines():
+                            line_s = line.strip()
+                            if line_s.startswith("- [ ]") or line_s.startswith("* [ ]"):
+                                item_text = line_s[5:].strip()
+                                item_text = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", item_text).strip()
+                                if item_text and item_text not in intel["pending_tasks"] and len(item_text) < 140:
+                                    intel["pending_tasks"].append(item_text)
+                            elif line_s.startswith("- [x]") or line_s.startswith("* [x]"):
+                                item_text = line_s[5:].strip()
+                                item_text = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", item_text).strip()
+                                if item_text and item_text not in intel["completed_tasks"] and len(item_text) < 140:
+                                    intel["completed_tasks"].append(item_text)
+                    except Exception:
+                        pass
+
+    intel["all_requests"] = recent_requests
+    if recent_requests:
+        intel["latest_directive"] = recent_requests[0]
+
+    return intel
+
+
+def discover_project_handoff_and_specs(repo_root: Path) -> Dict[str, Any]:
+    """
+    Pillar 1: Specifically scan for handoff documents, product specifications,
+    walkthroughs, and roadmap files to serve as primary source of truth.
+    """
+    result: Dict[str, Any] = {
+        "found": False,
+        "file": "",
+        "rel_path": "",
+        "doc_type": "",
+        "title": "",
+        "summary": "",
+        "next_steps_items": [],
+        "uncompleted_tasks": [],
+        "completed_tasks": [],
+        "sections": {},
+    }
+
+    # Priority candidate paths
+    candidates = [
+        # Handoff documents
+        ("HANDOFF.md", "handoff"),
+        ("handoff.md", "handoff"),
+        ("project_handoff.md", "handoff"),
+        ("PROJECT_HANDOFF.md", "handoff"),
+        (".antigravity/handoff.md", "handoff"),
+        (".antigravity/HANDOFF.md", "handoff"),
+        ("docs/HANDOFF.md", "handoff"),
+        ("docs/handoff.md", "handoff"),
+        # Walkthrough documents
+        ("WALKTHROUGH.md", "walkthrough"),
+        ("walkthrough.md", "walkthrough"),
+        ("docs/WALKTHROUGH.md", "walkthrough"),
+        ("docs/walkthrough.md", "walkthrough"),
+        # Product & Specification documents
+        ("PRODUCT.md", "product"),
+        ("product.md", "product"),
+        ("docs/PRODUCT.md", "product"),
+        ("ROADMAP.md", "roadmap"),
+        ("roadmap.md", "roadmap"),
+        ("TODO.md", "todo"),
+        ("todo.md", "todo"),
+        ("ARCHITECTURE.md", "architecture"),
+        ("architecture.md", "architecture"),
+        ("SPECIFICATION.md", "spec"),
+        ("specification.md", "spec"),
+        ("SPEC.md", "spec"),
+        ("spec.md", "spec"),
+        # Design document (lower priority per user directive)
+        ("DESIGN.md", "design"),
+        ("design.md", "design"),
+    ]
+
+    for rel_cand, doc_type in candidates:
+        cand_path = repo_root / rel_cand
+        if cand_path.exists() and cand_path.is_file():
+            try:
+                content = cand_path.read_text(encoding="utf-8", errors="ignore").strip()
+                if not content or len(content) < 40:
+                    continue
+
+                result["found"] = True
+                result["file"] = str(cand_path)
+                result["rel_path"] = rel_cand
+                result["doc_type"] = doc_type
+
+                lines = content.splitlines()
+
+                # Extract title
+                for line in lines:
+                    if line.strip().startswith("# "):
+                        result["title"] = line.strip().lstrip("#").strip()
+                        break
+                if not result["title"]:
+                    result["title"] = cand_path.stem.replace("_", " ").title()
+
+                current_section = ""
+                section_lines: Dict[str, List[str]] = {}
+
+                for line in lines:
+                    line_s = line.strip()
+                    if line_s.startswith("## ") or line_s.startswith("### "):
+                        current_section = line_s.lstrip("#").strip().lower()
+                        section_lines.setdefault(current_section, [])
+                    elif current_section:
+                        section_lines[current_section].append(line_s)
+
+                    # Extract checklist tasks
+                    if line_s.startswith("- [ ]") or line_s.startswith("* [ ]"):
+                        task_text = line_s[5:].strip()
+                        if task_text and task_text not in result["uncompleted_tasks"]:
+                            result["uncompleted_tasks"].append(task_text)
+                    elif line_s.startswith("- [x]") or line_s.startswith("* [x]"):
+                        task_text = line_s[5:].strip()
+                        if task_text and task_text not in result["completed_tasks"]:
+                            result["completed_tasks"].append(task_text)
+
+                for sec_name, s_lines in section_lines.items():
+                    text_blob = "\n".join([l for l in s_lines if l and not l.strip().startswith("<!--")])
+                    result["sections"][sec_name] = text_blob
+                    # If this section is explicitly Next Steps / Remaining Work
+                    if any(k in sec_name for k in ("next step", "remaining", "roadmap", "priority", "upcoming", "deliverable")):
+                        for l in s_lines:
+                            clean_l = l.lstrip("-*123456789. ").strip()
+                            clean_l = re.sub(r"<!--.*?-->", "", clean_l).strip()
+                            if clean_l and len(clean_l) > 10 and clean_l not in result["next_steps_items"]:
+                                result["next_steps_items"].append(clean_l)
+
+                # Prioritize explicit purpose/overview/description sections for summary
+                found_purpose = ""
+                for sec_k, sec_v in result["sections"].items():
+                    if any(pk in sec_k for pk in ("product purpose", "purpose", "overview", "description", "mission", "goal", "about")):
+                        clean_lines = [l.strip() for l in sec_v.splitlines() if l.strip() and not l.strip().startswith("<!--") and not l.strip().startswith("#")]
+                        if clean_lines:
+                            found_purpose = " ".join(clean_lines[:2])
+                            break
+
+                if found_purpose:
+                    result["summary"] = re.sub(r"<!--.*?-->", "", found_purpose).strip()
+                else:
+                    summary_lines = []
+                    for line in lines:
+                        line_s = line.strip()
+                        if line_s and not line_s.startswith("#") and not line_s.startswith("[") and not line_s.startswith("!") and not line_s.startswith("```") and not line_s.startswith("<!--"):
+                            clean_s = re.sub(r"<!--.*?-->", "", line_s).strip()
+                            if clean_s:
+                                summary_lines.append(clean_s)
+                                if len(summary_lines) >= 3:
+                                    break
+                    result["summary"] = " ".join(summary_lines[:2])
+
+                # Enrich generic document titles (e.g. # Product -> QA Watchdog Product Specification)
+                if result["title"].lower() in ("product", "handoff", "walkthrough", "roadmap", "specification", "spec", "todo"):
+                    clean_repo_title = repo_root.name.replace("_", " ").replace("-", " ").title()
+                    result["title"] = f"{clean_repo_title} {result['title']}"
+
+                break
+            except Exception:
+                continue
+
+    return result
+
+
+def discover_project_manifests(repo_root: Path) -> Dict[str, Any]:
+    """
+    Pillar 2: Inspect package manifests (package.json, pyproject.toml, Cargo.toml, go.mod)
+    to determine the project's purpose, dependencies, scripts, and test commands.
+    """
+    manifest: Dict[str, Any] = {
+        "manifest_type": "",
+        "name": "",
+        "description": "",
+        "version": "",
+        "tech_stack": set(),
+        "scripts": {},
+        "test_command": "",
+        "build_command": "",
+    }
+
+    # 1. package.json
+    pkg_file = repo_root / "package.json"
+    if pkg_file.exists():
+        try:
+            pdata = json.loads(pkg_file.read_text(encoding="utf-8"))
+            manifest["manifest_type"] = "npm"
+            manifest["name"] = pdata.get("name", "")
+            manifest["description"] = pdata.get("description", "")
+            manifest["version"] = pdata.get("version", "")
+            manifest["scripts"] = pdata.get("scripts", {})
+
+            deps = {**pdata.get("dependencies", {}), **pdata.get("devDependencies", {})}
+            if "react" in deps:
+                manifest["tech_stack"].add("React")
+            if "vue" in deps:
+                manifest["tech_stack"].add("Vue")
+            if "svelte" in deps:
+                manifest["tech_stack"].add("Svelte")
+            if "vite" in deps:
+                manifest["tech_stack"].add("Vite")
+            if "next" in deps:
+                manifest["tech_stack"].add("Next.js")
+            if "electron" in deps:
+                manifest["tech_stack"].add("Electron")
+            if "playwright" in deps or "@playwright/test" in deps:
+                manifest["tech_stack"].add("Playwright")
+            if "jest" in deps:
+                manifest["tech_stack"].add("Jest")
+            if "vitest" in deps:
+                manifest["tech_stack"].add("Vitest")
+            if "tailwindcss" in deps:
+                manifest["tech_stack"].add("TailwindCSS")
+            if "typescript" in deps:
+                manifest["tech_stack"].add("TypeScript")
+            else:
+                manifest["tech_stack"].add("JavaScript")
+
+            if "test" in manifest["scripts"]:
+                manifest["test_command"] = "npm test"
+            if "build" in manifest["scripts"]:
+                manifest["build_command"] = "npm run build"
+        except Exception:
+            pass
+
+    # 2. Python (pyproject.toml, setup.py, requirements.txt)
+    pyproject = repo_root / "pyproject.toml"
+    if pyproject.exists():
+        try:
+            content = pyproject.read_text(encoding="utf-8", errors="ignore")
+            manifest["manifest_type"] = manifest["manifest_type"] or "python"
+            manifest["tech_stack"].add("Python")
+            m_desc = re.search(r'description\s*=\s*["\']([^"\']+)["\']', content)
+            if m_desc and not manifest["description"]:
+                manifest["description"] = m_desc.group(1)
+            if "pytest" in content:
+                manifest["test_command"] = "pytest"
+            if "fastapi" in content.lower():
+                manifest["tech_stack"].add("FastAPI")
+            if "django" in content.lower():
+                manifest["tech_stack"].add("Django")
+        except Exception:
+            pass
+
+    req_file = repo_root / "requirements.txt"
+    if req_file.exists():
+        manifest["tech_stack"].add("Python")
+        try:
+            req_content = req_file.read_text(encoding="utf-8", errors="ignore")
+            if "pytest" in req_content and not manifest["test_command"]:
+                manifest["test_command"] = "pytest"
+        except Exception:
+            pass
+
+    # 3. Cargo.toml
+    cargo_file = repo_root / "Cargo.toml"
+    if cargo_file.exists():
+        manifest["manifest_type"] = manifest["manifest_type"] or "cargo"
+        manifest["tech_stack"].add("Rust")
+        manifest["test_command"] = manifest["test_command"] or "cargo test"
+        manifest["build_command"] = manifest["build_command"] or "cargo build"
+
+    # 4. go.mod
+    go_mod = repo_root / "go.mod"
+    if go_mod.exists():
+        manifest["manifest_type"] = manifest["manifest_type"] or "go"
+        manifest["tech_stack"].add("Go")
+        manifest["test_command"] = manifest["test_command"] or "go test ./..."
+
+    manifest["tech_stack"] = sorted(list(manifest["tech_stack"]))
+    return manifest
+
+
+def parse_full_readme(repo_root: Path) -> Dict[str, Any]:
+    """
+    Pillar 2: Read the entire README.md to synthesize the project mission,
+    features, architecture, and current development status.
+    """
+    result: Dict[str, Any] = {
+        "found": False,
+        "title": "",
+        "tagline": "",
+        "features": [],
+        "overview": "",
+        "roadmap_items": [],
+    }
+
+    readme_path = None
+    for cand in ("README.md", "readme.md", "README", "Readme.md"):
+        p = repo_root / cand
+        if p.exists() and p.is_file():
+            readme_path = p
+            break
+
+    if not readme_path:
+        return result
+
+    try:
+        content = readme_path.read_text(encoding="utf-8", errors="ignore").strip()
+        result["found"] = True
+        lines = content.splitlines()
+
+        for line in lines:
+            if line.strip().startswith("# "):
+                result["title"] = line.strip().lstrip("#").strip()
+                break
+
+        # Extract tagline / overview
+        overview_lines = []
+        for line in lines:
+            line_s = line.strip()
+            if line_s.startswith("#"):
+                continue
+            if line_s and not line_s.startswith("[") and not line_s.startswith("!") and not line_s.startswith("```"):
+                overview_lines.append(line_s)
+                if len(overview_lines) >= 3:
+                    break
+        result["overview"] = " ".join(overview_lines)
+        if overview_lines:
+            result["tagline"] = overview_lines[0]
+
+        # Extract features and roadmap
+        current_section = ""
+        for line in lines:
+            line_s = line.strip()
+            if line_s.startswith("## "):
+                current_section = line_s.lstrip("#").strip().lower()
+            elif current_section:
+                if any(k in current_section for k in ("feature", "capabilities", "highlight", "what is")):
+                    if line_s.startswith("- ") or line_s.startswith("* "):
+                        feat = line_s.lstrip("-* ").strip()
+                        if feat and len(feat) > 5 and feat not in result["features"]:
+                            result["features"].append(feat)
+                elif any(k in current_section for k in ("roadmap", "upcoming", "todo", "next step")):
+                    if line_s.startswith("- ") or line_s.startswith("* ") or line_s.startswith("- [ ]"):
+                        item = line_s.lstrip("-* [ ]").strip()
+                        if item and len(item) > 5 and item not in result["roadmap_items"]:
+                            result["roadmap_items"].append(item)
+    except Exception:
+        pass
+
+    return result
+
+
+def deep_analyze_codebase(repo_root: Path, head_sha: str = "HEAD") -> Dict[str, Any]:
+    """
+    Pillar 3: Traverse the whole repository tree, categorize source files into
+    architectural layers, detect entry points, scan active TODOs/FIXMEs,
+    and trace recent git commit velocity.
+    """
+    codebase: Dict[str, Any] = {
+        "entry_points": [],
+        "ui_files": [],
+        "logic_files": [],
+        "test_files": [],
+        "config_files": [],
+        "all_source_files": [],
+        "todos": [],
+        "recent_commits": [],
+        "dirty_files": [],
+        "changed_files_head": [],
+        "languages": set(),
+        "has_tests": False,
+    }
+
+    # 1. Traverse directory tree
+    try:
+        for p in repo_root.rglob("*"):
+            if not p.is_file():
+                continue
+            rel_str = str(p.relative_to(repo_root))
+
+            # Skip ignored directories
+            parts = p.relative_to(repo_root).parts
+            if any(part in SKIP_SCAN_DIRS or part.startswith(".") for part in parts[:-1]):
+                continue
+            if ".antigravity" in parts or "worktrees" in parts:
+                continue
+
+            ext = p.suffix.lower()
+            fname = p.name.lower()
+
+            if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".rs", ".go", ".cpp", ".c", ".h", ".html", ".css", ".scss", ".vue", ".svelte"):
+                codebase["all_source_files"].append(rel_str)
+
+                # Classify into architectural layers
+                if fname in ("index.html", "main.mjs", "app.js", "main.py", "app.py", "server.js", "server.py", "cli.py", "index.ts", "main.ts", "main.tsx", "qa_ctl.py"):
+                    codebase["entry_points"].append(rel_str)
+                elif ext in (".tsx", ".jsx", ".vue", ".svelte", ".html", ".css", ".scss") or "sidecars/panel" in rel_str or "ui" in parts:
+                    codebase["ui_files"].append(rel_str)
+                elif "test" in fname or "spec" in fname or "tests" in parts or "test" in parts:
+                    codebase["test_files"].append(rel_str)
+                    codebase["has_tests"] = True
+                else:
+                    codebase["logic_files"].append(rel_str)
+
+                if ext in (".ts", ".tsx"):
+                    codebase["languages"].add("TypeScript")
+                elif ext in (".js", ".jsx", ".mjs"):
+                    codebase["languages"].add("JavaScript")
+                elif ext == ".py":
+                    codebase["languages"].add("Python")
+                elif ext in (".html", ".css", ".scss"):
+                    codebase["languages"].add("Web UI")
+                elif ext == ".rs":
+                    codebase["languages"].add("Rust")
+                elif ext == ".go":
+                    codebase["languages"].add("Go")
+
+                # Scan for TODO/FIXME markers
+                if p.stat().st_size < 250000 and len(codebase["todos"]) < 30:
+                    try:
+                        for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                            if any(k in line for k in ("TODO", "FIXME", "BUG", "HACK")) and len(line.strip()) < 140:
+                                codebase["todos"].append({
+                                    "file": rel_str,
+                                    "line": i,
+                                    "text": line.strip(),
+                                })
+                                if len(codebase["todos"]) >= 30:
+                                    break
+                    except Exception:
+                        pass
+            elif fname in ("package.json", "tsconfig.json", "pyproject.toml", "cargo.toml", "vite.config.ts", "vite.config.js", "docker-compose.yml"):
+                codebase["config_files"].append(rel_str)
+    except Exception:
+        pass
+
+    codebase["languages"] = sorted(list(codebase["languages"]))
+
+    # 2. Git velocity: last 15 commits
+    rc_log, log_out, _ = run_git(repo_root, ["log", "-n", "15", "--format=%H%x09%h%x09%s%x09%cd%x09%an"])
+    if rc_log == 0 and log_out:
+        for line in log_out.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                codebase["recent_commits"].append({
+                    "sha": parts[0],
+                    "short_sha": parts[1],
+                    "subject": parts[2],
+                    "date": parts[3] if len(parts) > 3 else "",
+                    "author": parts[4] if len(parts) > 4 else "",
+                })
+
+    # 3. Head commit delta
+    rc_diff, diff_out, _ = run_git(repo_root, ["diff-tree", "--no-commit-id", "--name-status", "-r", head_sha])
+    if rc_diff != 0 or not diff_out.strip():
+        rc_diff, diff_out, _ = run_git(repo_root, ["diff", "--name-status", "HEAD~1..HEAD"])
+    if rc_diff == 0 and diff_out:
+        for line in diff_out.splitlines():
+            parts = line.strip().split("\t", 1)
+            if len(parts) == 2:
+                codebase["changed_files_head"].append({"status": parts[0], "path": parts[1]})
+
+    # 4. Dirty working tree files
+    rc_st, st_out, _ = run_git(repo_root, ["status", "--porcelain"])
+    if rc_st == 0 and st_out:
+        for line in st_out.splitlines():
+            line_s = line.strip()
+            if not line_s:
+                continue
+            parts = line_s.split(maxsplit=1)
+            if len(parts) == 2:
+                codebase["dirty_files"].append({"status": parts[0], "path": parts[1].strip()})
+
+    return codebase
+
+
 def load_goal(repo_root: Path) -> Dict[str, Any]:
     """
-    Load project goal from .antigravity/next_steps/goal.json or discover it from
-    README.md, initial git commit, and conversation prompts.
+    Multi-source hierarchical goal discovery:
+    1. User override in .antigravity/next_steps/goal.json
+    2. Discovered Handoff / Product document (highest automated authority)
+    3. Package Manifest description (package.json / pyproject.toml)
+    4. Full README.md overview / tagline
+    5. Earliest / latest user conversation intent
+    6. Initial git commit subject
+    7. Repository name fallback
     """
+    # 1. Custom override
     goal_file = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME / "goal.json"
     if goal_file.exists():
         try:
@@ -478,37 +1016,70 @@ def load_goal(repo_root: Path) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # 1. Check README.md
-    readme_path = None
-    for candidate in ("README.md", "readme.md", "README", "Readme.md"):
-        p = repo_root / candidate
-        if p.exists() and p.is_file():
-            readme_path = p
-            break
+    # 2. Handoff / Product document
+    handoff = discover_project_handoff_and_specs(repo_root)
+    if handoff.get("found"):
+        title = handoff.get("title", "")
+        summary = handoff.get("summary", "")
+        uncompleted = handoff.get("uncompleted_tasks", [])
+        doc_type_label = "Product Spec" if handoff.get("doc_type") == "product" else ("Walkthrough" if handoff.get("doc_type") == "walkthrough" else "Handoff")
+        source_label = f"{doc_type_label} ({handoff['rel_path']})"
+        clean_sum = re.sub(r"<!--.*?-->", "", summary).strip()
+        if clean_sum and len(clean_sum) > 15:
+            return {
+                "goal": f"{title} - {clean_sum[:130]}",
+                "source": source_label,
+                "updatedAt": now_iso(),
+            }
+        elif uncompleted:
+            clean_unc = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", uncompleted[0]).strip()
+            return {
+                "goal": f"{title} - Next: {clean_unc[:100]}",
+                "source": source_label,
+                "updatedAt": now_iso(),
+            }
+        elif title:
+            return {
+                "goal": title,
+                "source": source_label,
+                "updatedAt": now_iso(),
+            }
 
-    if readme_path:
-        try:
-            content = readme_path.read_text(encoding="utf-8", errors="ignore").strip()
-            lines = [line.strip() for line in content.splitlines() if line.strip()]
-            desc_lines: List[str] = []
-            for line in lines:
-                if line.startswith("#"):
-                    if not desc_lines:
-                        desc_lines.append(line.lstrip("#").strip())
-                elif not line.startswith("[") and not line.startswith("!") and not line.startswith("```"):
-                    desc_lines.append(line)
-                    if len(desc_lines) >= 3:
-                        break
-            if desc_lines:
-                return {
-                    "goal": " - ".join(desc_lines[:2]),
-                    "source": "README.md",
-                    "updatedAt": now_iso(),
-                }
-        except Exception:
-            pass
+    # 3. Package manifest
+    manifest = discover_project_manifests(repo_root)
+    if manifest.get("description"):
+        return {
+            "goal": f"{manifest.get('name', repo_root.name)}: {manifest['description']}",
+            "source": f"{manifest.get('manifest_type') or 'package'}.json",
+            "updatedAt": now_iso(),
+        }
 
-    # 2. Check initial git commit
+    # 4. Full README
+    readme = parse_full_readme(repo_root)
+    if readme.get("found") and readme.get("tagline"):
+        title_str = readme.get("title") or repo_root.name
+        return {
+            "goal": f"{title_str} - {readme['tagline'][:120]}",
+            "source": "README.md",
+            "updatedAt": now_iso(),
+        }
+
+    # 5. Conversation intent
+    convs = get_project_conversations(repo_root)
+    if convs:
+        sorted_convs = sorted(convs, key=lambda c: c.get("lastModifiedTime") or "")
+        for c in sorted_convs:
+            reqs = get_conversation_user_requests(c["conversationId"], limit=1)
+            if reqs:
+                first_req = reqs[0].split("\n")[0].strip()
+                if len(first_req) > 12:
+                    return {
+                        "goal": first_req[:140],
+                        "source": f"Conversation ({c.get('title') or 'Earliest Prompt'})",
+                        "updatedAt": now_iso(),
+                    }
+
+    # 6. Initial commit
     rc, init_sha, _ = run_git(repo_root, ["rev-list", "--max-parents=0", "HEAD"])
     if rc == 0 and init_sha.strip():
         first_sha = init_sha.strip().splitlines()[0]
@@ -519,21 +1090,6 @@ def load_goal(repo_root: Path) -> Dict[str, Any]:
                 "source": "Initial Commit",
                 "updatedAt": now_iso(),
             }
-
-    # 3. Check earliest user conversation
-    convs = get_project_conversations(repo_root)
-    if convs:
-        sorted_convs = sorted(convs, key=lambda c: c.get("lastModifiedTime") or "")
-        for c in sorted_convs:
-            reqs = get_conversation_user_requests(c["conversationId"], limit=1)
-            if reqs:
-                first_req = reqs[0].split("\n")[0].strip()
-                if len(first_req) > 10:
-                    return {
-                        "goal": first_req[:140],
-                        "source": f"Conversation ({c.get('title') or 'Earliest Prompt'})",
-                        "updatedAt": now_iso(),
-                    }
 
     return {
         "goal": f"Develop and maintain {repo_root.name}",
@@ -564,88 +1120,30 @@ def clear_goal_override(repo_root: Path) -> Dict[str, Any]:
 
 def analyze_codebase_delta(repo_root: Path, sha: str = "HEAD") -> Dict[str, Any]:
     """
-    Analyze recent changes, files modified, language distribution, and pending TODOs.
+    Backwards-compatible wrapper around deep_analyze_codebase.
     """
-    delta: Dict[str, Any] = {
-        "changedFiles": [],
-        "languages": set(),
-        "recentSubjects": [],
-        "todos": [],
+    deep = deep_analyze_codebase(repo_root, head_sha=sha)
+    return {
+        "changedFiles": deep["changed_files_head"],
+        "languages": deep["languages"],
+        "recentSubjects": [c["subject"] for c in deep["recent_commits"][:5]],
+        "todos": deep["todos"][:5],
     }
-
-    rc_log, log_out, _ = run_git(repo_root, ["log", "-n", "5", "--format=%s"])
-    if rc_log == 0 and log_out:
-        delta["recentSubjects"] = [s.strip() for s in log_out.splitlines() if s.strip()]
-
-    rc_diff, diff_out, _ = run_git(repo_root, ["diff-tree", "--no-commit-id", "--name-status", "-r", sha])
-    if rc_diff != 0 or not diff_out.strip():
-        rc_diff, diff_out, _ = run_git(repo_root, ["diff", "--name-status", "HEAD~1..HEAD"])
-
-    if rc_diff == 0 and diff_out:
-        for line in diff_out.splitlines():
-            parts = line.strip().split("\t", 1)
-            if len(parts) == 2:
-                status, fpath = parts
-                delta["changedFiles"].append({"status": status, "path": fpath})
-                ext = Path(fpath).suffix.lower()
-                if ext in (".ts", ".tsx"):
-                    delta["languages"].add("TypeScript")
-                elif ext in (".js", ".jsx", ".mjs"):
-                    delta["languages"].add("JavaScript")
-                elif ext == ".py":
-                    delta["languages"].add("Python")
-                elif ext in (".html", ".css", ".scss"):
-                    delta["languages"].add("Web UI")
-                elif ext in (".go", ".rs", ".cpp", ".c", ".h"):
-                    delta["languages"].add("Systems")
-                elif ext in (".jsxinc", ".jsx"):
-                    delta["languages"].add("ExtendScript")
-
-    # Inspect active uncommitted working-tree modifications
-    rc_st, st_out, _ = run_git(repo_root, ["status", "--porcelain"])
-    if rc_st == 0 and st_out:
-        for line in st_out.splitlines():
-            line_str = line.strip()
-            if not line_str:
-                continue
-            parts = line_str.split(maxsplit=1)
-            if len(parts) == 2:
-                status, fpath = parts[0], parts[1].strip()
-                if not any(f["path"] == fpath for f in delta["changedFiles"]):
-                    delta["changedFiles"].insert(0, {"status": status, "path": fpath})
-                    ext = Path(fpath).suffix.lower()
-                    if ext in (".ts", ".tsx"):
-                        delta["languages"].add("TypeScript")
-                    elif ext in (".js", ".jsx", ".mjs"):
-                        delta["languages"].add("JavaScript")
-                    elif ext == ".py":
-                        delta["languages"].add("Python")
-                    elif ext in (".html", ".css", ".scss"):
-                        delta["languages"].add("Web UI")
-                    elif ext in (".go", ".rs", ".cpp", ".c", ".h"):
-                        delta["languages"].add("Systems")
-
-    delta["languages"] = sorted(list(delta["languages"]))
-
-    for cf in delta["changedFiles"][:10]:
-        fp = repo_root / cf["path"]
-        if fp.exists() and fp.is_file() and fp.stat().st_size < 200000:
-            try:
-                for i, line in enumerate(fp.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-                    if ("TODO" in line or "FIXME" in line) and len(line.strip()) < 120:
-                        delta["todos"].append({"file": cf["path"], "line": i, "text": line.strip()})
-                        if len(delta["todos"]) >= 5:
-                            break
-            except Exception:
-                pass
-
-    return delta
 
 
 def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any]:
     """
     Synthesize up to 4 structured next-step implementation plans adhering to
     the official Antigravity /plan standard.
+
+    Uses the 4-Pillar Project Intelligence Pipeline:
+    1. Handoff & Specification Ingestion (Primary Ground Truth)
+    2. Manifests & Full Readme Analysis
+    3. Deep Codebase Tree, AST/Symbol, and Git Velocity Traversal
+    4. All-Chats & Transcript Synthesizer
+
+    Dynamically scores and selects the top 4 most impactful categories from:
+    feature, architecture, robustness, performance, testing, security, ux, api.
     """
     ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
     ns_dir.mkdir(parents=True, exist_ok=True)
@@ -677,162 +1175,333 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
         except Exception:
             pass
 
+    # -------------------------------------------------------------------------
+    # Ingest 4 Pillars of Intelligence
+    # -------------------------------------------------------------------------
+    handoff = discover_project_handoff_and_specs(repo_root)
+    manifest = discover_project_manifests(repo_root)
+    readme = parse_full_readme(repo_root)
+    codebase = deep_analyze_codebase(repo_root, head_sha=head_sha)
+    convs = get_project_conversations(repo_root)
+    chat_intel = deep_analyze_conversations(repo_root, convs)
     goal_data = load_goal(repo_root)
     goal_text = goal_data.get("goal") or f"Develop and maintain {repo_root.name}"
-    delta = analyze_codebase_delta(repo_root, sha=head_sha)
-    convs = get_project_conversations(repo_root)
 
-    # Extract recent user requests from conversation transcripts
-    recent_requests: List[str] = []
-    if convs:
-        for c in convs[:4]:
-            cid = c.get("id") or c.get("conversationId")
-            if cid:
-                reqs = get_conversation_user_requests(cid, limit=2)
-                for r in reqs:
-                    if r and r not in recent_requests:
-                        recent_requests.append(r)
+    # Determine core affected files from recent changes or key entry points
+    recent_changed_paths = [f["path"] for f in codebase["changed_files_head"]]
+    if not recent_changed_paths:
+        recent_changed_paths = [f["path"] for f in codebase["dirty_files"]]
+    if not recent_changed_paths:
+        recent_changed_paths = codebase["entry_points"][:3] or codebase["logic_files"][:3] or codebase["all_source_files"][:3]
 
-    recent_directive = ""
-    if recent_requests:
-        clean_req = re.sub(r"\s+", " ", recent_requests[-1]).strip()
-        if len(clean_req) > 75:
-            clean_req = clean_req[:72] + "…"
-        recent_directive = clean_req
+    latest_user_directive = chat_intel.get("latest_directive", "")
+    pending_tasks = handoff.get("uncompleted_tasks", []) or handoff.get("next_steps_items", []) or chat_intel.get("pending_tasks", []) or readme.get("roadmap_items", [])
 
-    changed_files = [f["path"] for f in delta["changedFiles"]][:6]
-    main_files = changed_files if changed_files else [f.name for f in repo_root.iterdir() if not f.name.startswith(".")][:4]
+    # Compute intelligent test verification command
+    if codebase["has_tests"] and manifest.get("test_command"):
+        test_cmd = manifest["test_command"]
+    elif codebase["has_tests"] and "Python" in codebase["languages"]:
+        test_cmd = "pytest"
+    elif "Python" in codebase["languages"] and ("JavaScript" in codebase["languages"] or "TypeScript" in codebase["languages"]):
+        test_cmd = "python3 -m py_compile scripts/qa_ctl.py && node -c sidecars/panel/main.mjs && node --check sidecars/panel/app.js"
+    elif "Python" in codebase["languages"]:
+        main_py = codebase["entry_points"][0] if codebase["entry_points"] else "scripts/qa_ctl.py"
+        test_cmd = f"python3 -m py_compile {main_py}"
+    elif "JavaScript" in codebase["languages"] or "TypeScript" in codebase["languages"]:
+        test_cmd = manifest.get("test_command") or "node -c sidecars/panel/main.mjs"
+    else:
+        test_cmd = manifest.get("test_command") or "git status"
 
-    # 4 Structured Implementation Plans
-    proposals_meta: List[Dict[str, Any]] = [
-        {
-            "id": "prop-1-core-milestone",
-            "category": "feature",
-            "badge": "Milestone",
-            "difficulty": "Medium",
-            "estimatedTime": "25m",
-            "title": f"Advance Core Milestone: {repo_root.name}",
-            "subtitle": f"Extend feature progression: {recent_directive or goal_text[:65]}…",
-            "summary": f"Next sequential implementation milestone building upon recent changes ({subject}). Ties together interface bindings and domain models.",
-            "goals": [
-                f"Implement core logic expansion directly advancing '{goal_text[:50]}'",
-                f"Incorporate latest user directives: '{recent_directive}'" if recent_directive else f"Integrate changes seamlessly with recent commit '{subject[:40]}'",
-                "Ensure robust backward compatibility and state persistence",
-            ],
-            "affectedFiles": main_files[:3],
-            "slug": "core-milestone",
-        },
-        {
-            "id": "prop-2-robustness-guardrails",
-            "category": "robustness",
-            "badge": "Robustness",
-            "difficulty": "Low",
-            "estimatedTime": "15m",
-            "title": "Harden Edge Cases, Error Boundaries & Guardrails",
-            "subtitle": "Add defensive validation, null safety & graceful error recovery",
-            "summary": f"Strengthen newly added logic in {', '.join(main_files[:2]) or 'recent modules'} with explicit input validation, try/catch recovery, and boundary checks.",
-            "goals": [
-                "Add defensive parameter checks and null/undefined guard clauses",
-                "Wrap external/async invocations with graceful degradation strategies",
-                "Emit clear user-facing error notifications instead of unhandled exceptions",
-            ],
-            "affectedFiles": main_files[:3],
-            "slug": "robustness-guardrails",
-        },
-        {
-            "id": "prop-3-automated-testing-dx",
-            "category": "performance",
-            "badge": "DX & Tests",
-            "difficulty": "Medium",
-            "estimatedTime": "20m",
-            "title": "Automated Regression Test Suite & DX Verification",
-            "subtitle": "Implement automated unit/integration tests and CI verification",
-            "summary": "Establish automated test fixtures and smoke checks covering the latest code paths to prevent regressions on future commits.",
-            "goals": [
-                f"Write automated tests verifying behaviors introduced in {short_sha}",
-                "Establish deterministic mock fixtures for external services/runtimes",
-                "Provide a one-command verification script for continuous integration",
-            ],
-            "affectedFiles": main_files[:2],
-            "slug": "automated-testing-dx",
-        },
-        {
-            "id": "prop-4-ux-polish",
-            "category": "ux",
-            "badge": "Polish & UX",
-            "difficulty": "Medium",
-            "estimatedTime": "20m",
-            "title": "Refine UX Flow, Micro-Interactions & Visual Feedback",
-            "subtitle": "Enhance layout polish, loading states, accessibility & responsive design",
-            "summary": "Polish the user-facing interface, adding smooth transitions, keyboard navigation, clear feedback states, and aesthetic refinement.",
-            "goals": [
-                "Implement clear loading indicators, success toasts, and empty states",
-                "Ensure responsive layout adjustments across varied window sizes",
-                "Polish typography, spacing, and micro-interactions for a premium experience",
-            ],
-            "affectedFiles": [f for f in main_files if any(ext in f for ext in (".html", ".css", ".jsx", ".tsx", ".vue"))] or main_files[:2],
-            "slug": "ux-polish",
-        },
-    ]
+    # -------------------------------------------------------------------------
+    # Dynamic Category Scoring
+    # -------------------------------------------------------------------------
+    scores: Dict[str, float] = {
+        "feature": 50.0,
+        "architecture": 30.0,
+        "robustness": 35.0,
+        "performance": 25.0,
+        "testing": 30.0,
+        "security": 15.0,
+        "ux": 20.0 if codebase["ui_files"] else 5.0,
+        "api": 20.0,
+    }
+
+    # Signal 1: Handoff pending tasks or uncompleted items
+    if pending_tasks:
+        scores["feature"] += 60.0
+    if handoff.get("found"):
+        scores["feature"] += 30.0
+        if "architecture" in handoff.get("sections", {}):
+            scores["architecture"] += 20.0
+
+    # Signal 2: Active chat requests and recent directives
+    if latest_user_directive:
+        ld_lower = latest_user_directive.lower()
+        if any(w in ld_lower for w in ("overhaul", "refactor", "clean", "structure", "decouple", "architect")):
+            scores["architecture"] += 50.0
+        if any(w in ld_lower for w in ("fix", "bug", "crash", "stuck", "error", "boundary", "guard")):
+            scores["robustness"] += 45.0
+        if any(w in ld_lower for w in ("ui", "button", "polish", "color", "style", "layout", "tab", "card", "view", "visual")):
+            scores["ux"] += 40.0
+        if any(w in ld_lower for w in ("perf", "fast", "speed", "slow", "paginate", "cache", "memory", "lag")):
+            scores["performance"] += 45.0
+        if any(w in ld_lower for w in ("test", "verify", "coverage", "assert", "mock", "dx")):
+            scores["testing"] += 40.0
+
+    # Signal 3: Codebase TODOs and FIXMEs
+    todo_count = len(codebase["todos"])
+    if todo_count > 0:
+        scores["robustness"] += min(todo_count * 5.0, 35.0)
+
+    # Signal 4: Test presence gap
+    if not codebase["has_tests"] and len(codebase["logic_files"]) > 2:
+        scores["testing"] += 35.0
+    elif codebase["has_tests"]:
+        scores["testing"] += 15.0
+
+    # Signal 5: UI files presence
+    if codebase["ui_files"]:
+        scores["ux"] += 25.0
+
+    # Pick top 4 distinct categories
+    ranked_cats = sorted(scores.keys(), key=lambda c: scores[c], reverse=True)[:4]
+
+    # -------------------------------------------------------------------------
+    # Formulate Tailored Proposal Meta for the Top 4 Categories
+    # -------------------------------------------------------------------------
+    proposals_meta: List[Dict[str, Any]] = []
+
+    for cat in ranked_cats:
+        if cat == "feature":
+            # Target primary deliverable from handoff or latest chat directive
+            primary_task = pending_tasks[0] if pending_tasks else (latest_user_directive[:80] if latest_user_directive else f"Expand core capabilities of {repo_root.name}")
+            source_attribution = f"Derived from {handoff.get('rel_path') or 'recent project directives'}"
+            target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
+
+            proposals_meta.append({
+                "category": "feature",
+                "badge": "Milestone",
+                "difficulty": "Medium",
+                "estimatedTime": "30m",
+                "title": f"Advance Milestone: {primary_task[:60].strip('.')}",
+                "subtitle": f"{source_attribution}: {primary_task}",
+                "summary": f"Sequential development milestone advancing '{goal_text[:80]}'. Builds upon recent commit {short_sha} ({subject}) to deliver the next critical feature.",
+                "goals": [
+                    f"Implement core logic for: '{primary_task[:70]}'",
+                    f"Integrate changes with existing modules in {', '.join(target_files[:2])}",
+                    f"Verify behavior against requirements in {handoff.get('rel_path') or 'project specification'}",
+                ],
+                "affectedFiles": target_files,
+                "slug": "core-milestone",
+            })
+
+        elif cat == "architecture":
+            target_files = codebase["entry_points"][:2] + codebase["logic_files"][:2]
+            target_files = list(dict.fromkeys(target_files))[:3] or recent_changed_paths[:3]
+            proposals_meta.append({
+                "category": "architecture",
+                "badge": "Architecture",
+                "difficulty": "High",
+                "estimatedTime": "35m",
+                "title": f"Architectural Refactoring & Module Decoupling",
+                "subtitle": f"Strengthen cohesion and interface isolation across {', '.join(target_files[:2])}",
+                "summary": f"Decompose monolithic flows, isolate sidecar/controller boundaries, and enforce clean data contracts across {repo_root.name}.",
+                "goals": [
+                    f"Extract shared domain logic from {target_files[0] if target_files else 'entry points'} into modular components",
+                    "Formalize clean parameter schemas and return types between subsystems",
+                    "Eliminate circular references and reduce tight coupling across layers",
+                ],
+                "affectedFiles": target_files,
+                "slug": "architecture-refactor",
+            })
+
+        elif cat == "robustness":
+            todo_mention = f" ({codebase['todos'][0]['file']}:{codebase['todos'][0]['line']})" if codebase["todos"] else ""
+            target_files = [t["file"] for t in codebase["todos"][:2]] if codebase["todos"] else recent_changed_paths[:3]
+            target_files = list(dict.fromkeys(target_files))[:3]
+
+            proposals_meta.append({
+                "category": "robustness",
+                "badge": "Robustness",
+                "difficulty": "Low",
+                "estimatedTime": "20m",
+                "title": "Harden Edge Cases, Error Boundaries & Guardrails",
+                "subtitle": f"Resolve pending markers{todo_mention} and add defensive null safety",
+                "summary": f"Strengthen newly updated code paths in {', '.join(target_files[:2])} with explicit parameter guards, try/catch recovery, and boundary validation.",
+                "goals": [
+                    f"Address active TODO/FIXME markers in {target_files[0] if target_files else 'core files'}",
+                    "Add defensive validation for empty/malformed inputs and subprocess execution",
+                    "Ensure graceful fallback states instead of unhandled exceptions or crashes",
+                ],
+                "affectedFiles": target_files,
+                "slug": "robustness-guardrails",
+            })
+
+        elif cat == "performance":
+            target_files = recent_changed_paths[:3]
+            proposals_meta.append({
+                "category": "performance",
+                "badge": "Performance",
+                "difficulty": "Medium",
+                "estimatedTime": "25m",
+                "title": "Optimize Execution Latency, Memory & Caching",
+                "subtitle": "Streamline I/O throughput, pagination, and data structures",
+                "summary": f"Enhance runtime efficiency and responsiveness in {', '.join(target_files[:2])} through lazy evaluation, optimized caching, and reduced disk/network round-trips.",
+                "goals": [
+                    "Implement localized in-memory caching for repetitive file/command reads",
+                    "Paginate heavy query datasets and eliminate redundant synchronous calls",
+                    "Profile and minimize CPU/memory overhead during background polling",
+                ],
+                "affectedFiles": target_files,
+                "slug": "performance-optimization",
+            })
+
+        elif cat == "testing":
+            target_files = codebase["test_files"][:2] or [f"tests/test_{Path(f).stem}.py" if f.endswith(".py") else f"{f}.test.ts" for f in recent_changed_paths[:2]]
+            proposals_meta.append({
+                "category": "testing",
+                "badge": "DX & Tests",
+                "difficulty": "Medium",
+                "estimatedTime": "20m",
+                "title": f"Automated Regression Test Suite ({manifest.get('manifest_type') or 'CLI'})",
+                "subtitle": f"Implement comprehensive unit & integration tests using '{test_cmd}'",
+                "summary": f"Establish automated test fixtures and regression checks covering recent changes ({short_sha}) to ensure stability on future commits.",
+                "goals": [
+                    f"Write regression test cases verifying core behaviors introduced in {short_sha}",
+                    "Establish deterministic mock fixtures for external subprocesses and file I/O",
+                    f"Provide single-command verification via '{test_cmd}'",
+                ],
+                "affectedFiles": target_files,
+                "slug": "automated-testing-dx",
+            })
+
+        elif cat == "security":
+            target_files = recent_changed_paths[:3]
+            proposals_meta.append({
+                "category": "security",
+                "badge": "Security",
+                "difficulty": "Medium",
+                "estimatedTime": "20m",
+                "title": "Sanitize Input Boundaries & Path Traversal Guardrails",
+                "subtitle": "Enforce strict schema validation and prevent unauthorized access",
+                "summary": f"Harden filesystem access, subprocess arguments, and API payloads across {', '.join(target_files[:2])} against injection or traversal vulnerabilities.",
+                "goals": [
+                    "Validate and resolve all file paths against repository boundaries",
+                    "Sanitize external inputs passed to shell commands and subprocess runners",
+                    "Enforce strict payload validation on incoming API requests",
+                ],
+                "affectedFiles": target_files,
+                "slug": "security-validation",
+            })
+
+        elif cat == "ux":
+            target_files = codebase["ui_files"][:3] or recent_changed_paths[:3]
+            proposals_meta.append({
+                "category": "ux",
+                "badge": "Polish & UX",
+                "difficulty": "Medium",
+                "estimatedTime": "20m",
+                "title": "Refine Interface Polish, Loading States & Micro-Interactions",
+                "subtitle": "Enhance visual hierarchy, button states, and layout responsiveness",
+                "summary": f"Polish user-facing components in {', '.join(target_files[:2])}, adding smooth feedback states, loading spinners, and strict design token alignment.",
+                "goals": [
+                    "Implement responsive loading indicators, toasts, and clear empty states",
+                    "Unify button heights, spacing, and icon alignment across card components",
+                    "Ensure accessible typography, keyboard navigation, and theme consistency",
+                ],
+                "affectedFiles": target_files,
+                "slug": "ux-polish",
+            })
+
+        elif cat == "api":
+            target_files = codebase["entry_points"][:2] or recent_changed_paths[:2]
+            proposals_meta.append({
+                "category": "api",
+                "badge": "API & DX",
+                "difficulty": "Low",
+                "estimatedTime": "15m",
+                "title": "Enhance API Ergonomics, CLI Flags & Documentation",
+                "subtitle": "Streamline developer interfaces, CLI help messages, and payloads",
+                "summary": f"Refine the developer-facing interface in {', '.join(target_files[:2])}, adding comprehensive flag validation, self-documenting help, and structured JSON output.",
+                "goals": [
+                    "Provide clear CLI help text and option flags for all subcommands",
+                    "Standardize JSON response payloads with consistent error reporting",
+                    "Update documentation and inline docstrings to match current signatures",
+                ],
+                "affectedFiles": target_files,
+                "slug": "api-ergonomics-dx",
+            })
+
+    # Ensure exactly 4 proposals are constructed
+    proposals_meta = proposals_meta[:4]
 
     proposals: List[Dict[str, Any]] = []
 
     for i, meta in enumerate(proposals_meta, 1):
+        plan_id = f"prop-{i}-{meta['slug']}"
         plan_filename = f"plan-{i}-{meta['slug']}.md"
         plan_file = ns_dir / plan_filename
 
         file_links_md = "\n".join([f"- [{f}](file://{str((repo_root / f).resolve())}): Core modifications" for f in meta["affectedFiles"]])
         goals_md = "\n".join([f"- [ ] {g}" for g in meta["goals"]])
 
-        plan_content = f"""# Implementation Plan - {meta['title']}
+        plan_content = f"""# Implementation Plan: {meta['title']}
 
 {meta['summary']}
 
-## Overview
-- **Project Goal:** {goal_text}
-- **Current State:** Commit [`{short_sha}`](file://{str(repo_root)}) - {subject}
-- **Target Category:** {meta['badge']} ({meta['difficulty']} Difficulty, ~{meta['estimatedTime']})
+---
 
 ## User Review Required
+
 > [!IMPORTANT]
-> This plan was synthesized following commit `{short_sha}`. Review the proposed changes and verification criteria below before executing.
+> **Context & Evidence**:
+> - **Project Goal:** {goal_text}
+> - **Goal Source:** {goal_data.get('source', 'Discovered')}
+> - **Current State:** Commit [`{short_sha}`](file://{str(repo_root)}) - {subject}
+> - **Category:** {meta['badge']} ({meta['difficulty']} Difficulty, ~{meta['estimatedTime']})
+> - **Directive / Handoff Context:** {handoff.get('title') or latest_user_directive or 'Sequential project roadmap'}
 
 ```mermaid
 flowchart TD
-    A["Current Commit: {short_sha}"] --> B["{meta['title']}"]
-    B --> C["Automated Verification"]
-    C --> D["Final Delivery"]
+    Current["Current State: {short_sha}"] --> Plan["{meta['title']}"]
+    Plan --> Changes["Implement Changes in {', '.join(meta['affectedFiles'][:2]) or 'Target Files'}"]
+    Changes --> Verify["Automated Verification ({test_cmd})"]
+    Verify --> Complete["Milestone Completed"]
 ```
+
+---
 
 ## Proposed Changes
 
-### Key Milestones
+### Key Deliverables
 {goals_md}
 
 ### Affected Files
 {file_links_md}
 
 ```markdown
-<!-- Proposed Implementation Notes -->
-- Adhere to existing architectural conventions and design tokens.
+<!-- Proposed Implementation Guidelines -->
+- Adhere strictly to existing architectural conventions and design tokens.
 - Maintain documentation integrity and preserve untouched comments.
 - Test edge cases thoroughly before committing.
 ```
 
+---
+
 ## Verification Plan
 
 ### Automated Tests
-- Run test suite or verification script to validate syntax and logic.
-- Ensure zero linting or type errors.
+- Run test command: `{test_cmd}`
+- Ensure zero linting or type errors across modified files.
 
 ### Manual Verification
-- Inspect UI and logs to verify expected behavior.
-- Confirm graceful degradation when inputs are invalid.
+- Verify functionality directly in the application or CLI.
+- Confirm graceful handling when inputs are invalid or missing.
 """
         plan_file.write_text(plan_content, encoding="utf-8")
 
         proposal_entry = {
-            "id": meta["id"],
+            "id": plan_id,
             "category": meta["category"],
             "badge": meta["badge"],
             "difficulty": meta["difficulty"],
@@ -859,6 +1528,13 @@ flowchart TD
         "goal": goal_data,
         "generatedAt": now_iso(),
         "proposals": proposals,
+        "intelligence": {
+            "handoff": handoff.get("rel_path") or None,
+            "manifest": manifest.get("manifest_type") or None,
+            "techStack": manifest.get("tech_stack", []),
+            "conversationsAnalyzed": len(convs),
+            "todosCount": len(codebase["todos"]),
+        },
     }
     proposals_file.write_text(json.dumps(cache_data, indent=2), encoding="utf-8")
 
@@ -870,7 +1546,9 @@ flowchart TD
         "goal": goal_data,
         "proposals": proposals,
         "conversationsCount": len(convs),
+        "intelligence": cache_data["intelligence"],
     }
+
 
 
 def spawn_plan_agent(repo_root: Path, plan_title: str, plan_markdown: str) -> Optional[str]:
