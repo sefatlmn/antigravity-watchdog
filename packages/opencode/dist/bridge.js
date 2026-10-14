@@ -4,8 +4,21 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
+function findPluginRoot(startDir) {
+    let curr = startDir;
+    for (let i = 0; i < 6; i++) {
+        if (existsSync(join(curr, "scripts", "qa_ctl.py"))) {
+            return curr;
+        }
+        const parent = dirname(curr);
+        if (parent === curr)
+            break;
+        curr = parent;
+    }
+    return resolve(startDir, "..", "..");
+}
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const PLUGIN_ROOT = resolve(HERE, "..");
+export const PLUGIN_ROOT = findPluginRoot(HERE);
 export const QA_CTL_SCRIPT = join(PLUGIN_ROOT, "scripts", "qa_ctl.py");
 export const QA_STOP_HOOK_SCRIPT = join(PLUGIN_ROOT, "scripts", "qa_stop_hook.py");
 let resolvedPythonBin = null;
