@@ -601,6 +601,30 @@ def analyze_codebase_delta(repo_root: Path, sha: str = "HEAD") -> Dict[str, Any]
                 elif ext in (".jsxinc", ".jsx"):
                     delta["languages"].add("ExtendScript")
 
+    # Inspect active uncommitted working-tree modifications
+    rc_st, st_out, _ = run_git(repo_root, ["status", "--porcelain"])
+    if rc_st == 0 and st_out:
+        for line in st_out.splitlines():
+            line_str = line.strip()
+            if not line_str:
+                continue
+            parts = line_str.split(maxsplit=1)
+            if len(parts) == 2:
+                status, fpath = parts[0], parts[1].strip()
+                if not any(f["path"] == fpath for f in delta["changedFiles"]):
+                    delta["changedFiles"].insert(0, {"status": status, "path": fpath})
+                    ext = Path(fpath).suffix.lower()
+                    if ext in (".ts", ".tsx"):
+                        delta["languages"].add("TypeScript")
+                    elif ext in (".js", ".jsx", ".mjs"):
+                        delta["languages"].add("JavaScript")
+                    elif ext == ".py":
+                        delta["languages"].add("Python")
+                    elif ext in (".html", ".css", ".scss"):
+                        delta["languages"].add("Web UI")
+                    elif ext in (".go", ".rs", ".cpp", ".c", ".h"):
+                        delta["languages"].add("Systems")
+
     delta["languages"] = sorted(list(delta["languages"]))
 
     for cf in delta["changedFiles"][:10]:
@@ -658,6 +682,24 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
     delta = analyze_codebase_delta(repo_root, sha=head_sha)
     convs = get_project_conversations(repo_root)
 
+    # Extract recent user requests from conversation transcripts
+    recent_requests: List[str] = []
+    if convs:
+        for c in convs[:4]:
+            cid = c.get("id") or c.get("conversationId")
+            if cid:
+                reqs = get_conversation_user_requests(cid, limit=2)
+                for r in reqs:
+                    if r and r not in recent_requests:
+                        recent_requests.append(r)
+
+    recent_directive = ""
+    if recent_requests:
+        clean_req = re.sub(r"\s+", " ", recent_requests[-1]).strip()
+        if len(clean_req) > 75:
+            clean_req = clean_req[:72] + "…"
+        recent_directive = clean_req
+
     changed_files = [f["path"] for f in delta["changedFiles"]][:6]
     main_files = changed_files if changed_files else [f.name for f in repo_root.iterdir() if not f.name.startswith(".")][:4]
 
@@ -670,11 +712,11 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
             "difficulty": "Medium",
             "estimatedTime": "25m",
             "title": f"Advance Core Milestone: {repo_root.name}",
-            "subtitle": f"Extend feature progression towards: {goal_text[:65]}…",
+            "subtitle": f"Extend feature progression: {recent_directive or goal_text[:65]}…",
             "summary": f"Next sequential implementation milestone building upon recent changes ({subject}). Ties together interface bindings and domain models.",
             "goals": [
                 f"Implement core logic expansion directly advancing '{goal_text[:50]}'",
-                f"Integrate changes seamlessly with recent commit '{subject[:40]}'",
+                f"Incorporate latest user directives: '{recent_directive}'" if recent_directive else f"Integrate changes seamlessly with recent commit '{subject[:40]}'",
                 "Ensure robust backward compatibility and state persistence",
             ],
             "affectedFiles": main_files[:3],
@@ -1201,6 +1243,11 @@ def prepare_worktree(repo_root: Path, sha: str) -> Tuple[Path, str, Path]:
         rc, _, _ = run_git(worktree_path, ["rev-parse", "--is-inside-work-tree"])
         if rc != 0:
             shutil.rmtree(worktree_path, ignore_errors=True)
+        else:
+            # Reset existing worktree to clean full_sha on fix_branch
+            run_git(worktree_path, ["checkout", "-B", fix_branch, full_sha])
+            run_git(worktree_path, ["reset", "--hard", full_sha])
+            run_git(worktree_path, ["clean", "-fd"])
 
     if not worktree_path.exists():
         rc, _, err = run_git(
@@ -1225,6 +1272,15 @@ def prepare_worktree(repo_root: Path, sha: str) -> Tuple[Path, str, Path]:
         except Exception:
             pass
 
+    for venv_name in (".venv", "venv"):
+        primary_venv = repo_root / venv_name
+        wt_venv = worktree_path / venv_name
+        if primary_venv.is_dir() and not wt_venv.exists():
+            try:
+                os.symlink(str(primary_venv), str(wt_venv))
+            except Exception:
+                pass
+
     return worktree_path, fix_branch, report_path
 
 
@@ -1246,6 +1302,7 @@ def build_qa_prompt(job: Dict[str, Any]) -> str:
 *Please pay special attention to the user's specific request/note above while auditing and testing.*
 """
 
+    ctl_script_path = str(Path(__file__).resolve())
     return f"""[QA-WATCHDOG-SESSION]
 You are the **Autonomous Code & Visual QA Watchdog** reviewing a newly committed change.
 
@@ -1280,7 +1337,7 @@ First, read your operating skill instructions using `view_file`:
    - Write the full structured Markdown audit report to `{report_path}`.
    - Run the completion command:
      ```bash
-     python3 ~/.gemini/config/plugins/qa-watchdog/scripts/qa_ctl.py complete \\
+     python3 "{ctl_script_path}" complete \\
        --repo "{repo_path}" \\
        --sha "{sha}" \\
        --verdict "<PASS|FIXED_ON_BRANCH|NEEDS_ATTENTION>" \\

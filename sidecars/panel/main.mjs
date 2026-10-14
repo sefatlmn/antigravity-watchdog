@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +24,16 @@ const SKIP_SCAN_DIRS = new Set([
   '.next',
   '.nuxt',
   'target',
+  'coverage',
+  '.turbo',
+  '.cache',
+  'tmp',
+  'temp',
+  'vendor',
+  'Pods',
+  'DerivedData',
+  '.output',
+  '.svelte-kit',
 ]);
 const SKIP_TAGS = ['[auto-review]', '[qa-watchdog]', '[skip-qa]'];
 
@@ -35,15 +45,20 @@ app.page('/', () => readLocal('index.html'));
 app.page('/app.js', () => readLocal('app.js'));
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
 
+let resolvedPythonBin = null;
+
 function runPythonCtl(args) {
-  const candidates = ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', 'python3'];
+  const candidates = resolvedPythonBin
+    ? [resolvedPythonBin]
+    : ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', 'python3'];
   let lastErr = null;
   for (const bin of candidates) {
     try {
       const out = execFileSync(bin, [QA_CTL_SCRIPT, ...args], {
         encoding: 'utf8',
-        timeout: 20000,
+        timeout: 25000,
       });
+      resolvedPythonBin = bin;
       return JSON.parse(out.trim() || '{}');
     } catch (err) {
       if (err.code === 'ENOENT') {
@@ -102,7 +117,9 @@ function saveStatePatch(patch) {
   const current = loadState();
   const next = { ...current, ...patch };
   mkdirSync(WATCHDOG_DIR, { recursive: true });
-  writeFileSync(STATE_FILE, JSON.stringify(next, null, 2), 'utf8');
+  const tmpFile = `${STATE_FILE}.tmp.${process.pid}`;
+  writeFileSync(tmpFile, JSON.stringify(next, null, 2), 'utf8');
+  renameSync(tmpFile, STATE_FILE);
   return next;
 }
 
@@ -393,7 +410,7 @@ app.api('/api/dashboard', (data) => {
     auto_dispatch: state.auto_dispatch !== false,
     skip_docs_only: state.skip_docs_only !== false,
     activeRepos,
-    jobs: Array.isArray(state.jobs) ? state.jobs.slice(0, 25) : [],
+    jobs: Array.isArray(state.jobs) ? state.jobs : [],
   };
 });
 
@@ -432,7 +449,7 @@ app.api('/api/sync', (data) => {
     recentCommits: activeRepos[0]?.recentCommits || syncRes.recentCommits || [],
     activeRepos,
     prunedWrapperRepos: syncRes.prunedWrapperRepos || [],
-    jobs: Array.isArray(state.jobs) ? state.jobs.slice(0, 25) : [],
+    jobs: Array.isArray(state.jobs) ? state.jobs : [],
   };
 });
 
@@ -582,7 +599,12 @@ app.api('/api/next-steps/refresh', (data) => {
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['next-steps', '--repo', repo, '--force', '--json']);
+  const result = runPythonCtl(['next-steps', '--repo', repo, '--force', '--json']);
+  const repoDetails = inspectSingleRepo(repo);
+  return {
+    ...result,
+    repoDetails,
+  };
 });
 
 // POST /api/next-steps/goal { repo, goal?, clear? }

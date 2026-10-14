@@ -757,6 +757,23 @@ body {
   padding-top: 4px;
 }
 
+.load-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 2px;
+  width: 100%;
+}
+
+.load-more-btn {
+  width: 100%;
+  height: var(--card-action-height, 26px);
+  min-height: var(--card-action-height, 26px);
+  justify-content: center;
+  border-radius: var(--card-action-radius, 5px);
+  font-size: var(--font-size-xs);
+  font-weight: var(--weight-medium);
+}
+
 /* Report Reader */
 .report-card {
   gap: 8px;
@@ -804,18 +821,13 @@ body {
 }
 
 .report-body {
-  max-height: 400px;
+  max-height: 440px;
   overflow-y: auto;
-  padding: 10px;
-  font-size: var(--font-size-xs);
-  line-height: var(--leading-normal);
+  padding: 14px;
   background: var(--content, rgba(0, 0, 0, 0.3));
   border: 1px solid var(--border, rgba(255, 255, 255, 0.06));
   border-radius: 6px;
-  white-space: pre-wrap;
   word-break: break-word;
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
 }
 
 /* Helpers */
@@ -1017,6 +1029,46 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.proposals-loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 36px 16px;
+  background: var(--card, #131b2e);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+.loading-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(56, 189, 248, 0.2);
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
+.loading-label-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.loading-label-title {
+  font-size: var(--font-size-sm, 12px);
+  font-weight: var(--weight-medium, 500);
+  color: var(--foreground, #f8fafc);
+}
+
+.loading-label-sub {
+  color: var(--muted-foreground, #94a3b8);
+  font-size: var(--font-size-xs, 11px);
 }
 
 /* Proposal Card */
@@ -1315,5 +1367,37 @@ body {
 }
 .markdown-rendered a:hover {
   color: #93c5fd;
+}
+
+.markdown-rendered .md-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: var(--font-size-xs);
+}
+
+.markdown-rendered .md-table td {
+  padding: 6px 10px;
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  vertical-align: top;
+}
+
+.markdown-rendered .md-table tr:first-child td {
+  font-weight: var(--weight-semibold);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--foreground, #f8fafc);
+}
+
+.markdown-rendered ul.md-list {
+  list-style: none;
+  padding-left: 0;
+  margin: 8px 0;
+}
+
+.markdown-rendered ul.md-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
 }
 

@@ -11,6 +11,9 @@ let activeTab = 'audits';
 let activeReportText = '';
 let activeReportSha = '';
 let activePlanModalData = null;
+let archivedVisibleLimit = 10;
+let isRefreshingProposals = false;
+let isSyncing = false;
 
 function stripEmojis(str) {
   if (!str) return '';
@@ -87,9 +90,13 @@ function renderMarkdown(md) {
   const lines = md.split('\n');
   let html = '';
   let inCode = false;
+  let inList = false;
+  let inTable = false;
 
   for (let line of lines) {
     if (line.startsWith('```')) {
+      if (inList) { html += '</ul>\n'; inList = false; }
+      if (inTable) { html += '</tbody></table>\n'; inTable = false; }
       if (inCode) {
         html += '</code></pre>\n';
         inCode = false;
@@ -105,6 +112,42 @@ function renderMarkdown(md) {
       continue;
     }
 
+    const trimmed = line.trim();
+
+    // Table rows
+    if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2) {
+      if (inList) { html += '</ul>\n'; inList = false; }
+      if (/^\|[-:\s|]+\|$/.test(trimmed)) {
+        continue;
+      }
+      if (!inTable) {
+        html += '<table class="md-table"><tbody>\n';
+        inTable = true;
+      }
+      const cells = trimmed.slice(1, -1).split('|').map((c) => c.trim());
+      html += `<tr>${cells.map((c) => `<td>${parseInlineMd(c)}</td>`).join('')}</tr>\n`;
+      continue;
+    } else if (inTable) {
+      html += '</tbody></table>\n';
+      inTable = false;
+    }
+
+    // List items
+    if (line.startsWith('- [ ] ') || line.startsWith('- [x] ') || line.startsWith('- ')) {
+      if (!inList) {
+        html += '<ul class="md-list">\n';
+        inList = true;
+      }
+      const isCheck = line.startsWith('- [ ] ') || line.startsWith('- [x] ');
+      const checked = line.startsWith('- [x] ');
+      const content = isCheck ? line.slice(6) : line.slice(2);
+      html += `<li>${isCheck ? `<input type="checkbox" disabled ${checked ? 'checked' : ''} class="md-check"> ` : '<span class="md-bullet">•</span> '} ${parseInlineMd(content)}</li>\n`;
+      continue;
+    } else if (inList) {
+      html += '</ul>\n';
+      inList = false;
+    }
+
     if (line.startsWith('# ')) {
       html += `<h1>${escapeHtml(line.slice(2))}</h1>\n`;
     } else if (line.startsWith('## ')) {
@@ -113,17 +156,14 @@ function renderMarkdown(md) {
       html += `<h3>${escapeHtml(line.slice(4))}</h3>\n`;
     } else if (line.startsWith('> ')) {
       html += `<blockquote>${escapeHtml(line.slice(2))}</blockquote>\n`;
-    } else if (line.startsWith('- [ ] ') || line.startsWith('- [x] ') || line.startsWith('- ')) {
-      const isCheck = line.startsWith('- [ ] ') || line.startsWith('- [x] ');
-      const checked = line.startsWith('- [x] ');
-      const content = isCheck ? line.slice(6) : line.slice(2);
-      html += `<li>${isCheck ? `<input type="checkbox" disabled ${checked ? 'checked' : ''} class="md-check"> ` : '<span class="md-bullet">•</span> '} ${parseInlineMd(content)}</li>\n`;
-    } else if (!line.trim()) {
+    } else if (!trimmed) {
       html += '<br>\n';
     } else {
       html += `<p>${parseInlineMd(line)}</p>\n`;
     }
   }
+  if (inList) html += '</ul>\n';
+  if (inTable) html += '</tbody></table>\n';
   if (inCode) html += '</code></pre>\n';
   return html;
 }
@@ -425,7 +465,22 @@ function renderDashboard(data) {
 
   const archivedListEl = $('archived-jobs-list');
   if (archivedListEl) {
-    archivedListEl.innerHTML = archivedJobs.map((j) => renderCard(j, true)).join('');
+    if (archivedJobs.length === 0) {
+      archivedListEl.innerHTML = '';
+    } else {
+      const visibleArchived = archivedJobs.slice(0, archivedVisibleLimit);
+      let html = visibleArchived.map((j) => renderCard(j, true)).join('');
+      if (archivedJobs.length > archivedVisibleLimit) {
+        html += `
+          <div class="load-more-row">
+            <button type="button" id="btn-load-more-archived" class="btn small-btn secondary load-more-btn">
+              Load More
+            </button>
+          </div>
+        `;
+      }
+      archivedListEl.innerHTML = html;
+    }
   }
 
   // Render Next Steps
@@ -436,6 +491,7 @@ function renderDashboard(data) {
 
 function renderNextSteps(activeRepo) {
   if (!activeRepo) return;
+  if (isRefreshingProposals) return;
 
   try {
     // 1. Goal Banner
@@ -529,14 +585,13 @@ function renderNextSteps(activeRepo) {
               ${description ? `<p class="proposal-description">${escapeHtml(description)}</p>` : ''}
 
               ${goalsHtml ? `<div class="proposal-goals">${goalsHtml}</div>` : ''}
-              ${filesHtml ? `<div class="proposal-files-row">${filesHtml}</div>` : ''}
 
               <div class="proposal-actions">
-                <button type="button" class="icon-btn proposal-plan-btn" data-action="view-plan" data-plan-path="${escapeHtml(planPath)}" data-plan-file="${escapeHtml(planFile)}" data-plan-id="${escapeHtml(planId)}" data-title="${escapeHtml(title)}" data-badge="${escapeHtml(badge)}" title="Review Plan" aria-label="Review Plan">
-                  ${ICONS.doc}
-                </button>
                 <button type="button" class="btn small-btn primary-btn" data-action="execute-plan" data-plan-id="${escapeHtml(planId)}" data-title="${escapeHtml(title)}">
                   Execute in Agent
+                </button>
+                <button type="button" class="icon-btn proposal-plan-btn" data-action="view-plan" data-plan-path="${escapeHtml(planPath)}" data-plan-file="${escapeHtml(planFile)}" data-plan-id="${escapeHtml(planId)}" data-title="${escapeHtml(title)}" data-badge="${escapeHtml(badge)}" title="Review Plan" aria-label="Review Plan">
+                  ${ICONS.doc}
                 </button>
               </div>
             </div>
@@ -556,14 +611,33 @@ async function refreshProposals() {
     return;
   }
   const refreshBtn = $('btn-refresh-proposals');
+  const proposalsList = $('proposals-list');
   try {
-    if (refreshBtn) refreshBtn.classList.add('spinning');
-    toast('Synthesizing 4 implementation plans…');
+    isRefreshingProposals = true;
+    if (refreshBtn) {
+      refreshBtn.disabled = true;
+      refreshBtn.classList.add('spinning');
+    }
+    if (proposalsList) {
+      proposalsList.innerHTML = `
+        <div class="proposals-loading-state">
+          <div class="loading-spinner"></div>
+          <div class="loading-label-group">
+            <span class="loading-label-title">Evaluating codebase &amp; goals…</span>
+            <span class="loading-label-sub muted small">Synthesizing 4 structured implementation plans</span>
+          </div>
+        </div>
+      `;
+    }
+    toast('Evaluating codebase and synthesizing plans…');
     const res = await callApi('/api/next-steps/refresh', { body: { repo: activeRepo.repoPath } });
     if (res.ok && res.proposals) {
       activeRepo.proposals = res.proposals;
       if (res.goal) activeRepo.goal = res.goal;
-      renderNextSteps(activeRepo);
+      if (res.repoDetails) {
+        if (res.repoDetails.head) activeRepo.head = res.repoDetails.head;
+        if (res.repoDetails.youngestCommit) activeRepo.youngestCommit = res.repoDetails.youngestCommit;
+      }
       toast('Synthesized 4 next steps');
     } else {
       toast(res.error || 'Failed to synthesize proposals', true);
@@ -571,7 +645,12 @@ async function refreshProposals() {
   } catch (err) {
     toast(`Synthesis error: ${err.message}`, true);
   } finally {
-    if (refreshBtn) refreshBtn.classList.remove('spinning');
+    isRefreshingProposals = false;
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+      refreshBtn.classList.remove('spinning');
+    }
+    renderNextSteps(activeRepo);
   }
 }
 
@@ -632,11 +711,11 @@ async function executePlan(planId) {
 
     closePlanModal();
 
-    if (sidecar?.agent?.startConversation && res.prompt) {
+    if (res.dispatched) {
+      toast(`Agent conversation started for "${stripEmojis(res.title)}"`);
+    } else if (sidecar?.agent?.startConversation && res.prompt) {
       await sidecar.agent.startConversation(res.prompt);
       toast(`Launched agent conversation for "${stripEmojis(res.title)}"`);
-    } else if (res.dispatched) {
-      toast(`Agent conversation started for "${stripEmojis(res.title)}"`);
     } else if (navigator?.clipboard?.writeText && res.prompt) {
       await navigator.clipboard.writeText(res.prompt);
       toast(`Copied execution prompt for "${stripEmojis(res.title)}" to clipboard`);
@@ -661,9 +740,11 @@ async function copyPlanContent() {
 }
 
 async function syncGit({ silent = false } = {}) {
+  if (isSyncing) return;
+  isSyncing = true;
   const syncBtn = $('btn-sync');
   try {
-    if (syncBtn) {
+    if (syncBtn && !silent) {
       syncBtn.disabled = true;
       syncBtn.classList.add('spinning');
     }
@@ -673,7 +754,12 @@ async function syncGit({ silent = false } = {}) {
       repoPath: selectedRepoPath || undefined,
     };
     try {
-      data = await callApi('/api/sync', { body });
+      // Use lightweight dashboard endpoint for silent polling; call full Python sync on user click
+      if (silent) {
+        data = await callApi('/api/dashboard', { body });
+      } else {
+        data = await callApi('/api/sync', { body });
+      }
     } catch {
       data = await callApi('/api/dashboard', { body });
     }
@@ -690,7 +776,8 @@ async function syncGit({ silent = false } = {}) {
   } catch (err) {
     if (!silent) toast(`Sync failed: ${err.message}`, true);
   } finally {
-    if (syncBtn) {
+    isSyncing = false;
+    if (syncBtn && !silent) {
       syncBtn.disabled = false;
       syncBtn.classList.remove('spinning');
     }
@@ -778,7 +865,7 @@ async function openReport(reportPath, shortSha) {
     const rContent = $('report-content');
     const rCard = $('report-card');
     if (rTitle) rTitle.textContent = `Report — ${shortSha}`;
-    if (rContent) rContent.textContent = res.content;
+    if (rContent) rContent.innerHTML = renderMarkdown(stripEmojis(res.content));
     if (rCard) {
       rCard.hidden = false;
       rCard.scrollIntoView({ behavior: 'smooth' });
@@ -1009,6 +1096,7 @@ async function init() {
     repoSelect.addEventListener('change', (e) => {
       userExplicitlySelectedRepo = true;
       selectedRepoPath = e.target.value;
+      archivedVisibleLimit = 10;
       if (currentDashboard) renderDashboard(currentDashboard);
     });
   }
@@ -1031,7 +1119,17 @@ async function init() {
   const jobsList = $('jobs-list');
   if (jobsList) jobsList.addEventListener('click', handleJobAction);
   const archivedListEl = $('archived-jobs-list');
-  if (archivedListEl) archivedListEl.addEventListener('click', handleJobAction);
+  if (archivedListEl) {
+    archivedListEl.addEventListener('click', (e) => {
+      const loadMoreBtn = e.target.closest('#btn-load-more-archived');
+      if (loadMoreBtn) {
+        archivedVisibleLimit += 10;
+        if (currentDashboard) renderDashboard(currentDashboard);
+        return;
+      }
+      handleJobAction(e);
+    });
+  }
 
   const btnCloseReport = $('btn-close-report');
   if (btnCloseReport) {
@@ -1061,7 +1159,17 @@ async function init() {
   }
 
   await syncGit({ silent: true });
-  setInterval(() => syncGit({ silent: true }), 8000);
+  setInterval(() => {
+    if (!document.hidden) {
+      syncGit({ silent: true });
+    }
+  }, 8000);
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      syncGit({ silent: true });
+    }
+  });
 }
 
 // Run init when DOM is loaded
