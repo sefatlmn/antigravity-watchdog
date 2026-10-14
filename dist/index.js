@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode/plugin";
 import { Schema } from "effect";
-import { getStatus, prepareWorktree, applyFix, synthesizeNextSteps, triggerStopHook, } from "./bridge.js";
+import { getStatus, prepareWorktree, applyFix, synthesizeNextSteps, cancelSynthesis, triggerStopHook, } from "./bridge.js";
 import { startDashboardServer } from "./server.js";
 export default Plugin.define({
     id: "qa-watchdog",
@@ -33,9 +33,26 @@ export default Plugin.define({
                 });
                 editor.add({
                     name: "next-steps",
-                    description: "Synthesize 4 project-grounded next-step implementation plans",
-                    execute: async ({ sessionID }) => {
+                    description: "Synthesize or cancel next-step implementation plans (e.g. /next-steps, /next-steps cancel)",
+                    execute: async ({ sessionID, prompt }) => {
                         const dir = ctx.location.directory;
+                        const text = (prompt.text || "").toLowerCase().trim();
+                        if (text.includes("cancel") || text.includes("stop")) {
+                            const res = await cancelSynthesis(dir);
+                            if (res.conversationId) {
+                                try {
+                                    await ctx.session.interrupt({ sessionID: res.conversationId });
+                                }
+                                catch {
+                                    // external or completed session
+                                }
+                            }
+                            await ctx.session.synthetic({
+                                sessionID,
+                                text: `Next steps refresh cancelled. ${res.notifiedChat ? "Respective chat notified." : ""}`,
+                            });
+                            return;
+                        }
                         const proposals = await synthesizeNextSteps(dir, true);
                         const count = proposals.proposals?.length || 0;
                         await ctx.session.synthetic({
@@ -112,6 +129,29 @@ export default Plugin.define({
                         return {
                             output: proposals,
                             content: JSON.stringify(proposals, null, 2),
+                        };
+                    },
+                });
+                editor.add({
+                    name: "qa_watchdog_cancel_synthesis",
+                    description: "Cancel or stop an ongoing Next Steps refresh and interrupt the synthesis agent session",
+                    input: Schema.Struct({
+                        repo: Schema.optional(Schema.String),
+                    }),
+                    execute: async (input) => {
+                        const targetRepo = input.repo || ctx.location.directory;
+                        const result = await cancelSynthesis(targetRepo);
+                        if (result.conversationId) {
+                            try {
+                                await ctx.session.interrupt({ sessionID: result.conversationId });
+                            }
+                            catch {
+                                // external or completed session
+                            }
+                        }
+                        return {
+                            output: result,
+                            content: JSON.stringify(result, null, 2),
                         };
                     },
                 });

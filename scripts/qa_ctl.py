@@ -1560,6 +1560,84 @@ def complete_synthesis(repo_root: Path) -> Dict[str, Any]:
     return {"ok": True, "status": "ready"}
 
 
+def cancel_synthesis(repo_root: Path) -> Dict[str, Any]:
+    """
+    Cancel / stop on-demand next-steps synthesis and synchronize with the respective chat.
+    """
+    ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+    ns_dir.mkdir(parents=True, exist_ok=True)
+    state_file = ns_dir / "synthesis_state.json"
+    proposals_file = ns_dir / "proposals.json"
+
+    conv_id = None
+    s_data: Dict[str, Any] = {}
+    if state_file.exists():
+        try:
+            s_data = json.loads(state_file.read_text(encoding="utf-8"))
+            conv_id = s_data.get("conversationId")
+        except Exception:
+            s_data = {}
+
+    s_data["status"] = "cancelled"
+    s_data["cancelledAt"] = now_iso()
+    s_data["reason"] = "user_cancelled"
+    state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+
+    notified_chat = False
+    if conv_id:
+        # Remove from global active conversations
+        global_state = load_state()
+        if "active_qa_conversations" in global_state:
+            global_state["active_qa_conversations"] = [
+                c for c in global_state["active_qa_conversations"] if c != conv_id
+            ]
+            save_state(global_state)
+
+        # Notify the conversation via AgentAPI send-message
+        env = get_cached_ls_env()
+        agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+        if Path(agentapi_bin).exists():
+            msg = "[CANCEL-SYNTHESIS] Next steps refresh was cancelled by user. Stop synthesis immediately."
+            if "language_server" in Path(agentapi_bin).name:
+                cmd = [agentapi_bin, "agentapi", "send-message", conv_id, msg]
+            else:
+                cmd = [agentapi_bin, "send-message", conv_id, msg]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(repo_root),
+                    env=env,
+                    timeout=8,
+                )
+                if proc.returncode == 0:
+                    notified_chat = True
+            except Exception:
+                pass
+
+    proposals = []
+    goal_data = load_goal(repo_root)
+    if proposals_file.exists():
+        try:
+            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
+            proposals = p_data.get("proposals", [])
+            if p_data.get("goal"):
+                goal_data = p_data["goal"]
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "status": "cancelled",
+        "synthesizing": False,
+        "conversationId": conv_id,
+        "notifiedChat": notified_chat,
+        "proposals": proposals,
+        "goal": goal_data,
+    }
+
+
 def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
     """
     Check if a background synthesizer agent is currently running or completed.
@@ -1569,10 +1647,13 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
     proposals_file = ns_dir / "proposals.json"
 
     is_synthesizing = False
+    status_val = "ready"
+    s_data: Dict[str, Any] = {}
     if state_file.exists():
         try:
             s_data = json.loads(state_file.read_text(encoding="utf-8"))
-            if s_data.get("status") == "synthesizing":
+            status_val = s_data.get("status", "ready")
+            if status_val == "synthesizing":
                 started_str = s_data.get("startedAt", "")
                 if started_str:
                     try:
@@ -1580,12 +1661,15 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
                         # 90-second safety timeout
                         if (datetime.datetime.now(datetime.timezone.utc) - started_dt).total_seconds() > 90:
                             complete_synthesis(repo_root)
+                            status_val = "ready"
                         else:
                             is_synthesizing = True
                     except Exception:
                         is_synthesizing = True
                 else:
                     is_synthesizing = True
+            elif status_val == "cancelled":
+                is_synthesizing = False
         except Exception:
             pass
 
@@ -1603,6 +1687,8 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
     return {
         "ok": True,
         "synthesizing": is_synthesizing,
+        "status": status_val,
+        "conversationId": s_data.get("conversationId"),
         "proposals": proposals,
         "goal": goal_data,
         "conversationsCount": len(get_project_conversations(repo_root)),
@@ -1779,6 +1865,11 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
     if dispatched and conv_id:
         state_data["conversationId"] = conv_id
         state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+        st = load_state()
+        active = st.setdefault("active_qa_conversations", [])
+        if conv_id not in active:
+            active.append(conv_id)
+            save_state(st)
 
     if not dispatched:
         # Fallback to local deterministic synthesis if AgentAPI is not running
@@ -2731,6 +2822,9 @@ def main() -> int:
     p_cmp_ns = sub.add_parser("complete-synthesis", help="Mark next steps synthesis as completed")
     p_cmp_ns.add_argument("--repo", required=True)
 
+    p_cancel_ns = sub.add_parser("cancel-synthesis", help="Cancel / stop ongoing next steps synthesis")
+    p_cancel_ns.add_argument("--repo", required=True)
+
     p_goal = sub.add_parser("goal", help="Get or set project goal")
     p_goal.add_argument("--repo", required=True)
     p_goal.add_argument("--set", dest="set_goal", default="")
@@ -2929,6 +3023,12 @@ def main() -> int:
     if args.cmd == "complete-synthesis":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve()
         res = complete_synthesis(root)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "cancel-synthesis":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        res = cancel_synthesis(root)
         print(json.dumps(res, indent=2))
         return 0
 

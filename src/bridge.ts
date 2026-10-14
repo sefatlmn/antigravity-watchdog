@@ -105,6 +105,10 @@ export async function synthesizeNextSteps(repo: string, force = false): Promise<
   return runCtlJson(args);
 }
 
+export async function cancelSynthesis(repo: string): Promise<any> {
+  return runCtlJson(["cancel-synthesis", "--repo", repo]);
+}
+
 export async function triggerStopHook(payload: {
   fullyIdle: boolean;
   terminationReason: string;

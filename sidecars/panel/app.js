@@ -87,6 +87,7 @@ let activeReportSha = '';
 let activePlanModalData = null;
 let archivedVisibleLimit = 10;
 let isRefreshingProposals = false;
+let isSynthesisCancelled = false;
 let isSyncing = false;
 
 function stripEmojis(str) {
@@ -605,8 +606,10 @@ function renderNextSteps(activeRepo) {
 
     // 4. Proposals List
     const proposalsList = $('proposals-list');
+    const cancelHeaderBtn = $('btn-cancel-synthesis-header');
     if (proposalsList) {
       if (activeRepo.synthesizing) {
+        if (cancelHeaderBtn) cancelHeaderBtn.hidden = false;
         proposalsList.innerHTML = `
           <div class="proposals-loading-state">
             <div class="loading-label-group">
@@ -616,10 +619,19 @@ function renderNextSteps(activeRepo) {
             <div class="proposals-progress-container">
               <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
             </div>
+            <div class="proposals-loading-actions">
+              <button id="btn-cancel-synthesis-card" type="button" class="btn small-btn secondary btn-cancel-action" onclick="cancelNextStepsRefresh()">
+                <svg class="icon-svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                <span>Stop Refresh</span>
+              </button>
+            </div>
           </div>
         `;
         setTimeout(() => refreshProposals(true), 50);
         return;
+      }
+      if (cancelHeaderBtn && !isRefreshingProposals) {
+        cancelHeaderBtn.hidden = true;
       }
       if (proposals.length === 0) {
         proposalsList.innerHTML = `
@@ -695,6 +707,45 @@ function renderNextSteps(activeRepo) {
   }
 }
 
+window.cancelNextStepsRefresh = async function() {
+  const activeRepo = getActiveRepo();
+  if (!activeRepo) return;
+
+  isSynthesisCancelled = true;
+  toast('Cancelling next steps refresh…');
+
+  const cancelHeaderBtn = $('btn-cancel-synthesis-header');
+  if (cancelHeaderBtn) cancelHeaderBtn.hidden = true;
+
+  try {
+    const res = await callApi('/api/next-steps/cancel', { body: { repo: activeRepo.repoPath } });
+    if (res && res.ok) {
+      if (Array.isArray(res.proposals)) {
+        activeRepo.proposals = res.proposals;
+      }
+      if (res.goal) {
+        activeRepo.goal = res.goal;
+      }
+      activeRepo.synthesizing = false;
+      const msg = res.notifiedChat ? 'Synthesis cancelled (chat notified)' : 'Synthesis cancelled';
+      toast(msg);
+    } else {
+      toast(res?.error || 'Failed to cancel synthesis', true);
+    }
+  } catch (err) {
+    toast(`Cancel error: ${err.message}`, true);
+  } finally {
+    isRefreshingProposals = false;
+    if (cancelHeaderBtn) cancelHeaderBtn.hidden = true;
+    const refreshBtn = $('btn-refresh-proposals');
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+      refreshBtn.classList.remove('spinning');
+    }
+    renderNextSteps(activeRepo);
+  }
+};
+
 async function refreshProposals(skipDispatch = false) {
   const activeRepo = getActiveRepo();
   if (!activeRepo) {
@@ -705,9 +756,14 @@ async function refreshProposals(skipDispatch = false) {
     return;
   }
   const refreshBtn = $('btn-refresh-proposals');
+  const cancelHeaderBtn = $('btn-cancel-synthesis-header');
   const proposalsList = $('proposals-list');
   try {
     isRefreshingProposals = true;
+    isSynthesisCancelled = false;
+    if (cancelHeaderBtn) {
+      cancelHeaderBtn.hidden = false;
+    }
     if (refreshBtn) {
       refreshBtn.disabled = true;
       refreshBtn.classList.add('spinning');
@@ -722,6 +778,12 @@ async function refreshProposals(skipDispatch = false) {
           <div class="proposals-progress-container">
             <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
           </div>
+          <div class="proposals-loading-actions">
+            <button id="btn-cancel-synthesis-card" type="button" class="btn small-btn secondary btn-cancel-action" onclick="cancelNextStepsRefresh()">
+              <svg class="icon-svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+              <span>Stop Refresh</span>
+            </button>
+          </div>
         </div>
       `;
     }
@@ -729,6 +791,7 @@ async function refreshProposals(skipDispatch = false) {
     if (!skipDispatch) {
       toast('Evaluating codebase and synthesizing plans…');
       const res = await callApi('/api/next-steps/refresh', { body: { repo: activeRepo.repoPath } });
+      if (isSynthesisCancelled) return;
       if (!res.ok) {
         toast(res.error || 'Failed to dispatch synthesis agent', true);
         return;
@@ -755,6 +818,7 @@ async function refreshProposals(skipDispatch = false) {
     let finished = false;
 
     for (let i = 0; i < maxPolls; i++) {
+      if (isSynthesisCancelled) break;
       const progressBar = $('ns-progress-bar');
       const progressSub = $('ns-loading-sub');
       const pct = Math.min(92, Math.round(15 + ((i + 1) / maxPolls) * 80));
@@ -772,8 +836,11 @@ async function refreshProposals(skipDispatch = false) {
       }
 
       await new Promise((r) => setTimeout(r, pollInterval));
+      if (isSynthesisCancelled) break;
+
       try {
         const check = await callApi('/api/next-steps', { body: { repo: activeRepo.repoPath } });
+        if (isSynthesisCancelled) break;
         if (check.ok && check.synthesizing === false && Array.isArray(check.proposals) && check.proposals.length > 0) {
           if (progressBar) progressBar.style.width = '100%';
           if (progressSub) progressSub.textContent = 'Proposals ready!';
@@ -790,7 +857,7 @@ async function refreshProposals(skipDispatch = false) {
       }
     }
 
-    if (!finished) {
+    if (!finished && !isSynthesisCancelled) {
       const finalCheck = await callApi('/api/next-steps', { body: { repo: activeRepo.repoPath } });
       if (finalCheck.ok && Array.isArray(finalCheck.proposals) && finalCheck.proposals.length > 0) {
         activeRepo.proposals = finalCheck.proposals;
@@ -801,9 +868,14 @@ async function refreshProposals(skipDispatch = false) {
       }
     }
   } catch (err) {
-    toast(`Synthesis error: ${err.message}`, true);
+    if (!isSynthesisCancelled) {
+      toast(`Synthesis error: ${err.message}`, true);
+    }
   } finally {
     isRefreshingProposals = false;
+    if (cancelHeaderBtn) {
+      cancelHeaderBtn.hidden = true;
+    }
     if (refreshBtn) {
       refreshBtn.disabled = false;
       refreshBtn.classList.remove('spinning');

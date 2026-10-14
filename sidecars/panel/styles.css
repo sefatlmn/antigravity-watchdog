@@ -1396,6 +1396,60 @@ body {
   font-size: var(--font-size-xs, 11px);
 }
 
+.proposals-loading-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.btn-cancel-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs, 11px);
+  font-weight: var(--weight-medium, 500);
+  color: var(--danger, #ef4444);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  transition: all var(--transition-fast, 0.15s ease);
+}
+
+.btn-cancel-action:hover {
+  background: color-mix(in srgb, var(--danger, #ef4444) 22%, transparent);
+  border-color: var(--danger, #ef4444);
+  color: #ffffff;
+}
+
+.btn-cancel-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--card-action-height, 26px);
+  padding: 0 8px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs, 11px);
+  font-weight: var(--weight-medium, 500);
+  color: var(--danger, #ef4444);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+  box-sizing: border-box;
+  transition: all var(--transition-fast, 0.15s ease);
+}
+
+.btn-cancel-mini:hover {
+  background: color-mix(in srgb, var(--danger, #ef4444) 22%, transparent);
+  border-color: var(--danger, #ef4444);
+  color: #ffffff;
+}
+
 /* Proposal Card */
 .proposal-card {
   display: flex;

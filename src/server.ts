@@ -11,6 +11,7 @@ import {
   pauseWatchdog, 
   resumeWatchdog, 
   synthesizeNextSteps,
+  cancelSynthesis,
   readReportMarkdown 
 } from "./bridge.js";
 
@@ -185,6 +186,18 @@ export function startDashboardServer(preferredPort = 4198): Promise<DashboardSer
             return;
           }
           const result = await synthesizeNextSteps(repo, true);
+          sendJson(res, result);
+          return;
+        }
+
+        if (pathname === "/api/next-steps/cancel" && req.method === "POST") {
+          const body = await parseJsonBody(req);
+          const repo = body.repo_path || body.repo;
+          if (!repo) {
+            sendJson(res, { error: "Missing repo parameter" }, 400);
+            return;
+          }
+          const result = await cancelSynthesis(repo);
           sendJson(res, result);
           return;
         }

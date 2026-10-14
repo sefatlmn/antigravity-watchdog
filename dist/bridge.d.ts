@@ -11,6 +11,7 @@ export declare function applyFix(repo: string, sha: string): Promise<any>;
 export declare function pauseWatchdog(): Promise<any>;
 export declare function resumeWatchdog(): Promise<any>;
 export declare function synthesizeNextSteps(repo: string, force?: boolean): Promise<any>;
+export declare function cancelSynthesis(repo: string): Promise<any>;
 export declare function triggerStopHook(payload: {
     fullyIdle: boolean;
     terminationReason: string;

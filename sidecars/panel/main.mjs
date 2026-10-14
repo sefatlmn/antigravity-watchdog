@@ -613,6 +613,18 @@ app.api('/api/next-steps/refresh', (data) => {
   return runPythonCtl(['dispatch-synthesis', '--repo', repo]);
 });
 
+// POST /api/next-steps/cancel { repo }
+app.api('/api/next-steps/cancel', (data) => {
+  const repo = String(data?.repo || '').trim();
+  if (!repo) {
+    return new Response(JSON.stringify({ error: 'Missing repo' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  return runPythonCtl(['cancel-synthesis', '--repo', repo]);
+});
+
 // POST /api/next-steps/goal { repo, goal?, clear? }
 app.api('/api/next-steps/goal', (data) => {
   const repo = String(data?.repo || '').trim();

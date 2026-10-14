@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PLUGIN_ROOT, getStatus, syncRepo, prepareWorktree, queueAudit, applyFix, pauseWatchdog, resumeWatchdog, synthesizeNextSteps, readReportMarkdown } from "./bridge.js";
+import { PLUGIN_ROOT, getStatus, syncRepo, prepareWorktree, queueAudit, applyFix, pauseWatchdog, resumeWatchdog, synthesizeNextSteps, cancelSynthesis, readReportMarkdown } from "./bridge.js";
 const PANEL_DIR = join(PLUGIN_ROOT, "sidecars", "panel");
 function parseJsonBody(req) {
     return new Promise((resolve) => {
@@ -153,6 +153,17 @@ export function startDashboardServer(preferredPort = 4198) {
                         return;
                     }
                     const result = await synthesizeNextSteps(repo, true);
+                    sendJson(res, result);
+                    return;
+                }
+                if (pathname === "/api/next-steps/cancel" && req.method === "POST") {
+                    const body = await parseJsonBody(req);
+                    const repo = body.repo_path || body.repo;
+                    if (!repo) {
+                        sendJson(res, { error: "Missing repo parameter" }, 400);
+                        return;
+                    }
+                    const result = await cancelSynthesis(repo);
                     sendJson(res, result);
                     return;
                 }

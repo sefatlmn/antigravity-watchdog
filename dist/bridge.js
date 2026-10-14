@@ -96,6 +96,9 @@ export async function synthesizeNextSteps(repo, force = false) {
         args.push("--force");
     return runCtlJson(args);
 }
+export async function cancelSynthesis(repo) {
+    return runCtlJson(["cancel-synthesis", "--repo", repo]);
+}
 export async function triggerStopHook(payload) {
     const py = getPythonBin();
     const jsonStr = JSON.stringify(payload);
