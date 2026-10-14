@@ -1571,6 +1571,255 @@ flowchart TD
 
 
 
+def complete_synthesis(repo_root: Path) -> Dict[str, Any]:
+    """
+    Mark on-demand agent next-steps synthesis complete.
+    """
+    ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+    ns_dir.mkdir(parents=True, exist_ok=True)
+    state_file = ns_dir / "synthesis_state.json"
+    state_data = {
+        "status": "ready",
+        "completedAt": now_iso(),
+    }
+    state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+    return {"ok": True, "status": "ready"}
+
+
+def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
+    """
+    Check if a background synthesizer agent is currently running or completed.
+    """
+    ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+    state_file = ns_dir / "synthesis_state.json"
+    proposals_file = ns_dir / "proposals.json"
+
+    is_synthesizing = False
+    if state_file.exists():
+        try:
+            s_data = json.loads(state_file.read_text(encoding="utf-8"))
+            if s_data.get("status") == "synthesizing":
+                started_str = s_data.get("startedAt", "")
+                if started_str:
+                    try:
+                        started_dt = datetime.datetime.fromisoformat(started_str)
+                        # 90-second safety timeout
+                        if (datetime.datetime.now(datetime.timezone.utc) - started_dt).total_seconds() > 90:
+                            complete_synthesis(repo_root)
+                        else:
+                            is_synthesizing = True
+                    except Exception:
+                        is_synthesizing = True
+                else:
+                    is_synthesizing = True
+        except Exception:
+            pass
+
+    proposals = []
+    goal_data = load_goal(repo_root)
+    if proposals_file.exists():
+        try:
+            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
+            proposals = p_data.get("proposals", [])
+            if p_data.get("goal"):
+                goal_data = p_data["goal"]
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "synthesizing": is_synthesizing,
+        "proposals": proposals,
+        "goal": goal_data,
+        "conversationsCount": len(get_project_conversations(repo_root)),
+    }
+
+
+def dispatch_synthesis_agent(repo_root: Path) -> Dict[str, Any]:
+    """
+    Dispatch an on-demand Antigravity background agent via AgentAPI to synthesize
+    4 small, focused, useful feature additions and improvements conforming to the /plan standard.
+    """
+    ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+    ns_dir.mkdir(parents=True, exist_ok=True)
+    state_file = ns_dir / "synthesis_state.json"
+
+    youngest, recent = get_youngest_commit(repo_root, limit=15)
+    if not youngest:
+        return {"ok": False, "error": "No commits found in repository."}
+
+    head_sha = youngest["sha"]
+    short_sha = youngest["short_sha"]
+    subject = youngest["subject"]
+
+    handoff = discover_project_handoff_and_specs(repo_root)
+    manifest = discover_project_manifests(repo_root)
+    codebase = deep_analyze_codebase(repo_root, head_sha=head_sha)
+    convs = get_project_conversations(repo_root)
+    chat_intel = deep_analyze_conversations(repo_root, convs)
+    goal_data = load_goal(repo_root)
+    goal_text = goal_data.get("goal") or f"Develop and maintain {repo_root.name}"
+
+    # Mark state as synthesizing
+    state_data = {
+        "status": "synthesizing",
+        "startedAt": now_iso(),
+        "commitSha": head_sha,
+        "shortSha": short_sha,
+    }
+    state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+    # Format completed commits (anti-repetition mandate!)
+    commits_lines = []
+    for c in recent[:15]:
+        commits_lines.append(f"- Commit {c['short_sha']} ({c.get('date', '')}): {c['subject']}")
+    formatted_commits = "\n".join(commits_lines) if commits_lines else f"- {short_sha}: {subject}"
+
+    # Format recent user requests
+    requests_lines = []
+    for r in chat_intel.get("all_requests", [])[:8]:
+        requests_lines.append(f"- User request: {r}")
+    formatted_requests = "\n".join(requests_lines) if requests_lines else "None recorded."
+
+    test_cmd = manifest.get("test_command") or ("pytest" if "Python" in codebase["languages"] else ("npm test" if manifest.get("manifest_type") == "npm" else "python3 -m py_compile scripts/qa_ctl.py"))
+    ctl_script_path = str(Path(__file__).resolve())
+
+    prompt = f"""[NEXT-STEPS-SYNTHESIZER-SESSION]
+You are the autonomous Next Steps Architect for this repository: {str(repo_root)}
+
+Your mission is to perform a deep analysis of what was ALREADY BUILT versus what is logically needed next, and formulate exactly 4 small, focused, useful feature additions or improvements (slightly feature-preferred, with flexible categories).
+
+### CRITICAL RULE: DO NOT RE-PROPOSE COMPLETED WORK
+The following commits were ALREADY IMPLEMENTED AND MERGED into this project. Under no circumstances should you propose doing any of these again:
+{formatted_commits}
+
+The following requests were already addressed in recent conversations:
+{formatted_requests}
+
+### Project Purpose & Vision
+- Primary Goal: {goal_text}
+- Goal Source: {goal_data.get('source')}
+- Specs / Handoff: {handoff['rel_path'] if handoff.get('found') else 'None'}
+- Tech Stack: {', '.join(manifest.get('tech_stack', [])) or 'Detected from code'}
+- Automated Verification Command: `{test_cmd}`
+
+### Current Codebase Structure
+- Key Entry Points: {', '.join(codebase['entry_points'])}
+- UI Files: {', '.join(codebase['ui_files'][:6]) or 'None'}
+- Core Logic Files: {', '.join(codebase['logic_files'][:6])}
+- Active Code Markers: {len(codebase['todos'])} TODO/FIXME markers
+
+### Proposal Quality Guidelines
+1. Focus & Practicality: Propose small, focused, useful feature additions or changes that make the product immediately better. Avoid giant vague epics or canned placeholders.
+2. Category Balance: Flexible across categories, but slightly feature-focused/preferred (e.g. 2 useful feature additions/shortcuts + 1 robustness/reliability improvement + 1 UX/DX refinement).
+3. Categories to pick from: feature (Milestone), architecture (Architecture), robustness (Robustness), performance (Performance), testing (DX & Tests), security (Security), ux (Polish & UX), api (API & DX).
+4. Specific Titles: Give each proposal a clear, specific, self-explanatory title naming the exact feature, component, or capability being introduced.
+
+### Mandatory Deliverables to Write
+Use your file writing tool to create the following files in `{str(repo_root)}`:
+
+1. `{str(repo_root)}/.antigravity/next_steps/proposals.json`:
+```json
+{{
+  "repo": "{str(repo_root)}",
+  "commitSha": "{head_sha}",
+  "shortSha": "{short_sha}",
+  "goal": {json.dumps(goal_data)},
+  "generatedAt": "{now_iso()}",
+  "proposals": [
+    {{
+      "id": "prop-1-<slug>",
+      "category": "<category>",
+      "badge": "<Badge Name>",
+      "difficulty": "Low" | "Medium" | "High",
+      "estimatedTime": "15m" | "25m" | "35m",
+      "title": "<Specific, actionable title>",
+      "subtitle": "<Clean 1-sentence subtitle>",
+      "summary": "<2-3 sentence grounded summary of why this is valuable now>",
+      "goals": ["<checkbox task 1>", "<checkbox task 2>", "<checkbox task 3>"],
+      "affectedFiles": ["<real file 1>", "<real file 2>"],
+      "planFile": ".antigravity/next_steps/plan-1-<slug>.md",
+      "planPath": "{str(repo_root)}/.antigravity/next_steps/plan-1-<slug>.md",
+      "commitContext": {{ "sha": "{head_sha}", "shortSha": "{short_sha}", "subject": "{subject}" }}
+    }}
+  ]
+}}
+```
+
+2. Exactly 4 implementation plan files:
+- `{str(repo_root)}/.antigravity/next_steps/plan-1-<slug>.md`
+- `{str(repo_root)}/.antigravity/next_steps/plan-2-<slug>.md`
+- `{str(repo_root)}/.antigravity/next_steps/plan-3-<slug>.md`
+- `{str(repo_root)}/.antigravity/next_steps/plan-4-<slug>.md`
+
+Each plan file MUST strictly comply with the /plan standard:
+- Document Title: `# Implementation Plan: <Title>`
+- Context & Evidence summary with commit [`{short_sha}`](file://{str(repo_root)})
+- User Review Required alert (`> [!IMPORTANT]`)
+- Mermaid flowchart (`flowchart TD`)
+- Proposed Changes with clickable `file:///` links and realistic code snippet skeletons
+- Verification Plan with exact automated test command (`{test_cmd}`) and manual verification steps
+- ZERO EMOJIS in all markdown files!
+
+3. When all 5 files are written, run this completion command:
+```bash
+python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
+```
+"""
+
+    env = get_cached_ls_env()
+    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+    title = f"Next Steps Synthesizer: {repo_root.name} @ {short_sha}"
+
+    dispatched = False
+    conv_id = None
+    if Path(agentapi_bin).exists():
+        if "language_server" in Path(agentapi_bin).name:
+            cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
+        else:
+            cmd = [agentapi_bin, "new-conversation", f"--title={title}", prompt]
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(repo_root),
+                env=env,
+                timeout=12,
+            )
+            if proc.returncode == 0:
+                dispatched = True
+                try:
+                    data = json.loads(proc.stdout)
+                    conv_id = data.get("conversationId") or data.get("response", {}).get("conversationId")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if not dispatched:
+        # Fallback to local deterministic synthesis if AgentAPI is not running
+        res = synthesize_next_steps(repo_root, force=True)
+        complete_synthesis(repo_root)
+        return {
+            "ok": True,
+            "status": "ready",
+            "dispatched": False,
+            "proposals": res.get("proposals", []),
+            "goal": goal_data,
+        }
+
+    return {
+        "ok": True,
+        "status": "synthesizing",
+        "dispatched": True,
+        "conversationId": conv_id,
+        "startedAt": state_data["startedAt"],
+    }
+
+
+
 def spawn_plan_agent(repo_root: Path, plan_title: str, plan_markdown: str) -> Optional[str]:
     """
     Launch a background Antigravity agent conversation to execute a Next Steps plan.
@@ -2491,6 +2740,15 @@ def main() -> int:
     p_ns.add_argument("--force", action="store_true")
     p_ns.add_argument("--json", action="store_true")
 
+    p_disp_ns = sub.add_parser("dispatch-synthesis", help="Dispatch an on-demand agent to synthesize next steps")
+    p_disp_ns.add_argument("--repo", required=True)
+
+    p_chk_ns = sub.add_parser("check-synthesis", help="Check status of next steps synthesis and return proposals")
+    p_chk_ns.add_argument("--repo", required=True)
+
+    p_cmp_ns = sub.add_parser("complete-synthesis", help="Mark next steps synthesis as completed")
+    p_cmp_ns.add_argument("--repo", required=True)
+
     p_goal = sub.add_parser("goal", help="Get or set project goal")
     p_goal.add_argument("--repo", required=True)
     p_goal.add_argument("--set", dest="set_goal", default="")
@@ -2671,6 +2929,24 @@ def main() -> int:
     if args.cmd == "next-steps":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve()
         res = synthesize_next_steps(root, force=args.force)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "dispatch-synthesis":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        res = dispatch_synthesis_agent(root)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "check-synthesis":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        res = check_synthesis_status(root)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "complete-synthesis":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        res = complete_synthesis(root)
         print(json.dumps(res, indent=2))
         return 0
 

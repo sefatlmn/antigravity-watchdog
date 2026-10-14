@@ -530,6 +530,19 @@ function renderNextSteps(activeRepo) {
     // 4. Proposals List
     const proposalsList = $('proposals-list');
     if (proposalsList) {
+      if (activeRepo.synthesizing) {
+        proposalsList.innerHTML = `
+          <div class="proposals-loading-state">
+            <div class="loading-spinner"></div>
+            <div class="loading-label-group">
+              <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
+              <span class="loading-label-sub muted small">Synthesizing 4 pragmatic implementation plans</span>
+            </div>
+          </div>
+        `;
+        setTimeout(() => refreshProposals(true), 50);
+        return;
+      }
       if (proposals.length === 0) {
         proposalsList.innerHTML = `
           <div class="empty-state">
@@ -539,7 +552,7 @@ function renderNextSteps(activeRepo) {
         `;
         const synthBtn = $('btn-synthesize-now');
         if (synthBtn) {
-          synthBtn.addEventListener('click', refreshProposals);
+          synthBtn.addEventListener('click', () => refreshProposals(false));
         }
       } else {
         proposalsList.innerHTML = proposals.map((p) => {
@@ -604,10 +617,13 @@ function renderNextSteps(activeRepo) {
   }
 }
 
-async function refreshProposals() {
+async function refreshProposals(skipDispatch = false) {
   const activeRepo = getActiveRepo();
   if (!activeRepo) {
     toast('No repository detected.', true);
+    return;
+  }
+  if (isRefreshingProposals) {
     return;
   }
   const refreshBtn = $('btn-refresh-proposals');
@@ -623,24 +639,62 @@ async function refreshProposals() {
         <div class="proposals-loading-state">
           <div class="loading-spinner"></div>
           <div class="loading-label-group">
-            <span class="loading-label-title">Evaluating codebase &amp; goals…</span>
-            <span class="loading-label-sub muted small">Synthesizing 4 structured implementation plans</span>
+            <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
+            <span class="loading-label-sub muted small">Synthesizing 4 pragmatic implementation plans</span>
           </div>
         </div>
       `;
     }
-    toast('Evaluating codebase and synthesizing plans…');
-    const res = await callApi('/api/next-steps/refresh', { body: { repo: activeRepo.repoPath } });
-    if (res.ok && res.proposals) {
-      activeRepo.proposals = res.proposals;
-      if (res.goal) activeRepo.goal = res.goal;
-      if (res.repoDetails) {
-        if (res.repoDetails.head) activeRepo.head = res.repoDetails.head;
-        if (res.repoDetails.youngestCommit) activeRepo.youngestCommit = res.repoDetails.youngestCommit;
+
+    if (!skipDispatch) {
+      toast('Evaluating codebase and synthesizing plans…');
+      const res = await callApi('/api/next-steps/refresh', { body: { repo: activeRepo.repoPath } });
+      if (!res.ok) {
+        toast(res.error || 'Failed to dispatch synthesis agent', true);
+        return;
       }
-      toast('Synthesized 4 next steps');
+      if (res.status === 'ready' && res.proposals) {
+        activeRepo.proposals = res.proposals;
+        if (res.goal) activeRepo.goal = res.goal;
+        activeRepo.synthesizing = false;
+        toast('Synthesized 4 next steps');
+        return;
+      }
     } else {
-      toast(res.error || 'Failed to synthesize proposals', true);
+      toast('Agent synthesis currently in progress…');
+    }
+
+    // Background agent is synthesizing, poll for completion every 2s
+    const pollInterval = 2000;
+    const maxPolls = 40; // ~80s
+    let finished = false;
+
+    for (let i = 0; i < maxPolls; i++) {
+      await new Promise((r) => setTimeout(r, pollInterval));
+      try {
+        const check = await callApi('/api/next-steps', { body: { repo: activeRepo.repoPath } });
+        if (check.ok && check.synthesizing === false && Array.isArray(check.proposals) && check.proposals.length > 0) {
+          activeRepo.proposals = check.proposals;
+          if (check.goal) activeRepo.goal = check.goal;
+          activeRepo.synthesizing = false;
+          finished = true;
+          toast('Synthesized 4 next steps');
+          break;
+        }
+      } catch (pollErr) {
+        console.warn('Synthesis poll error:', pollErr);
+      }
+    }
+
+    if (!finished) {
+      const finalCheck = await callApi('/api/next-steps', { body: { repo: activeRepo.repoPath } });
+      if (finalCheck.ok && Array.isArray(finalCheck.proposals) && finalCheck.proposals.length > 0) {
+        activeRepo.proposals = finalCheck.proposals;
+        if (finalCheck.goal) activeRepo.goal = finalCheck.goal;
+        activeRepo.synthesizing = Boolean(finalCheck.synthesizing);
+      } else {
+        toast('Agent synthesis is still in progress in background.', false);
+      }
     }
   } catch (err) {
     toast(`Synthesis error: ${err.message}`, true);
@@ -1020,7 +1074,7 @@ async function init() {
 
   // Next Steps refresh
   const btnRefreshProposals = $('btn-refresh-proposals');
-  if (btnRefreshProposals) btnRefreshProposals.addEventListener('click', refreshProposals);
+  if (btnRefreshProposals) btnRefreshProposals.addEventListener('click', () => refreshProposals(false));
 
   // Proposal cards actions delegation
   const propList = $('proposals-list');

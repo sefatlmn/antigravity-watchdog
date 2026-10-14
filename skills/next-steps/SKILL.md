@@ -39,6 +39,17 @@ Instead of forcing rigid static categories, the synthesizer evaluates scoring si
 - `ux` (Polish & UX): Layout polish, feedback states, loading spinners, and design token consistency.
 - `api` (API & DX): CLI ergonomics, flag validation, API contracts, and developer documentation.
 
+## On-Demand Execution & Anti-Repetition Guardrail
+
+Next Steps synthesis is triggered on-demand directly from the Watchdog auxiliary pane (via the Refresh action) rather than on every commit or in-chat commands.
+
+When triggered:
+1. The Watchdog backend gathers the last 15 commits, recent user chat directives, active specifications (`PRODUCT.md`, `HANDOFF.md`, `README.md`), and AST structure.
+2. An autonomous background synthesizer agent is dispatched with an explicit **Anti-Repetition Mandate**: all recent commits and chat directives are flagged as `ALREADY COMPLETED WORK (DO NOT RE-PROPOSE)`.
+3. The agent crafts 4 pragmatic, high-value, forward-looking improvements (slightly feature-preferred) and writes `.antigravity/next_steps/proposals.json` and 4 `/plan` markdown files.
+4. When finished, the agent signals completion via `qa_ctl.py complete-synthesis --repo <repo>`.
+5. The Watchdog aux pane polls the state and smoothly renders the updated proposals.
+
 ## Plan Formulation Standard
 
 Each proposal writes a complete implementation plan to `.antigravity/next_steps/plan-<id>-<slug>.md`:
@@ -46,3 +57,4 @@ Each proposal writes a complete implementation plan to `.antigravity/next_steps/
 - Contains Mermaid flowcharts, absolute clickable `file:///` links, and realistic implementation code diff blocks.
 - Employs project-specific automated test commands and manual verification checklists.
 - Can be launched with 1 click via Antigravity AgentAPI (`agentapi new-conversation`).
+- Maintains a strict zero-emoji policy across all generated files and plans.

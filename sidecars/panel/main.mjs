@@ -326,6 +326,18 @@ function inspectSingleRepo(topLevel) {
       // ignore
     }
   }
+  let synthesizing = false;
+  const synthStateFile = join(nextStepsDir, 'synthesis_state.json');
+  if (existsSync(synthStateFile)) {
+    try {
+      const sData = JSON.parse(readFileSync(synthStateFile, 'utf8'));
+      if (sData.status === 'synthesizing') {
+        synthesizing = true;
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   return {
     repoPath: topLevel,
@@ -349,6 +361,7 @@ function inspectSingleRepo(topLevel) {
     reports,
     goal,
     proposals,
+    synthesizing,
   };
 }
 
@@ -576,7 +589,7 @@ app.api('/api/archive-job', (data) => {
   return { ok: true, jobId, archived };
 });
 
-// POST /api/next-steps { repo, force? }
+// POST /api/next-steps { repo }
 app.api('/api/next-steps', (data) => {
   const repo = String(data?.repo || '').trim();
   if (!repo) {
@@ -585,9 +598,7 @@ app.api('/api/next-steps', (data) => {
       contentType: 'application/json',
     });
   }
-  const args = ['next-steps', '--repo', repo, '--json'];
-  if (data?.force) args.push('--force');
-  return runPythonCtl(args);
+  return runPythonCtl(['check-synthesis', '--repo', repo]);
 });
 
 // POST /api/next-steps/refresh { repo }
@@ -599,12 +610,7 @@ app.api('/api/next-steps/refresh', (data) => {
       contentType: 'application/json',
     });
   }
-  const result = runPythonCtl(['next-steps', '--repo', repo, '--force', '--json']);
-  const repoDetails = inspectSingleRepo(repo);
-  return {
-    ...result,
-    repoDetails,
-  };
+  return runPythonCtl(['dispatch-synthesis', '--repo', repo]);
 });
 
 // POST /api/next-steps/goal { repo, goal?, clear? }

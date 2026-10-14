@@ -5,7 +5,7 @@ The **QA Watchdog** plugin monitors completed coding tasks, dispatches independe
 ## Guidelines for Coding Conversations
 - **Never manually trigger recursive reviews or plans**:
   - Commits containing `[auto-review]`, `[qa-watchdog]`, or `[skip-qa]` in the commit message are ignored by the QA Watchdog hook.
-  - Conversations containing `[NEXT-STEPS-SESSION]` or `[QA-WATCHDOG-SESSION]` do not trigger recursive cycles.
+  - Conversations containing `[NEXT-STEPS-SESSION]`, `[NEXT-STEPS-SYNTHESIZER-SESSION]`, or `[QA-WATCHDOG-SESSION]` do not trigger recursive cycles.
 - **Audit Reports & Fix Branches**:
   - Completed QA audit reports are saved to `.antigravity/audits/review-<short_sha>.md` (and `.json`).
   - When the QA Watchdog fixes reproducible bugs, it commits them to an isolated branch named `fix/qa-<short_sha>` without modifying your active working tree or current branch.

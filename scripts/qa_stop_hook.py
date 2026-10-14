@@ -36,7 +36,7 @@ def is_qa_watchdog_conversation(payload: Dict[str, Any], state: Dict[str, Any]) 
             try:
                 with open(tp, "r", encoding="utf-8", errors="ignore") as fp:
                     head = fp.read(16384)
-                if "[QA-WATCHDOG-SESSION]" in head or "[NEXT-STEPS-SESSION]" in head:
+                if "[QA-WATCHDOG-SESSION]" in head or "[NEXT-STEPS-SESSION]" in head or "[NEXT-STEPS-SYNTHESIZER-SESSION]" in head:
                     return True
             except Exception:
                 pass
