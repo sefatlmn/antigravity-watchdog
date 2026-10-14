@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+
+# Antigravity & Watchdog Local Telemetry
+.antigravity/
+qa_watchdog/worktrees/
+*.log
+
+# Environment & Credentials
+.env
+.env.local
+.env.*.local

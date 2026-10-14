@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Watchdog &amp; Next Steps</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/styles.css?v=11">
+  <script src="/preload.js"></script>
+</head>
+<body>
+  <main class="panel">
+    <!-- Minimalist Header -->
+    <header class="header">
+      <div class="header-title">
+        <span class="icon"><svg class="icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
+        <h1>Watchdog</h1>
+      </div>
+      <div class="header-actions">
+        <button id="btn-status-pill" type="button" class="pill ok" title="Click to pause or resume automatic audits">
+          <span class="dot"></span>
+          <span id="status-text">Active</span>
+        </button>
+        <button id="btn-sync" type="button" class="icon-btn" title="Sync Git history &amp; refresh"><svg class="icon-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg></button>
+      </div>
+    </header>
+
+    <!-- Active Project & Latest Commit Header Card -->
+    <section class="card current-project">
+      <div class="project-header">
+        <div class="project-title-group">
+          <span id="repo-name" class="repo-name">Detecting project…</span>
+          <span id="repo-branch" class="branch-tag">–</span>
+        </div>
+        <select id="select-repo" class="repo-select" hidden title="Switch repository"></select>
+      </div>
+
+      <div id="latest-commit-details" class="commit-info">
+        <div class="commit-row">
+          <span class="commit-label">Latest:</span>
+          <code id="commit-sha" class="commit-sha">–</code>
+          <span id="commit-tag-badge" class="applied-badge small-applied-tag" hidden>Applied Fix</span>
+          <span id="commit-subject" class="commit-subject">Scanning repository…</span>
+        </div>
+        <span id="commit-time" class="commit-time muted"></span>
+      </div>
+    </section>
+
+    <!-- Dual Tab Switcher -->
+    <nav class="tab-switcher" role="tablist" aria-label="Views">
+      <button id="tab-btn-audits" type="button" role="tab" class="tab-btn active" aria-selected="true" aria-controls="tab-pane-audits" onclick="switchTab('audits')">
+        <span class="tab-icon"><svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+        <span class="tab-title">Audits</span>
+        <span id="tab-badge-audits" class="tab-badge" hidden>0</span>
+      </button>
+      <button id="tab-btn-next-steps" type="button" role="tab" class="tab-btn" aria-selected="false" aria-controls="tab-pane-next-steps" onclick="switchTab('next-steps')">
+        <span class="tab-icon"><svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
+        <span class="tab-title">Next Steps</span>
+        <span id="tab-badge-proposals" class="tab-badge">4</span>
+      </button>
+    </nav>
+
+    <!-- TAB PANE 1: AUDITS -->
+    <div id="tab-pane-audits" class="tab-pane active" role="tabpanel" aria-labelledby="tab-btn-audits">
+      <!-- Audit Trigger Action Card -->
+      <section class="card audit-action-card">
+        <div class="audit-comment-wrap">
+          <input
+            id="input-audit-comment"
+            type="text"
+            class="audit-comment-input"
+            placeholder="Add a comment or focus note for this audit…"
+            aria-label="Audit comment"
+            autocomplete="off"
+          />
+        </div>
+
+        <button id="btn-run-qa" type="button" class="btn primary-btn">
+          <span id="btn-run-qa-icon" class="btn-icon"><svg class="icon-svg" width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></span>
+          <span id="btn-run-qa-text">Audit Latest Commit</span>
+        </button>
+      </section>
+
+      <!-- Recent Audits List -->
+      <section class="audits-section">
+        <div class="section-header">
+          <h2>Recent Audits</h2>
+          <span id="audits-count" class="muted small">0</span>
+        </div>
+        <div id="jobs-list" class="jobs-list">
+          <div class="empty-state">
+            <p class="muted">No audits recorded yet.</p>
+            <span class="small muted">Audits run automatically after coding turns, or click above to audit now.</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Collapsible Archived Audits Section -->
+      <details id="archive-details" class="archive-details" hidden>
+        <summary class="archive-summary">
+          <div class="archive-summary-title">
+            <span class="chevron"><svg class="icon-svg chevron-svg" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span>
+            <h2>Archived Audits</h2>
+          </div>
+          <span id="archived-count" class="muted small">0</span>
+        </summary>
+        <div id="archived-jobs-list" class="jobs-list archive-jobs-list"></div>
+      </details>
+
+      <!-- Inline Report Reader (Slides in when viewed) -->
+      <section id="report-card" class="card report-card" hidden>
+        <div class="report-header">
+          <div class="report-title-group">
+            <span class="icon"><svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></span>
+            <h2 id="report-title">Audit Report</h2>
+          </div>
+          <div class="report-actions">
+            <button id="btn-send-report-chat" type="button" class="btn small-btn secondary" title="Send findings to conversation">Send to Chat</button>
+            <button id="btn-close-report" type="button" class="icon-btn close-btn" title="Close report"><svg class="icon-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          </div>
+        </div>
+        <div id="report-content" class="report-body"></div>
+      </section>
+    </div>
+
+    <!-- TAB PANE 2: NEXT STEPS -->
+    <div id="tab-pane-next-steps" class="tab-pane" role="tabpanel" aria-labelledby="tab-btn-next-steps" hidden>
+      <!-- Goal Banner Card -->
+      <section class="card goal-card">
+        <div class="goal-header">
+          <div class="goal-title-group">
+            <span class="icon"><svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></span>
+            <h2>Project Goal &amp; Direction</h2>
+            <span id="ns-goal-source" class="source-tag">README.md</span>
+          </div>
+          <button id="btn-edit-goal" type="button" class="btn small-btn secondary" title="Edit project goal">Edit</button>
+        </div>
+
+        <div id="ns-goal-view" class="goal-view">
+          <p id="ns-goal-text" class="goal-text">Detecting project goal…</p>
+        </div>
+
+        <form id="ns-goal-edit-form" class="goal-edit-form" hidden>
+          <textarea id="input-goal" class="goal-textarea" rows="2" placeholder="Define the primary goal or milestone for this project…"></textarea>
+          <div class="goal-edit-actions">
+            <button id="btn-save-goal" type="submit" class="btn small-btn primary-btn">Save Goal</button>
+            <button id="btn-cancel-goal" type="button" class="btn small-btn secondary">Cancel</button>
+            <button id="btn-clear-goal" type="button" class="btn small-btn secondary text-danger">Reset</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Next Steps Proposals Section -->
+      <section class="proposals-section">
+        <div class="section-header">
+          <div class="section-header-title">
+            <h2>Proposed Next Steps</h2>
+          </div>
+          <div class="section-header-actions">
+            <span id="ns-commit-context" class="muted small"></span>
+            <button id="btn-refresh-proposals" type="button" class="icon-btn" title="Re-synthesize next steps"><svg class="icon-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg></button>
+          </div>
+        </div>
+
+        <div id="proposals-list" class="proposals-list">
+          <div class="empty-state">
+            <p class="muted">Synthesizing next steps…</p>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Plan Reader Modal -->
+    <div id="plan-modal" class="modal-overlay" hidden>
+      <div class="modal-dialog">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <span id="modal-category-badge" class="badge">Milestone</span>
+            <h2 id="modal-plan-title">Implementation Plan</h2>
+          </div>
+          <div class="modal-actions">
+            <button id="modal-btn-execute" type="button" class="btn small-btn primary-btn" title="Launch agent or prepare execution prompt">Execute in Agent</button>
+            <button id="modal-btn-copy" type="button" class="btn small-btn secondary" title="Copy markdown plan">Copy Plan</button>
+            <button id="modal-btn-close" type="button" class="icon-btn close-btn" title="Close plan modal"><svg class="icon-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          </div>
+        </div>
+        <div id="modal-plan-content" class="modal-body markdown-rendered"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </main>
+
+  <script src="/app.js?v=11"></script>
+</body>
+</html>

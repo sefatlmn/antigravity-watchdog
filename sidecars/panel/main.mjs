@@ -1,0 +1,669 @@
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { Response, SidecarApp } from 'sidecar_sdk';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const PLUGIN_ROOT = resolve(HERE, '..', '..');
+const QA_CTL_SCRIPT = join(PLUGIN_ROOT, 'scripts', 'qa_ctl.py');
+const WATCHDOG_DIR = join(homedir(), '.gemini', 'antigravity', 'qa_watchdog');
+const STATE_FILE = join(WATCHDOG_DIR, 'state.json');
+
+const EMPTY_TREE_HASH = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+const SKIP_SCAN_DIRS = new Set([
+  '.git',
+  'node_modules',
+  '.antigravity',
+  '.venv',
+  'venv',
+  'dist',
+  'build',
+  '__pycache__',
+  '.next',
+  '.nuxt',
+  'target',
+]);
+const SKIP_TAGS = ['[auto-review]', '[qa-watchdog]', '[skip-qa]'];
+
+const app = new SidecarApp();
+
+const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
+
+app.page('/', () => readLocal('index.html'));
+app.page('/app.js', () => readLocal('app.js'));
+app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
+
+function runPythonCtl(args) {
+  const candidates = ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', 'python3'];
+  let lastErr = null;
+  for (const bin of candidates) {
+    try {
+      const out = execFileSync(bin, [QA_CTL_SCRIPT, ...args], {
+        encoding: 'utf8',
+        timeout: 20000,
+      });
+      return JSON.parse(out.trim() || '{}');
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        lastErr = err;
+        continue;
+      }
+      if (err.stdout) {
+        try {
+          return JSON.parse(String(err.stdout).trim());
+        } catch {
+          // fall through
+        }
+      }
+      throw new Error(err.stderr ? String(err.stderr).trim() : err.message);
+    }
+  }
+  throw lastErr || new Error('python3 not found');
+}
+
+function runGit(repoPath, args) {
+  try {
+    return execFileSync('git', ['-C', repoPath, ...args], {
+      encoding: 'utf8',
+      timeout: 8000,
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+function loadState() {
+  mkdirSync(WATCHDOG_DIR, { recursive: true });
+  if (!existsSync(STATE_FILE)) {
+    return {
+      paused: false,
+      auto_dispatch: true,
+      skip_docs_only: true,
+      repos: {},
+      jobs: [],
+    };
+  }
+  try {
+    return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return {
+      paused: false,
+      auto_dispatch: true,
+      skip_docs_only: true,
+      repos: {},
+      jobs: [],
+    };
+  }
+}
+
+function saveStatePatch(patch) {
+  const current = loadState();
+  const next = { ...current, ...patch };
+  mkdirSync(WATCHDOG_DIR, { recursive: true });
+  writeFileSync(STATE_FILE, JSON.stringify(next, null, 2), 'utf8');
+  return next;
+}
+
+function getRepoRecentCommits(repoPath, limit = 12) {
+  const fmt = '%H\x1f%h\x1f%ct\x1f%cr\x1f%an\x1f%T\x1f%s';
+  const raw = runGit(repoPath, [
+    'log',
+    '--exclude=fix/qa-*',
+    '--branches',
+    '--tags',
+    'HEAD',
+    '--date-order',
+    `-n${limit * 2}`,
+    `--format=${fmt}`,
+  ]);
+  if (!raw) return [];
+
+  const commits = [];
+  const seen = new Set();
+  for (const line of raw.split('\n')) {
+    const parts = line.trim().split('\x1f');
+    if (parts.length < 7) continue;
+    const [sha, shortSha, tsStr, relativeTime, author, treeHash, subject] = parts;
+    if (!sha || seen.has(sha)) continue;
+    seen.add(sha);
+    const timestamp = parseInt(tsStr, 10) || 0;
+    const isEmptyTree = treeHash === EMPTY_TREE_HASH;
+    const isAutoReview = SKIP_TAGS.some((tag) => subject.includes(tag));
+    commits.push({
+      sha,
+      shortSha,
+      timestamp,
+      committedAt: timestamp ? new Date(timestamp * 1000).toISOString() : '',
+      relativeTime,
+      author,
+      treeHash,
+      isEmptyTree,
+      subject,
+      isAutoReview,
+    });
+  }
+
+  commits.sort((a, b) => {
+    const neA = a.isEmptyTree ? 0 : 1;
+    const neB = b.isEmptyTree ? 0 : 1;
+    if (neA !== neB) return neB - neA;
+    return b.timestamp - a.timestamp;
+  });
+
+  return commits.slice(0, limit);
+}
+
+function discoverCandidateGitRoots(uriOrPath) {
+  if (!uriOrPath) return [];
+  let fsPath = String(uriOrPath);
+  if (fsPath.startsWith('file://')) {
+    try {
+      fsPath = fileURLToPath(fsPath);
+    } catch {
+      return [];
+    }
+  }
+  if (!existsSync(fsPath)) return [];
+
+  const candidates = [];
+  const seen = new Set();
+
+  const directRoot = runGit(fsPath, ['rev-parse', '--show-toplevel']);
+  if (directRoot) {
+    const resolved = resolve(directRoot);
+    if (!resolved.includes('qa_watchdog/worktrees') && !resolved.includes('.antigravity/worktrees')) {
+      candidates.push(resolved);
+      seen.add(resolved);
+    }
+  }
+
+  const scanDir = (dirPath, depth) => {
+    if (depth > 3) return;
+    try {
+      for (const entry of readdirSync(dirPath, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name.startsWith('.') || SKIP_SCAN_DIRS.has(entry.name)) {
+          continue;
+        }
+        const childPath = join(dirPath, entry.name);
+        if (existsSync(join(childPath, '.git'))) {
+          const resolved = resolve(childPath);
+          if (!seen.has(resolved) && !resolved.includes('qa_watchdog/worktrees')) {
+            seen.add(resolved);
+            candidates.push(resolved);
+          }
+        } else {
+          scanDir(childPath, depth + 1);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  scanDir(resolve(fsPath), 1);
+  return candidates;
+}
+
+const DOC_EXTS = new Set([
+  '.md', '.markdown', '.mdown', '.mkdn', '.txt', '.rst', '.adoc', '.asciidoc',
+  '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.bmp'
+]);
+const DOC_FILENAMES = new Set([
+  'readme', 'license', 'licence', 'copying', 'changelog', 'changes', 'history',
+  'contributing', 'code_of_conduct', 'security', 'authors', 'contributors',
+  '.gitignore', '.gitattributes', '.gitmodules', '.editorconfig',
+  '.prettierignore', '.eslintignore', '.npmignore', '.dockerignore', '.mailmap'
+]);
+
+function isDocsOnlyCommit(repoPath, sha, subject = '') {
+  const s = (subject || '').trim().toLowerCase();
+  const isDocsConventionalCommit = /^docs?(\([^)]+\))?:/i.test(s);
+
+  const out = runGit(repoPath, ['show', '--pretty=', '--name-only', sha]);
+  if (!out) return false;
+  const files = out.split('\n').map((str) => str.trim()).filter(Boolean);
+  if (files.length === 0) return true;
+
+  for (const f of files) {
+    if (f.startsWith('.antigravity/')) continue;
+    const baseName = f.split('/').pop().toLowerCase();
+    const nameWithoutExt = baseName.replace(/\.[^.]+$/, '');
+    const ext = baseName.includes('.') ? '.' + baseName.split('.').pop() : '';
+
+    if (DOC_FILENAMES.has(baseName) || DOC_FILENAMES.has(nameWithoutExt)) continue;
+    if (ext && DOC_EXTS.has(ext)) continue;
+
+    if (baseName === 'package.json' && isDocsConventionalCommit) {
+      const pkgDiff = runGit(repoPath, ['diff', '-U0', `${sha}~1..${sha}`, '--', f]);
+      if (pkgDiff) {
+        const addedRemoved = pkgDiff
+          .split('\n')
+          .filter((l) => (l.startsWith('+') || l.startsWith('-')) && !l.startsWith('+++') && !l.startsWith('---'))
+          .join('\n');
+        const touchesCode = /"(dependencies|devDependencies|peerDependencies|scripts|main|module|exports)"/i.test(addedRemoved);
+        if (!touchesCode) continue;
+      }
+    }
+
+    return false;
+  }
+  return true;
+}
+
+function inspectSingleRepo(topLevel) {
+  const recentCommits = getRepoRecentCommits(topLevel, 12);
+  if (recentCommits.length === 0) return null;
+
+  const youngest = recentCommits[0];
+  const isDocsOnly = isDocsOnlyCommit(topLevel, youngest.sha, youngest.subject);
+  youngest.isDocsOnly = isDocsOnly;
+
+  const branch = runGit(topLevel, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'HEAD';
+  const fixBranchesRaw = runGit(topLevel, ['branch', '--list', 'fix/qa-*', '--format=%(refname:short)']);
+  const fixBranches = fixBranchesRaw ? fixBranchesRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+
+  const auditsDir = join(topLevel, '.antigravity', 'audits');
+  const reports = [];
+  if (existsSync(auditsDir)) {
+    try {
+      const files = readdirSync(auditsDir)
+        .filter((f) => f.startsWith('review-') && f.endsWith('.md'))
+        .map((f) => {
+          const full = join(auditsDir, f);
+          const st = statSync(full);
+          return {
+            name: f,
+            shortSha: f.replace(/^review-/, '').replace(/\.md$/, ''),
+            path: full,
+            updatedAt: st.mtime.toISOString(),
+            mtimeMs: st.mtimeMs,
+          };
+        })
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      reports.push(...files.slice(0, 15));
+    } catch {
+      // ignore
+    }
+  }
+
+  const nextStepsDir = join(topLevel, '.antigravity', 'next_steps');
+  const proposalsFile = join(nextStepsDir, 'proposals.json');
+  let proposals = [];
+  let goal = null;
+  if (existsSync(proposalsFile)) {
+    try {
+      const pData = JSON.parse(readFileSync(proposalsFile, 'utf8'));
+      proposals = Array.isArray(pData.proposals) ? pData.proposals : [];
+      if (pData.goal) goal = pData.goal;
+    } catch {
+      // ignore
+    }
+  }
+  const goalFile = join(nextStepsDir, 'goal.json');
+  if (!goal && existsSync(goalFile)) {
+    try {
+      goal = JSON.parse(readFileSync(goalFile, 'utf8'));
+    } catch {
+      // ignore
+    }
+  }
+
+  return {
+    repoPath: topLevel,
+    repoName: topLevel.split(/[\\/]/).pop() || topLevel,
+    branch,
+    head: {
+      sha: youngest.sha,
+      shortSha: youngest.shortSha,
+      subject: youngest.subject,
+      relativeTime: youngest.relativeTime,
+      committedAt: youngest.committedAt,
+      timestamp: youngest.timestamp,
+      author: youngest.author,
+      isEmptyTree: youngest.isEmptyTree,
+      isAutoReview: Boolean(youngest.isAutoReview),
+      isDocsOnly: Boolean(isDocsOnly),
+    },
+    youngestCommit: youngest,
+    recentCommits,
+    fixBranches,
+    reports,
+    goal,
+    proposals,
+  };
+}
+
+function collectActiveRepos(uris, state) {
+  const roots = [];
+  const seen = new Set();
+
+  for (const u of uris) {
+    for (const root of discoverCandidateGitRoots(u)) {
+      if (!seen.has(root)) {
+        seen.add(root);
+        roots.push(root);
+      }
+    }
+  }
+
+  if (roots.length === 0 && state.repos) {
+    for (const repoPath of Object.keys(state.repos)) {
+      for (const root of discoverCandidateGitRoots(repoPath)) {
+        if (!seen.has(root)) {
+          seen.add(root);
+          roots.push(root);
+        }
+      }
+    }
+  }
+
+  let repos = roots.map((r) => inspectSingleRepo(r)).filter(Boolean);
+
+  // Drop empty-tree outer wrapper repos if any non-empty repo exists
+  const hasNonEmpty = repos.some((r) => !r.head?.isEmptyTree);
+  if (hasNonEmpty) {
+    repos = repos.filter((r) => !r.head?.isEmptyTree);
+  }
+
+  // Sort: workspace repos first, non-empty tree first, youngest commit timestamp DESC
+  repos.sort((a, b) => {
+    const inWsA = uris.length > 0 && uris.some((u) => u.includes(a.repoPath) || a.repoPath.includes(u)) ? 1 : 0;
+    const inWsB = uris.length > 0 && uris.some((u) => u.includes(b.repoPath) || b.repoPath.includes(u)) ? 1 : 0;
+    if (inWsA !== inWsB) return inWsB - inWsA;
+
+    const neA = a.head?.isEmptyTree ? 0 : 1;
+    const neB = b.head?.isEmptyTree ? 0 : 1;
+    if (neA !== neB) return neB - neA;
+    return (b.head?.timestamp || 0) - (a.head?.timestamp || 0);
+  });
+
+  return repos;
+}
+
+// POST /api/dashboard { workspaceUris }
+app.api('/api/dashboard', (data) => {
+  const state = loadState();
+  const uris = Array.isArray(data?.workspaceUris) ? data.workspaceUris : [];
+  const activeRepos = collectActiveRepos(uris, state);
+
+  return {
+    paused: Boolean(state.paused),
+    auto_dispatch: state.auto_dispatch !== false,
+    skip_docs_only: state.skip_docs_only !== false,
+    activeRepos,
+    jobs: Array.isArray(state.jobs) ? state.jobs.slice(0, 25) : [],
+  };
+});
+
+// POST /api/sync { repoPath?, workspaceUris? }
+app.api('/api/sync', (data) => {
+  const uris = [];
+  if (data?.repoPath) uris.push(String(data.repoPath).trim());
+  if (Array.isArray(data?.workspaceUris)) {
+    for (const u of data.workspaceUris) {
+      if (! u) continue;
+      let p = String(u);
+      if (p.startsWith('file://')) {
+        try {
+          p = fileURLToPath(p);
+        } catch {
+          continue;
+        }
+      }
+      if (!uris.includes(p)) uris.push(p);
+    }
+  }
+
+  const ctlArgs = ['sync'];
+  for (const u of uris) {
+    ctlArgs.push('--repo', u);
+  }
+  const syncRes = runPythonCtl(ctlArgs);
+  const state = loadState();
+  const activeRepos = collectActiveRepos(uris, state);
+
+  return {
+    ok: true,
+    syncedAt: syncRes.syncedAt || new Date().toISOString(),
+    bestRepo: activeRepos[0] || syncRes.bestRepo || null,
+    youngestCommit: activeRepos[0]?.youngestCommit || syncRes.youngestCommit || null,
+    recentCommits: activeRepos[0]?.recentCommits || syncRes.recentCommits || [],
+    activeRepos,
+    prunedWrapperRepos: syncRes.prunedWrapperRepos || [],
+    jobs: Array.isArray(state.jobs) ? state.jobs.slice(0, 25) : [],
+  };
+});
+
+// POST /api/settings { paused?, auto_dispatch?, skip_docs_only? }
+app.api('/api/settings', (data) => {
+  const patch = {};
+  if (typeof data.paused === 'boolean') patch.paused = data.paused;
+  if (typeof data.auto_dispatch === 'boolean') patch.auto_dispatch = data.auto_dispatch;
+  if (typeof data.skip_docs_only === 'boolean') patch.skip_docs_only = data.skip_docs_only;
+  const updated = saveStatePatch(patch);
+  return {
+    ok: true,
+    paused: Boolean(updated.paused),
+    auto_dispatch: updated.auto_dispatch !== false,
+    skip_docs_only: updated.skip_docs_only !== false,
+  };
+});
+
+// POST /api/trigger { repoPath, sha, comment? }
+app.api('/api/trigger', (data) => {
+  const repoPath = String(data?.repoPath || '').trim();
+  const sha = String(data?.sha || 'YOUNGEST').trim();
+  const comment = String(data?.comment || '').trim();
+  if (!repoPath) {
+    return new Response(JSON.stringify({ error: 'Missing repoPath' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  const ctlArgs = ['queue', '--repo', repoPath, '--sha', sha, '--no-dispatch', '--force'];
+  if (comment) {
+    ctlArgs.push('--comment', comment);
+  }
+  const result = runPythonCtl(ctlArgs);
+  return result;
+});
+
+// POST /api/mark-running { jobId, conversationId? }
+app.api('/api/mark-running', (data) => {
+  const jobId = String(data?.jobId || '');
+  const convId = data?.conversationId ? String(data.conversationId) : null;
+  const state = loadState();
+  for (const j of state.jobs || []) {
+    if (j.id === jobId) {
+      j.status = 'running';
+      j.started_at = new Date().toISOString();
+      j.summary = 'Autonomous Watchdog review in progress…';
+      if (convId) j.conversation_id = convId;
+      break;
+    }
+  }
+  const patch = { jobs: state.jobs };
+  if (convId) {
+    const active = Array.isArray(state.active_qa_conversations) ? state.active_qa_conversations : [];
+    if (!active.includes(convId)) {
+      patch.active_qa_conversations = [...active, convId];
+    }
+  }
+  saveStatePatch(patch);
+  return { ok: true };
+});
+
+// POST /api/dispatch { jobId? }
+app.api('/api/dispatch', (data) => {
+  const jobId = data?.jobId ? String(data.jobId).trim() : '';
+  const args = ['dispatch'];
+  if (jobId) args.push('--job-id', jobId);
+  return runPythonCtl(args);
+});
+
+// POST /api/report { reportPath }
+app.api('/api/report', (data) => {
+  const reportPath = String(data?.reportPath || '').trim();
+  if (!reportPath || !existsSync(reportPath)) {
+    return { exists: false, content: '' };
+  }
+  try {
+    return {
+      exists: true,
+      reportPath,
+      content: readFileSync(reportPath, 'utf8'),
+    };
+  } catch (err) {
+    return { exists: false, error: err.message, content: '' };
+  }
+});
+
+// POST /api/apply-fix { repoPath, sha, mode }
+app.api('/api/apply-fix', (data) => {
+  const repoPath = String(data?.repoPath || '').trim();
+  const sha = String(data?.sha || '').trim();
+  const mode = data?.mode === 'merge' ? 'merge' : 'cherry-pick';
+  if (!repoPath || !sha) {
+    return new Response(JSON.stringify({ error: 'Missing repoPath or sha' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  return runPythonCtl(['apply-fix', '--repo', repoPath, '--sha', sha, '--mode', mode]);
+});
+
+// POST /api/archive-job { jobId, archived }
+app.api('/api/archive-job', (data) => {
+  const jobId = String(data?.jobId || '').trim();
+  const archived = data?.archived !== false;
+  if (!jobId) {
+    return new Response(JSON.stringify({ error: 'Missing jobId' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  const state = loadState();
+  let found = false;
+  for (const j of state.jobs || []) {
+    if (j.id === jobId) {
+      j.archived = archived;
+      found = true;
+      break;
+    }
+  }
+  if (found) {
+    saveStatePatch({ jobs: state.jobs });
+  }
+  return { ok: true, jobId, archived };
+});
+
+// POST /api/next-steps { repo, force? }
+app.api('/api/next-steps', (data) => {
+  const repo = String(data?.repo || '').trim();
+  if (!repo) {
+    return new Response(JSON.stringify({ error: 'Missing repo' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  const args = ['next-steps', '--repo', repo, '--json'];
+  if (data?.force) args.push('--force');
+  return runPythonCtl(args);
+});
+
+// POST /api/next-steps/refresh { repo }
+app.api('/api/next-steps/refresh', (data) => {
+  const repo = String(data?.repo || '').trim();
+  if (!repo) {
+    return new Response(JSON.stringify({ error: 'Missing repo' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  return runPythonCtl(['next-steps', '--repo', repo, '--force', '--json']);
+});
+
+// POST /api/next-steps/goal { repo, goal?, clear? }
+app.api('/api/next-steps/goal', (data) => {
+  const repo = String(data?.repo || '').trim();
+  if (!repo) {
+    return new Response(JSON.stringify({ error: 'Missing repo' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  const args = ['goal', '--repo', repo];
+  if (data?.clear) {
+    args.push('--clear');
+  } else if (data?.goal) {
+    args.push('--set', String(data.goal).trim());
+  }
+  return runPythonCtl(args);
+});
+
+// POST /api/next-steps/conversations { repo }
+app.api('/api/next-steps/conversations', (data) => {
+  const repo = String(data?.repo || '').trim();
+  if (!repo) {
+    return new Response(JSON.stringify({ error: 'Missing repo' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  return runPythonCtl(['conversations', '--repo', repo, '--json']);
+});
+
+// POST /api/next-steps/transcript { conversationId, limit? }
+app.api('/api/next-steps/transcript', (data) => {
+  const cid = String(data?.conversationId || '').trim();
+  if (!cid) {
+    return new Response(JSON.stringify({ error: 'Missing conversationId' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  const limit = parseInt(data?.limit, 10) || 5;
+  return runPythonCtl(['transcript', '--conversation-id', cid, '--limit', String(limit)]);
+});
+
+// POST /api/next-steps/plan { repo, planPath?, planFile? }
+app.api('/api/next-steps/plan', (data) => {
+  const repo = String(data?.repo || '').trim();
+  const planPath = String(data?.planPath || '').trim();
+  const planFile = String(data?.planFile || '').trim();
+  let target = '';
+  if (planPath && existsSync(planPath)) {
+    target = planPath;
+  } else if (repo && planFile && existsSync(join(repo, planFile))) {
+    target = join(repo, planFile);
+  }
+  if (!target || !existsSync(target)) {
+    return { ok: false, error: 'Plan file not found' };
+  }
+  try {
+    return {
+      ok: true,
+      path: target,
+      content: readFileSync(target, 'utf8'),
+    };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+// POST /api/next-steps/execute { repo, planId }
+app.api('/api/next-steps/execute', (data) => {
+  const repo = String(data?.repo || '').trim();
+  const planId = String(data?.planId || '').trim();
+  if (!repo || !planId) {
+    return new Response(JSON.stringify({ error: 'Missing repo or planId' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  return runPythonCtl(['execute-plan', '--repo', repo, '--plan-id', planId]);
+});
+
+app.run();

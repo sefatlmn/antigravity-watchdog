@@ -1,0 +1,18 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "restart_policy": "always",
+  "display_name": "Watchdog",
+  "description": "Post-commit Code & Visual Watchdog dashboard, audit report viewer, and fix-branch manager.",
+  "has_web_ui": true,
+  "ui_config": {
+    "display_name": "Watchdog",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Watchdog"
+      }
+    ]
+  }
+}

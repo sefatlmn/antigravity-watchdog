@@ -1,0 +1,12 @@
+{
+  "name": "qa-watchdog",
+  "displayName": "Watchdog",
+  "version": "1.0.0",
+  "description": "Autonomous post-commit code & visual QA watchdog. Automatically audits new commits in an isolated Git worktree using Playwright MCP, proposes architecture/performance/scalability improvements, and prepares isolated fix/qa-<sha> branches.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Run a full QA Watchdog code and visual review on the latest commit",
+    "Check the latest QA Watchdog audit report and apply confirmed bug fixes",
+    "Audit the current app visually at desktop and mobile viewports with Playwright"
+  ]
+}

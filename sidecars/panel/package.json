@@ -1,0 +1,7 @@
+{
+  "name": "qa-watchdog-panel",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Auxiliary pane dashboard for the Antigravity Watchdog plugin."
+}
