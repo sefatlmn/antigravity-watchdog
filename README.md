@@ -55,8 +55,51 @@ Ensure the plugin is enabled in your Antigravity configuration or via the Plugin
 ### Dependencies
 
 - **Python 3.10+**: Runs the lifecycle stop hook and orchestration CLI (`scripts/qa_stop_hook.py`, `scripts/qa_ctl.py`).
-- **Node.js 18+**: Powers the sidecar companion panel server (`sidecars/panel/main.mjs`).
+- **Node.js 18+**: Powers the sidecar companion panel server (`sidecars/panel/main.mjs`) and OpenCode V2 TypeScript plugin engine.
 - **Playwright MCP**: Optional but recommended for visual regression and live browser verification passes.
+
+---
+
+## OpenCode Desktop Integration
+
+Watchdog is built as a **dual-target hybrid plugin**, simultaneously compatible with **Google Antigravity** and **OpenCode Desktop** from a single codebase.
+
+### Enabling in OpenCode Desktop
+
+Add the plugin path to your `~/.config/opencode/opencode.json` (or project-level `opencode.json`):
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    "/Users/sefa/.gemini/config/plugins/qa-watchdog"
+  ]
+}
+```
+
+Or build and link via npm/CLI:
+```bash
+npm run build
+```
+
+### Features in OpenCode Desktop
+
+1. **Slash Commands**:
+   - `/watchdog`: Displays the active Watchdog telemetry, tracked repositories, and link to the local dashboard.
+   - `/next-steps`: Gathers project context across handoffs, manifests, READMEs, and Git commits to synthesize 4 `/plan` proposals.
+
+2. **Native Tools**:
+   - `qa_watchdog_status`: Returns current watchdog state, jobs, and proposals.
+   - `qa_watchdog_audit`: Prepares an isolated worktree (`fix/qa-<sha>`) and launches an audit for a commit.
+   - `qa_watchdog_apply_fix`: Merges/cherry-picks bug fixes from `fix/qa-<sha>` onto the active branch.
+   - `qa_watchdog_next_steps`: Synthesizes 4 forward-looking implementation plans.
+   - `qa_watchdog_dashboard`: Surfaces the local dashboard URL.
+
+3. **Background Lifecycle Event Hook**:
+   - Subscribes to OpenCode's `session.status` stream. When a turn reaches `idle`, Watchdog automatically checks for new commits and runs the non-blocking post-commit QA audit in an isolated worktree.
+
+4. **Interactive Dashboard**:
+   - A standalone dashboard server starts automatically on `http://127.0.0.1:4198` when OpenCode launches, serving the full companion UI panel.
 
 ---
 
