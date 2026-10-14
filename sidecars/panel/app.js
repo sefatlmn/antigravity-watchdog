@@ -251,11 +251,8 @@ function renderJobBadge(job) {
   const status = (job.status || 'queued').toLowerCase();
   const verdict = (job.verdict || 'PENDING').toUpperCase();
 
-  if (status === 'running') {
-    return '<span class="pill running"><span class="dot"></span>Auditing…</span>';
-  }
-  if (status === 'queued') {
-    return '<span class="pill"><span class="dot"></span>Queued</span>';
+  if (status === 'running' || status === 'queued') {
+    return '';
   }
   if (job.fixes_applied || verdict === 'PASS') {
     return '';
@@ -420,9 +417,12 @@ function renderDashboard(data) {
   const currentBranch = activeRepo?.branch || 'main';
 
   function renderCard(job, isArchived) {
+    const status = (job.status || 'queued').toLowerCase();
+    const isRunning = status === 'running';
+    const isQueued = status === 'queued';
     const hasFixToApply = Boolean(job.fixes_committed && job.fix_branch && !job.fixes_applied);
     const isApplied = Boolean(job.fixes_applied);
-    const isPassed = (job.verdict || '').toUpperCase() === 'PASS' && !isApplied && !hasFixToApply;
+    const isPassed = (job.verdict || '').toUpperCase() === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued;
 
     return `
       <div class="job-item">
@@ -436,6 +436,8 @@ function renderDashboard(data) {
         ${job.summary ? `<p class="job-summary">${escapeHtml(job.summary)}</p>` : ''}
         ${job.user_comment ? `<p class="job-comment"><span class="comment-tag">Note:</span>${escapeHtml(job.user_comment)}</p>` : ''}
         <div class="job-actions">
+          ${isRunning ? `<span class="applied-badge running"><span class="dot"></span>Auditing…</span>` : ''}
+          ${isQueued ? `<span class="applied-badge running"><span class="dot"></span>Queued</span>` : ''}
           ${isApplied ? `<span class="applied-badge">${ICONS.check} Applied to ${escapeHtml(currentBranch)}</span>` : ''}
           ${isPassed ? `<span class="applied-badge">${ICONS.check} Passed</span>` : ''}
           ${hasFixToApply ? `<button type="button" class="btn small-btn accent-btn" data-action="apply-fix" data-repo="${escapeHtml(job.repo_path)}" data-sha="${escapeHtml(job.sha)}" title="Merge the bug fix commit into your active branch">Apply Fix to ${escapeHtml(currentBranch)}</button>` : ''}
@@ -533,10 +535,12 @@ function renderNextSteps(activeRepo) {
       if (activeRepo.synthesizing) {
         proposalsList.innerHTML = `
           <div class="proposals-loading-state">
-            <div class="loading-spinner"></div>
             <div class="loading-label-group">
               <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
-              <span class="loading-label-sub muted small">Synthesizing 4 pragmatic implementation plans</span>
+              <span class="loading-label-sub muted small" id="ns-loading-sub">Synthesizing 4 pragmatic implementation plans</span>
+            </div>
+            <div class="proposals-progress-container">
+              <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
             </div>
           </div>
         `;
@@ -637,10 +641,12 @@ async function refreshProposals(skipDispatch = false) {
     if (proposalsList) {
       proposalsList.innerHTML = `
         <div class="proposals-loading-state">
-          <div class="loading-spinner"></div>
           <div class="loading-label-group">
             <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
-            <span class="loading-label-sub muted small">Synthesizing 4 pragmatic implementation plans</span>
+            <span class="loading-label-sub muted small" id="ns-loading-sub">Synthesizing 4 pragmatic implementation plans</span>
+          </div>
+          <div class="proposals-progress-container">
+            <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
           </div>
         </div>
       `;
@@ -654,6 +660,11 @@ async function refreshProposals(skipDispatch = false) {
         return;
       }
       if (res.status === 'ready' && res.proposals) {
+        const progressBar = $('ns-progress-bar');
+        const progressSub = $('ns-loading-sub');
+        if (progressBar) progressBar.style.width = '100%';
+        if (progressSub) progressSub.textContent = 'Proposals ready!';
+        await new Promise((r) => setTimeout(r, 150));
         activeRepo.proposals = res.proposals;
         if (res.goal) activeRepo.goal = res.goal;
         activeRepo.synthesizing = false;
@@ -670,10 +681,29 @@ async function refreshProposals(skipDispatch = false) {
     let finished = false;
 
     for (let i = 0; i < maxPolls; i++) {
+      const progressBar = $('ns-progress-bar');
+      const progressSub = $('ns-loading-sub');
+      const pct = Math.min(92, Math.round(15 + ((i + 1) / maxPolls) * 80));
+      if (progressBar) {
+        progressBar.style.width = `${pct}%`;
+      }
+      if (progressSub) {
+        if (pct < 35) {
+          progressSub.textContent = 'Inspecting specifications & history…';
+        } else if (pct < 65) {
+          progressSub.textContent = 'Evaluating codebase architecture & entry points…';
+        } else {
+          progressSub.textContent = 'Formulating 4 implementation plans…';
+        }
+      }
+
       await new Promise((r) => setTimeout(r, pollInterval));
       try {
         const check = await callApi('/api/next-steps', { body: { repo: activeRepo.repoPath } });
         if (check.ok && check.synthesizing === false && Array.isArray(check.proposals) && check.proposals.length > 0) {
+          if (progressBar) progressBar.style.width = '100%';
+          if (progressSub) progressSub.textContent = 'Proposals ready!';
+          await new Promise((r) => setTimeout(r, 200));
           activeRepo.proposals = check.proposals;
           if (check.goal) activeRepo.goal = check.goal;
           activeRepo.synthesizing = false;

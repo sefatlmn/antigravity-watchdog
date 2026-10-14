@@ -847,6 +847,22 @@ body {
   box-sizing: border-box;
 }
 
+.applied-badge.running {
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.25);
+  gap: 5px;
+}
+
+.applied-badge.running .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #38bdf8;
+  animation: pulse 1.4s infinite;
+  flex-shrink: 0;
+}
+
 .small-applied-tag {
   height: auto;
   padding: 1px 6px;
@@ -1234,7 +1250,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  gap: 14px;
   padding: 36px 16px;
   background: var(--card, #131b2e);
   border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
@@ -1242,14 +1258,40 @@ body {
   text-align: center;
 }
 
-.loading-spinner {
-  width: 20px;
-  height: 20px;
-  border: 2px solid rgba(56, 189, 248, 0.2);
-  border-top-color: #38bdf8;
-  border-radius: 50%;
-  animation: spin 0.75s linear infinite;
-  flex-shrink: 0;
+.proposals-progress-container {
+  width: 100%;
+  max-width: 280px;
+  height: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  overflow: hidden;
+  position: relative;
+}
+
+.proposals-progress-bar {
+  height: 100%;
+  width: 15%;
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
+  border-radius: 999px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.proposals-progress-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.35) 50%, transparent 100%);
+  animation: progress-shimmer 2s infinite linear;
+}
+
+@keyframes progress-shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
 }
 
 .loading-label-group {
@@ -1296,6 +1338,14 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.proposal-badge-group .pill,
+.proposal-card .pill,
+#modal-category-badge {
+  transform: none !important;
+  cursor: default !important;
+  pointer-events: none;
 }
 
 .proposal-card h3 {
