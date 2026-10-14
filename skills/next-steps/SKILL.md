@@ -27,17 +27,16 @@ This skill empowers Antigravity agents to inspect codebases and project history 
    - Discovers all linked Antigravity conversations across the workspace (including ad-hoc sessions by inspecting transcript logs for repository file references).
    - Extracts chronological user requests, latest directives, corrections, and uncompleted checklist items from past artifacts (`implementation_plan.md`, `walkthrough.md`, `task.md`).
 
-## Dynamic Category Selection
+## Dynamic, Content-Driven Categories & Badges
 
-Instead of forcing rigid static categories, the synthesizer evaluates scoring signals across the codebase to dynamically select the top 4 most impactful categories from:
-- `feature` (Milestone): Next sequential deliverable directly advancing handoff items or user directives.
-- `architecture` (Architecture): Modular decoupling, schema formalization, and separation of concerns.
-- `robustness` (Robustness): Parameter validation, edge case handling, and addressing active TODO markers.
-- `performance` (Performance): Latency optimization, pagination, memory footprint, and query/cache tuning.
-- `testing` (DX & Tests): Regression tests and mock fixtures using the project's actual detected test runner.
-- `security` (Security): Boundary validation, path sanitization, and subprocess safety.
-- `ux` (Polish & UX): Layout polish, feedback states, loading spinners, and design token consistency.
-- `api` (API & DX): CLI ergonomics, flag validation, API contracts, and developer documentation.
+Proposals are NOT restricted to a canned 4-bucket template (such as "Milestone, Robustness, DX, UX"). Instead, the synthesizer inspects the project's actual state and roadmap to freely assign categories and badges that accurately describe each proposal:
+- `Feature` / `Workflow`: Core capabilities, user workflows, integrations, and deliverables.
+- `UI` / `Design`: Responsive interfaces, modals, indicators, view layouts, and design tokens.
+- `CLI` / `API`: Command ergonomics, flag validation, schema contracts, and endpoint integration.
+- `Performance` / `Optimization`: Latency reduction, in-memory caching, memory footprint, and I/O tuning.
+- `Testing` / `Tooling`: Automated regression suites, mock fixtures, and developer utilities.
+- `Refactor` / `Architecture`: Code organization, modular decoupling, and marker resolution.
+- `Security`: Boundary validation, path sanitization, and permission isolation.
 
 ## On-Demand Execution & Anti-Repetition Guardrail
 

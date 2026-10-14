@@ -75,7 +75,7 @@ The Watchdog companion panel runs as an Antigravity auxiliary web sidecar and pr
 
 2. **Next Steps Tab**:
    - Project Goal banner with automatic detection from `README.md` and inline custom override editor.
-   - 4 auto-generated milestone proposals with archetype tags (`Milestone`, `Robustness`, `DX & Tests`, `Polish & UX`), difficulty, and estimated durations.
+   - 4 project-tailored proposals with dynamic, content-driven tags (e.g. Feature, UI, Workflow, Performance, CLI, API, Tooling), difficulty, and estimated durations.
    - Clean, unified single-paragraph descriptions with key objective checklists and affected file tags.
    - Inline plan reader modal for full architectural specifications.
    - One-click `"Execute in Agent"` dispatch button.

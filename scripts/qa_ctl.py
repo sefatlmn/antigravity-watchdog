@@ -1224,235 +1224,209 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
     else:
         test_cmd = manifest.get("test_command") or "git status"
 
-    # -------------------------------------------------------------------------
-    # Dynamic Category Scoring
-    # -------------------------------------------------------------------------
-    scores: Dict[str, float] = {
-        "feature": 50.0,
-        "architecture": 30.0,
-        "robustness": 35.0,
-        "performance": 25.0,
-        "testing": 30.0,
-        "security": 15.0,
-        "ux": 20.0 if codebase["ui_files"] else 5.0,
-        "api": 20.0,
-    }
-
-    # Signal 1: Handoff pending tasks or uncompleted items
-    if pending_tasks:
-        scores["feature"] += 60.0
-    if handoff.get("found"):
-        scores["feature"] += 30.0
-        if "architecture" in handoff.get("sections", {}):
-            scores["architecture"] += 20.0
-
-    # Signal 2: Active chat requests and recent directives
-    if latest_user_directive:
-        ld_lower = latest_user_directive.lower()
-        if any(w in ld_lower for w in ("overhaul", "refactor", "clean", "structure", "decouple", "architect")):
-            scores["architecture"] += 50.0
-        if any(w in ld_lower for w in ("fix", "bug", "crash", "stuck", "error", "boundary", "guard")):
-            scores["robustness"] += 45.0
-        if any(w in ld_lower for w in ("ui", "button", "polish", "color", "style", "layout", "tab", "card", "view", "visual")):
-            scores["ux"] += 40.0
-        if any(w in ld_lower for w in ("perf", "fast", "speed", "slow", "paginate", "cache", "memory", "lag")):
-            scores["performance"] += 45.0
-        if any(w in ld_lower for w in ("test", "verify", "coverage", "assert", "mock", "dx")):
-            scores["testing"] += 40.0
-
-    # Signal 3: Codebase TODOs and FIXMEs
-    todo_count = len(codebase["todos"])
-    if todo_count > 0:
-        scores["robustness"] += min(todo_count * 5.0, 35.0)
-
-    # Signal 4: Test presence gap
-    if not codebase["has_tests"] and len(codebase["logic_files"]) > 2:
-        scores["testing"] += 35.0
-    elif codebase["has_tests"]:
-        scores["testing"] += 15.0
-
-    # Signal 5: UI files presence
-    if codebase["ui_files"]:
-        scores["ux"] += 25.0
-
-    # Pick top 4 distinct categories
-    ranked_cats = sorted(scores.keys(), key=lambda c: scores[c], reverse=True)[:4]
+    def infer_badge_and_category(text: str) -> Tuple[str, str]:
+        t = text.lower()
+        if any(k in t for k in ("ui", "button", "modal", "view", "dialog", "layout", "visual", "style", "css", "theme")):
+            return "UI", "ui"
+        if any(k in t for k in ("cli", "command", "flag", "terminal", "arg")):
+            return "CLI", "cli"
+        if any(k in t for k in ("api", "endpoint", "route", "handler", "payload")):
+            return "API", "api"
+        if any(k in t for k in ("test", "coverage", "assert", "mock", "fixture", "e2e")):
+            return "Testing", "testing"
+        if any(k in t for k in ("perf", "fast", "cache", "memory", "speed", "latency", "paginate")):
+            return "Performance", "performance"
+        if any(k in t for k in ("prune", "clean", "purge", "storage", "disk", "worktree", "stale")):
+            return "Tooling", "tooling"
+        if any(k in t for k in ("refactor", "decouple", "module", "extract", "modular")):
+            return "Refactor", "refactor"
+        if any(k in t for k in ("security", "auth", "permission", "sanitize", "token")):
+            return "Security", "security"
+        if any(k in t for k in ("export", "copy", "clipboard", "share", "history", "workflow", "sync")):
+            return "Workflow", "workflow"
+        if any(k in t for k in ("fix", "boundary", "guard", "error", "safe", "null")):
+            return "Robustness", "robustness"
+        return "Feature", "feature"
 
     # -------------------------------------------------------------------------
-    # Formulate Tailored Proposal Meta for the Top 4 Categories
+    # Content-Driven Proposal Formulation (No Rigid 4-Archetype Straightjacket)
     # -------------------------------------------------------------------------
     proposals_meta: List[Dict[str, Any]] = []
+    used_slugs = set()
 
-    for cat in ranked_cats:
-        if cat == "feature":
-            # Target primary deliverable from handoff or latest chat directive
-            primary_task = pending_tasks[0] if pending_tasks else (latest_user_directive if latest_user_directive else f"Expand core capabilities of {repo_root.name}")
-            source_attribution = f"Derived from {handoff.get('rel_path') or 'recent project directives'}"
-            target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
+    # 1. First populate from real uncompleted tasks, spec items, or directives
+    task_candidates: List[str] = []
+    for item in pending_tasks:
+        cleaned = item.strip().strip("-*# ")
+        if cleaned and len(cleaned) > 5 and cleaned not in task_candidates:
+            task_candidates.append(cleaned)
 
-            clean_task_title = primary_task
-            if len(clean_task_title) > 85:
-                clean_task_title = clean_task_title[:85].rsplit(" ", 1)[0]
+    for task_text in task_candidates:
+        if len(proposals_meta) >= 4:
+            break
+        badge, category = infer_badge_and_category(task_text)
+        slug_raw = re.sub(r"[^a-z0-9]+", "-", task_text.lower()).strip("-")[:25] or category
+        if slug_raw in used_slugs:
+            slug_raw = f"{slug_raw}-{len(proposals_meta)+1}"
+        used_slugs.add(slug_raw)
 
-            clean_goal_ref = goal_text
-            if len(clean_goal_ref) > 130:
-                clean_goal_ref = clean_goal_ref[:130].rsplit(" ", 1)[0] + "..."
+        clean_title = task_text
+        if len(clean_title) > 80:
+            clean_title = clean_title[:80].rsplit(" ", 1)[0]
 
-            proposals_meta.append({
-                "category": "feature",
-                "badge": "Milestone",
-                "difficulty": "Medium",
-                "estimatedTime": "30m",
-                "title": f"Advance Milestone: {clean_task_title.strip('.')}",
-                "subtitle": f"{source_attribution}: {primary_task}",
-                "summary": f"Sequential development milestone advancing '{clean_goal_ref}'. Builds upon recent commit {short_sha} ({subject}) to deliver the next critical feature.",
-                "goals": [
-                    f"Implement core logic for: '{clean_task_title}'",
-                    f"Integrate changes with existing modules in {', '.join(target_files[:2])}",
-                    f"Verify behavior against requirements in {handoff.get('rel_path') or 'project specification'}",
-                ],
-                "affectedFiles": target_files,
-                "slug": "core-milestone",
-            })
+        target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
 
-        elif cat == "architecture":
-            target_files = codebase["entry_points"][:2] + codebase["logic_files"][:2]
-            target_files = list(dict.fromkeys(target_files))[:3] or recent_changed_paths[:3]
-            proposals_meta.append({
-                "category": "architecture",
-                "badge": "Architecture",
-                "difficulty": "High",
-                "estimatedTime": "35m",
-                "title": f"Architectural Refactoring & Module Decoupling",
-                "subtitle": f"Strengthen cohesion and interface isolation across {', '.join(target_files[:2])}",
-                "summary": f"Decompose monolithic flows, isolate sidecar/controller boundaries, and enforce clean data contracts across {repo_root.name}.",
-                "goals": [
-                    f"Extract shared domain logic from {target_files[0] if target_files else 'entry points'} into modular components",
-                    "Formalize clean parameter schemas and return types between subsystems",
-                    "Eliminate circular references and reduce tight coupling across layers",
-                ],
-                "affectedFiles": target_files,
-                "slug": "architecture-refactor",
-            })
+        proposals_meta.append({
+            "category": category,
+            "badge": badge,
+            "difficulty": "Medium" if len(task_text) > 40 else "Low",
+            "estimatedTime": "25m" if len(task_text) > 40 else "15m",
+            "title": clean_title,
+            "subtitle": f"Derived from {handoff.get('rel_path') or 'project roadmap'}: {clean_title}",
+            "summary": f"Advance project deliverable: '{clean_title}'. Builds upon recent commit {short_sha} ({subject}) to expand {repo_root.name} capabilities.",
+            "goals": [
+                f"Implement core logic for '{clean_title}'",
+                f"Integrate changes with existing modules in {', '.join(target_files[:2])}",
+                f"Verify behavior using '{test_cmd}'",
+            ],
+            "affectedFiles": target_files,
+            "slug": slug_raw,
+        })
 
-        elif cat == "robustness":
-            todo_mention = f" ({codebase['todos'][0]['file']}:{codebase['todos'][0]['line']})" if codebase["todos"] else ""
-            target_files = [t["file"] for t in codebase["todos"][:2]] if codebase["todos"] else recent_changed_paths[:3]
-            target_files = list(dict.fromkeys(target_files))[:3]
+    # 2. If fewer than 4, dynamically select high-impact technical increments
+    additional_candidates = []
 
-            proposals_meta.append({
-                "category": "robustness",
-                "badge": "Robustness",
-                "difficulty": "Low",
-                "estimatedTime": "20m",
-                "title": "Harden Edge Cases, Error Boundaries & Guardrails",
-                "subtitle": f"Resolve pending markers{todo_mention} and add defensive null safety",
-                "summary": f"Strengthen newly updated code paths in {', '.join(target_files[:2])} with explicit parameter guards, try/catch recovery, and boundary validation.",
-                "goals": [
-                    f"Address active TODO/FIXME markers in {target_files[0] if target_files else 'core files'}",
-                    "Add defensive validation for empty/malformed inputs and subprocess execution",
-                    "Ensure graceful fallback states instead of unhandled exceptions or crashes",
-                ],
-                "affectedFiles": target_files,
-                "slug": "robustness-guardrails",
-            })
+    # UI enhancement
+    if codebase["ui_files"] and not any(p["category"] == "ui" for p in proposals_meta):
+        target_files = codebase["ui_files"][:3] or recent_changed_paths[:3]
+        additional_candidates.append({
+            "category": "ui",
+            "badge": "UI",
+            "difficulty": "Medium",
+            "estimatedTime": "20m",
+            "title": "Refine Interface Polish, Loading States & Micro-Interactions",
+            "subtitle": "Enhance visual hierarchy, button states, and layout responsiveness",
+            "summary": f"Polish user-facing components in {', '.join(target_files[:2])}, adding smooth feedback states, loading spinners, and strict design token alignment.",
+            "goals": [
+                "Implement responsive loading indicators, toasts, and clear empty states",
+                "Unify button heights, spacing, and icon alignment across card components",
+                "Ensure accessible typography, keyboard navigation, and theme consistency",
+            ],
+            "affectedFiles": target_files,
+            "slug": "ui-polish-interactions",
+        })
 
-        elif cat == "performance":
-            target_files = recent_changed_paths[:3]
-            proposals_meta.append({
-                "category": "performance",
-                "badge": "Performance",
-                "difficulty": "Medium",
-                "estimatedTime": "25m",
-                "title": "Optimize Execution Latency, Memory & Caching",
-                "subtitle": "Streamline I/O throughput, pagination, and data structures",
-                "summary": f"Enhance runtime efficiency and responsiveness in {', '.join(target_files[:2])} through lazy evaluation, optimized caching, and reduced disk/network round-trips.",
-                "goals": [
-                    "Implement localized in-memory caching for repetitive file/command reads",
-                    "Paginate heavy query datasets and eliminate redundant synchronous calls",
-                    "Profile and minimize CPU/memory overhead during background polling",
-                ],
-                "affectedFiles": target_files,
-                "slug": "performance-optimization",
-            })
+    # Workflow / Tooling
+    if not any(p["category"] == "workflow" for p in proposals_meta):
+        target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
+        additional_candidates.append({
+            "category": "workflow",
+            "badge": "Workflow",
+            "difficulty": "Low",
+            "estimatedTime": "15m",
+            "title": "One-Click Clipboard Export & Navigation Shortcuts",
+            "subtitle": "Add instant report export, clipboard shortcuts, and deep file navigation",
+            "summary": f"Enhance developer productivity in {repo_root.name} by providing instant clipboard export for audit reports and direct file link navigation.",
+            "goals": [
+                "Add 1-click clipboard export with toast confirmation",
+                "Enable keyboard escape dismissal and focus management",
+                "Provide direct file linking to disk artifacts",
+            ],
+            "affectedFiles": target_files,
+            "slug": "workflow-export-shortcuts",
+        })
 
-        elif cat == "testing":
-            target_files = codebase["test_files"][:2] or [f"tests/test_{Path(f).stem}.py" if f.endswith(".py") else f"{f}.test.ts" for f in recent_changed_paths[:2]]
-            proposals_meta.append({
-                "category": "testing",
-                "badge": "DX & Tests",
-                "difficulty": "Medium",
-                "estimatedTime": "20m",
-                "title": f"Automated Regression Test Suite ({manifest.get('manifest_type') or 'CLI'})",
-                "subtitle": f"Implement comprehensive unit & integration tests using '{test_cmd}'",
-                "summary": f"Establish automated test fixtures and regression checks covering recent changes ({short_sha}) to ensure stability on future commits.",
-                "goals": [
-                    f"Write regression test cases verifying core behaviors introduced in {short_sha}",
-                    "Establish deterministic mock fixtures for external subprocesses and file I/O",
-                    f"Provide single-command verification via '{test_cmd}'",
-                ],
-                "affectedFiles": target_files,
-                "slug": "automated-testing-dx",
-            })
+    # CLI / API ergonomics
+    if codebase["entry_points"] and not any(p["category"] in ("cli", "api") for p in proposals_meta):
+        target_files = codebase["entry_points"][:2] or recent_changed_paths[:2]
+        is_cli = "Python" in codebase["languages"] or "scripts" in manifest
+        additional_candidates.append({
+            "category": "cli" if is_cli else "api",
+            "badge": "CLI" if is_cli else "API",
+            "difficulty": "Low",
+            "estimatedTime": "15m",
+            "title": "Enhance CLI Diagnostics, Telemetry & Verbose Output" if is_cli else "Enhance API Ergonomics, Schema Contracts & Documentation",
+            "subtitle": "Streamline developer interfaces, help messages, and JSON payloads",
+            "summary": f"Refine the developer-facing interface in {', '.join(target_files[:2])}, adding comprehensive flag validation, self-documenting help, and structured JSON output.",
+            "goals": [
+                "Provide clear CLI help text and option flags for all subcommands",
+                "Standardize JSON response payloads with consistent error reporting",
+                "Update documentation and inline docstrings to match current signatures",
+            ],
+            "affectedFiles": target_files,
+            "slug": "cli-diagnostics-ergonomics" if is_cli else "api-schema-ergonomics",
+        })
 
-        elif cat == "security":
-            target_files = recent_changed_paths[:3]
-            proposals_meta.append({
-                "category": "security",
-                "badge": "Security",
-                "difficulty": "Medium",
-                "estimatedTime": "20m",
-                "title": "Sanitize Input Boundaries & Path Traversal Guardrails",
-                "subtitle": "Enforce strict schema validation and prevent unauthorized access",
-                "summary": f"Harden filesystem access, subprocess arguments, and API payloads across {', '.join(target_files[:2])} against injection or traversal vulnerabilities.",
-                "goals": [
-                    "Validate and resolve all file paths against repository boundaries",
-                    "Sanitize external inputs passed to shell commands and subprocess runners",
-                    "Enforce strict payload validation on incoming API requests",
-                ],
-                "affectedFiles": target_files,
-                "slug": "security-validation",
-            })
+    # Performance / Latency
+    if not any(p["category"] == "performance" for p in proposals_meta):
+        target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
+        additional_candidates.append({
+            "category": "performance",
+            "badge": "Performance",
+            "difficulty": "Medium",
+            "estimatedTime": "25m",
+            "title": "Optimize Execution Latency, Memory & Caching",
+            "subtitle": "Streamline I/O throughput, pagination, and data structures",
+            "summary": f"Enhance runtime efficiency and responsiveness in {', '.join(target_files[:2])} through lazy evaluation, optimized caching, and reduced disk/network round-trips.",
+            "goals": [
+                "Implement localized in-memory caching for repetitive file/command reads",
+                "Paginate heavy query datasets and eliminate redundant synchronous calls",
+                "Profile and minimize CPU/memory overhead during background operations",
+            ],
+            "affectedFiles": target_files,
+            "slug": "performance-latency-caching",
+        })
 
-        elif cat == "ux":
-            target_files = codebase["ui_files"][:3] or recent_changed_paths[:3]
-            proposals_meta.append({
-                "category": "ux",
-                "badge": "Polish & UX",
-                "difficulty": "Medium",
-                "estimatedTime": "20m",
-                "title": "Refine Interface Polish, Loading States & Micro-Interactions",
-                "subtitle": "Enhance visual hierarchy, button states, and layout responsiveness",
-                "summary": f"Polish user-facing components in {', '.join(target_files[:2])}, adding smooth feedback states, loading spinners, and strict design token alignment.",
-                "goals": [
-                    "Implement responsive loading indicators, toasts, and clear empty states",
-                    "Unify button heights, spacing, and icon alignment across card components",
-                    "Ensure accessible typography, keyboard navigation, and theme consistency",
-                ],
-                "affectedFiles": target_files,
-                "slug": "ux-polish",
-            })
+    # Code hardening / TODOs
+    if codebase["todos"] and not any(p["category"] in ("refactor", "robustness") for p in proposals_meta):
+        todo_file = codebase["todos"][0]["file"]
+        todo_line = codebase["todos"][0]["line"]
+        target_files = [t["file"] for t in codebase["todos"][:2]]
+        additional_candidates.append({
+            "category": "refactor",
+            "badge": "Refactor",
+            "difficulty": "Low",
+            "estimatedTime": "20m",
+            "title": f"Resolve Pending Code Marker ({todo_file}:{todo_line})",
+            "subtitle": f"Clean up active TODO/FIXME markers in {todo_file} and add defensive null safety",
+            "summary": f"Strengthen newly updated code paths in {', '.join(target_files[:2])} with explicit parameter guards, try/catch recovery, and boundary validation.",
+            "goals": [
+                f"Address active TODO marker in {todo_file}:{todo_line}",
+                "Add defensive validation for empty/malformed inputs and subprocess execution",
+                "Ensure graceful fallback states instead of unhandled exceptions or crashes",
+            ],
+            "affectedFiles": target_files,
+            "slug": "resolve-code-markers",
+        })
 
-        elif cat == "api":
-            target_files = codebase["entry_points"][:2] or recent_changed_paths[:2]
-            proposals_meta.append({
-                "category": "api",
-                "badge": "API & DX",
-                "difficulty": "Low",
-                "estimatedTime": "15m",
-                "title": "Enhance API Ergonomics, CLI Flags & Documentation",
-                "subtitle": "Streamline developer interfaces, CLI help messages, and payloads",
-                "summary": f"Refine the developer-facing interface in {', '.join(target_files[:2])}, adding comprehensive flag validation, self-documenting help, and structured JSON output.",
-                "goals": [
-                    "Provide clear CLI help text and option flags for all subcommands",
-                    "Standardize JSON response payloads with consistent error reporting",
-                    "Update documentation and inline docstrings to match current signatures",
-                ],
-                "affectedFiles": target_files,
-                "slug": "api-ergonomics-dx",
-            })
+    # Testing / DX
+    if not any(p["category"] == "testing" for p in proposals_meta):
+        target_files = codebase["test_files"][:2] or [f"tests/test_{Path(f).stem}.py" if f.endswith(".py") else f"{f}.test.ts" for f in recent_changed_paths[:2]]
+        additional_candidates.append({
+            "category": "testing",
+            "badge": "Testing",
+            "difficulty": "Medium",
+            "estimatedTime": "20m",
+            "title": f"Automated Regression Test Suite ({manifest.get('manifest_type') or 'CLI'})",
+            "subtitle": f"Implement comprehensive unit & integration tests using '{test_cmd}'",
+            "summary": f"Establish automated test fixtures and regression checks covering recent changes ({short_sha}) to ensure stability on future commits.",
+            "goals": [
+                f"Write regression test cases verifying core behaviors introduced in {short_sha}",
+                "Establish deterministic mock fixtures for external subprocesses and file I/O",
+                f"Provide single-command verification via '{test_cmd}'",
+            ],
+            "affectedFiles": target_files,
+            "slug": "automated-testing-suite",
+        })
 
-    # Ensure exactly 4 proposals are constructed
+    # Fill remaining proposals up to 4
+    for candidate in additional_candidates:
+        if len(proposals_meta) >= 4:
+            break
+        if candidate["slug"] not in used_slugs:
+            proposals_meta.append(candidate)
+            used_slugs.add(candidate["slug"])
+
     proposals_meta = proposals_meta[:4]
 
     proposals: List[Dict[str, Any]] = []
@@ -1486,7 +1460,7 @@ flowchart TD
     Current["Current State: {short_sha}"] --> Plan["{meta['title']}"]
     Plan --> Changes["Implement Changes in {', '.join(meta['affectedFiles'][:2]) or 'Target Files'}"]
     Changes --> Verify["Automated Verification ({test_cmd})"]
-    Verify --> Complete["Milestone Completed"]
+    Verify --> Complete["Verified & Completed"]
 ```
 
 ---
@@ -1687,7 +1661,7 @@ def dispatch_synthesis_agent(repo_root: Path) -> Dict[str, Any]:
     prompt = f"""[NEXT-STEPS-SYNTHESIZER-SESSION]
 You are the autonomous Next Steps Architect for this repository: {str(repo_root)}
 
-Your mission is to perform a deep analysis of what was ALREADY BUILT versus what is logically needed next, and formulate exactly 4 small, focused, useful feature additions or improvements (slightly feature-preferred, with flexible categories).
+Your mission is to perform a deep analysis of what was ALREADY BUILT versus what is logically needed next, and formulate exactly 4 small, focused, useful feature additions or improvements.
 
 ### CRITICAL RULE: DO NOT RE-PROPOSE COMPLETED WORK
 The following commits were ALREADY IMPLEMENTED AND MERGED into this project. Under no circumstances should you propose doing any of these again:
@@ -1711,8 +1685,8 @@ The following requests were already addressed in recent conversations:
 
 ### Proposal Quality Guidelines
 1. Focus & Practicality: Propose small, focused, useful feature additions or changes that make the product immediately better. Avoid giant vague epics or canned placeholders.
-2. Category Balance: Flexible across categories, but slightly feature-focused/preferred (e.g. 2 useful feature additions/shortcuts + 1 robustness/reliability improvement + 1 UX/DX refinement).
-3. Categories to pick from: feature (Milestone), architecture (Architecture), robustness (Robustness), performance (Performance), testing (DX & Tests), security (Security), ux (Polish & UX), api (API & DX).
+2. NO CANNED OR RIGID CATEGORIES: Absolutely DO NOT force proposals into the cliché "1 milestone, 1 robustness, 1 dx, 1 ux" pattern. Look at the codebase and decide what the product actually needs right now. If it needs 3 new features and 1 performance enhancement, propose that! If it needs 2 workflow tools, 1 API route, and 1 UI addition, propose that! Choose categories freely based entirely on real project requirements.
+3. Accurate & Varied Badges: Assign each proposal a clean, natural badge that accurately describes what it is (e.g., Feature, UI, Workflow, Performance, API, Integration, Tooling, Security, Optimization, Refactor, CLI, Analytics). Do NOT default to repeating generic labels like "Milestone" or "Robustness".
 4. Specific Titles: Give each proposal a clear, specific, self-explanatory title naming the exact feature, component, or capability being introduced.
 
 ### Mandatory Deliverables to Write
@@ -1730,7 +1704,7 @@ Use your file writing tool to create the following files in `{str(repo_root)}`:
     {{
       "id": "prop-1-<slug>",
       "category": "<category>",
-      "badge": "<Badge Name>",
+      "badge": "<Descriptive Badge>",
       "difficulty": "Low" | "Medium" | "High",
       "estimatedTime": "15m" | "25m" | "35m",
       "title": "<Specific, actionable title>",
@@ -1792,11 +1766,19 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
                 dispatched = True
                 try:
                     data = json.loads(proc.stdout)
-                    conv_id = data.get("conversationId") or data.get("response", {}).get("conversationId")
+                    conv_id = (
+                        data.get("conversationId")
+                        or data.get("response", {}).get("conversationId")
+                        or data.get("response", {}).get("newConversation", {}).get("conversationId")
+                    )
                 except Exception:
                     pass
         except Exception:
             pass
+
+    if dispatched and conv_id:
+        state_data["conversationId"] = conv_id
+        state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
 
     if not dispatched:
         # Fallback to local deterministic synthesis if AgentAPI is not running

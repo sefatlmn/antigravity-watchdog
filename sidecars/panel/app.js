@@ -562,8 +562,8 @@ function renderNextSteps(activeRepo) {
           const goals = Array.isArray(p.goals) ? p.goals : [];
           const goalsHtml = goals.map((g) => `<div class="proposal-goal-item"><span class="check">${ICONS.check}</span><span>${escapeHtml(stripEmojis(g))}</span></div>`).join('');
 
-          const rawBadge = p.badge || p.tag || 'Milestone';
-          const badge = stripEmojis(rawBadge) || 'Milestone';
+          const rawBadge = p.badge || p.tag || p.category || 'Feature';
+          const badge = stripEmojis(rawBadge) || 'Feature';
           const difficulty = p.difficulty || p.archetype || 'Medium';
           const estTime = p.estimatedTime || p.estimated_effort || '20m';
           const title = stripEmojis(p.title || 'Next Step Plan');
@@ -725,13 +725,13 @@ async function openPlanModal(planPath, planFile, planId, title, badge) {
     activePlanModalData = {
       planId,
       title: title || 'Implementation Plan',
-      badge: badge || 'Milestone',
+      badge: badge || 'Feature',
       content: res.content,
       repoPath: activeRepo.repoPath,
     };
 
     $('modal-plan-title').textContent = title || 'Implementation Plan';
-    $('modal-category-badge').textContent = stripEmojis(badge) || 'Milestone';
+    $('modal-category-badge').textContent = stripEmojis(badge) || 'Feature';
     $('modal-plan-content').innerHTML = renderMarkdown(stripEmojis(res.content));
     $('plan-modal').hidden = false;
   } catch (err) {
