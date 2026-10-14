@@ -88,6 +88,7 @@ let activePlanModalData = null;
 let archivedVisibleLimit = 10;
 let isRefreshingProposals = false;
 let isSynthesisCancelled = false;
+let isCancellingSynthesis = false;
 let isSyncing = false;
 
 function stripEmojis(str) {
@@ -149,7 +150,8 @@ function escapeHtml(str) {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function parseInlineMd(text) {
@@ -708,9 +710,11 @@ function renderNextSteps(activeRepo) {
 }
 
 window.cancelNextStepsRefresh = async function() {
+  if (isCancellingSynthesis) return;
   const activeRepo = getActiveRepo();
   if (!activeRepo) return;
 
+  isCancellingSynthesis = true;
   isSynthesisCancelled = true;
   toast('Cancelling next steps refresh…');
 
@@ -735,6 +739,7 @@ window.cancelNextStepsRefresh = async function() {
   } catch (err) {
     toast(`Cancel error: ${err.message}`, true);
   } finally {
+    isCancellingSynthesis = false;
     isRefreshingProposals = false;
     if (cancelHeaderBtn) cancelHeaderBtn.hidden = true;
     const refreshBtn = $('btn-refresh-proposals');

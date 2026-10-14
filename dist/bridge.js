@@ -96,8 +96,27 @@ export async function synthesizeNextSteps(repo, force = false) {
         args.push("--force");
     return runCtlJson(args);
 }
+export async function checkSynthesis(repo) {
+    return runCtlJson(["check-synthesis", "--repo", repo]);
+}
+export async function dispatchSynthesis(repo) {
+    return runCtlJson(["dispatch-synthesis", "--repo", repo]);
+}
 export async function cancelSynthesis(repo) {
     return runCtlJson(["cancel-synthesis", "--repo", repo]);
+}
+export async function manageGoal(repo, goal, clear = false) {
+    const args = ["goal", "--repo", repo];
+    if (clear) {
+        args.push("--clear");
+    }
+    else if (goal) {
+        args.push("--set", goal.trim());
+    }
+    return runCtlJson(args);
+}
+export async function executePlan(repo, planId) {
+    return runCtlJson(["execute-plan", "--repo", repo, "--plan-id", planId]);
 }
 export async function triggerStopHook(payload) {
     const py = getPythonBin();

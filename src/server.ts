@@ -11,7 +11,11 @@ import {
   pauseWatchdog, 
   resumeWatchdog, 
   synthesizeNextSteps,
+  checkSynthesis,
+  dispatchSynthesis,
   cancelSynthesis,
+  manageGoal,
+  executePlan,
   readReportMarkdown 
 } from "./bridge.js";
 
@@ -168,36 +172,92 @@ export function startDashboardServer(preferredPort = 4198): Promise<DashboardSer
         }
 
         if (pathname === "/api/next-steps" && (req.method === "GET" || req.method === "POST")) {
-          const repo = url.searchParams.get("repo") || (await parseJsonBody(req)).repo_path;
+          let repo = url.searchParams.get("repo");
+          if (!repo && req.method === "POST") {
+            const body = await parseJsonBody(req);
+            repo = body.repo || body.repo_path;
+          }
           if (!repo) {
             sendJson(res, { error: "Missing repo parameter" }, 400);
             return;
           }
-          const result = await synthesizeNextSteps(repo, false);
+          const result = await checkSynthesis(repo);
           sendJson(res, result);
           return;
         }
 
         if (pathname === "/api/next-steps/refresh" && req.method === "POST") {
           const body = await parseJsonBody(req);
-          const repo = body.repo_path || body.repo;
+          const repo = body.repo || body.repo_path;
           if (!repo) {
             sendJson(res, { error: "Missing repo parameter" }, 400);
             return;
           }
-          const result = await synthesizeNextSteps(repo, true);
+          const result = await dispatchSynthesis(repo);
           sendJson(res, result);
           return;
         }
 
         if (pathname === "/api/next-steps/cancel" && req.method === "POST") {
           const body = await parseJsonBody(req);
-          const repo = body.repo_path || body.repo;
+          const repo = body.repo || body.repo_path;
           if (!repo) {
             sendJson(res, { error: "Missing repo parameter" }, 400);
             return;
           }
           const result = await cancelSynthesis(repo);
+          sendJson(res, result);
+          return;
+        }
+
+        if (pathname === "/api/next-steps/goal" && req.method === "POST") {
+          const body = await parseJsonBody(req);
+          const repo = body.repo || body.repo_path;
+          if (!repo) {
+            sendJson(res, { error: "Missing repo parameter" }, 400);
+            return;
+          }
+          const result = await manageGoal(repo, body.goal, Boolean(body.clear));
+          sendJson(res, result);
+          return;
+        }
+
+        if (pathname === "/api/next-steps/plan" && req.method === "POST") {
+          const body = await parseJsonBody(req);
+          const repo = String(body.repo || body.repo_path || "").trim();
+          const planPath = String(body.planPath || "").trim();
+          const planFile = String(body.planFile || "").trim();
+          let target = "";
+          if (planPath && existsSync(planPath)) {
+            target = planPath;
+          } else if (repo && planFile && existsSync(join(repo, planFile))) {
+            target = join(repo, planFile);
+          }
+          if (!target || !existsSync(target)) {
+            sendJson(res, { ok: false, error: "Plan file not found" });
+            return;
+          }
+          try {
+            sendJson(res, {
+              ok: true,
+              path: target,
+              content: readFileSync(target, "utf8"),
+            });
+          } catch (err: any) {
+            sendJson(res, { ok: false, error: err.message });
+          }
+          return;
+        }
+
+        if (pathname === "/api/next-steps/execute" && req.method === "POST") {
+          const body = await parseJsonBody(req);
+          const repo = body.repo || body.repo_path;
+          const planId = body.planId;
+          if (!repo || !planId) {
+            sendJson(res, { error: "Missing repo or planId" }, 400);
+            return;
+          }
+          const result = await executePlan(repo, planId);
           sendJson(res, result);
           return;
         }

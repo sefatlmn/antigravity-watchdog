@@ -105,8 +105,30 @@ export async function synthesizeNextSteps(repo: string, force = false): Promise<
   return runCtlJson(args);
 }
 
+export async function checkSynthesis(repo: string): Promise<any> {
+  return runCtlJson(["check-synthesis", "--repo", repo]);
+}
+
+export async function dispatchSynthesis(repo: string): Promise<any> {
+  return runCtlJson(["dispatch-synthesis", "--repo", repo]);
+}
+
 export async function cancelSynthesis(repo: string): Promise<any> {
   return runCtlJson(["cancel-synthesis", "--repo", repo]);
+}
+
+export async function manageGoal(repo: string, goal?: string, clear = false): Promise<any> {
+  const args = ["goal", "--repo", repo];
+  if (clear) {
+    args.push("--clear");
+  } else if (goal) {
+    args.push("--set", goal.trim());
+  }
+  return runCtlJson(args);
+}
+
+export async function executePlan(repo: string, planId: string): Promise<any> {
+  return runCtlJson(["execute-plan", "--repo", repo, "--plan-id", planId]);
 }
 
 export async function triggerStopHook(payload: {

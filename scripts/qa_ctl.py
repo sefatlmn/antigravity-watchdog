@@ -1586,12 +1586,13 @@ def cancel_synthesis(repo_root: Path) -> Dict[str, Any]:
     notified_chat = False
     if conv_id:
         # Remove from global active conversations
-        global_state = load_state()
-        if "active_qa_conversations" in global_state:
-            global_state["active_qa_conversations"] = [
-                c for c in global_state["active_qa_conversations"] if c != conv_id
-            ]
-            save_state(global_state)
+        with StateLock():
+            global_state = load_state()
+            if "active_qa_conversations" in global_state:
+                global_state["active_qa_conversations"] = [
+                    c for c in global_state["active_qa_conversations"] if c != conv_id
+                ]
+                save_state(global_state)
 
         # Notify the conversation via AgentAPI send-message
         env = get_cached_ls_env()
@@ -1865,11 +1866,12 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
     if dispatched and conv_id:
         state_data["conversationId"] = conv_id
         state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
-        st = load_state()
-        active = st.setdefault("active_qa_conversations", [])
-        if conv_id not in active:
-            active.append(conv_id)
-            save_state(st)
+        with StateLock():
+            st = load_state()
+            active = st.setdefault("active_qa_conversations", [])
+            if conv_id not in active:
+                active.append(conv_id)
+                save_state(st)
 
     if not dispatched:
         # Fallback to local deterministic synthesis if AgentAPI is not running

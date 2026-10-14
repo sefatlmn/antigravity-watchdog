@@ -36,7 +36,7 @@ export default Plugin.define({
                     description: "Synthesize or cancel next-step implementation plans (e.g. /next-steps, /next-steps cancel)",
                     execute: async ({ sessionID, prompt }) => {
                         const dir = ctx.location.directory;
-                        const text = (prompt.text || "").toLowerCase().trim();
+                        const text = (prompt?.text || "").toLowerCase().trim();
                         if (text.includes("cancel") || text.includes("stop")) {
                             const res = await cancelSynthesis(dir);
                             if (res.conversationId) {
