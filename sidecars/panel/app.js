@@ -612,24 +612,29 @@ function renderNextSteps(activeRepo) {
     if (proposalsList) {
       if (activeRepo.synthesizing) {
         if (cancelHeaderBtn) cancelHeaderBtn.hidden = false;
-        proposalsList.innerHTML = `
-          <div class="proposals-loading-state">
-            <div class="loading-label-group">
-              <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
-              <span class="loading-label-sub muted small" id="ns-loading-sub">Synthesizing 4 pragmatic implementation plans</span>
+        const existingLoading = proposalsList.querySelector('.proposals-loading-state');
+        if (!existingLoading) {
+          proposalsList.innerHTML = `
+            <div class="proposals-loading-state">
+              <div class="loading-label-group">
+                <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
+                <span class="loading-label-sub muted small" id="ns-loading-sub">Synthesizing 4 pragmatic implementation plans</span>
+              </div>
+              <div class="proposals-progress-container">
+                <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
+              </div>
+              <div class="proposals-loading-actions">
+                <button id="btn-cancel-synthesis-card" type="button" class="btn small-btn secondary btn-cancel-action" onclick="cancelNextStepsRefresh()">
+                  <svg class="icon-svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                  <span>Stop Refresh</span>
+                </button>
+              </div>
             </div>
-            <div class="proposals-progress-container">
-              <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
-            </div>
-            <div class="proposals-loading-actions">
-              <button id="btn-cancel-synthesis-card" type="button" class="btn small-btn secondary btn-cancel-action" onclick="cancelNextStepsRefresh()">
-                <svg class="icon-svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-                <span>Stop Refresh</span>
-              </button>
-            </div>
-          </div>
-        `;
-        setTimeout(() => refreshProposals(true), 50);
+          `;
+        }
+        if (!isRefreshingProposals) {
+          setTimeout(() => refreshProposals(true), 50);
+        }
         return;
       }
       if (cancelHeaderBtn && !isRefreshingProposals) {
@@ -766,6 +771,7 @@ async function refreshProposals(skipDispatch = false) {
   try {
     isRefreshingProposals = true;
     isSynthesisCancelled = false;
+    activeRepo.synthesizing = true;
     if (cancelHeaderBtn) {
       cancelHeaderBtn.hidden = false;
     }
@@ -773,7 +779,7 @@ async function refreshProposals(skipDispatch = false) {
       refreshBtn.disabled = true;
       refreshBtn.classList.add('spinning');
     }
-    if (proposalsList) {
+    if (proposalsList && !proposalsList.querySelector('.proposals-loading-state')) {
       proposalsList.innerHTML = `
         <div class="proposals-loading-state">
           <div class="loading-label-group">
@@ -798,15 +804,16 @@ async function refreshProposals(skipDispatch = false) {
       const res = await callApi('/api/next-steps/refresh', { body: { repo: activeRepo.repoPath } });
       if (isSynthesisCancelled) return;
       if (!res.ok) {
+        activeRepo.synthesizing = false;
         toast(res.error || 'Failed to dispatch synthesis agent', true);
         return;
       }
-      if (res.status === 'ready' && res.proposals) {
+      if (res.status === 'ready' && Array.isArray(res.proposals) && res.proposals.length > 0) {
         const progressBar = $('ns-progress-bar');
         const progressSub = $('ns-loading-sub');
         if (progressBar) progressBar.style.width = '100%';
         if (progressSub) progressSub.textContent = 'Proposals ready!';
-        await new Promise((r) => setTimeout(r, 150));
+        await new Promise((r) => setTimeout(r, 200));
         activeRepo.proposals = res.proposals;
         if (res.goal) activeRepo.goal = res.goal;
         activeRepo.synthesizing = false;
@@ -817,27 +824,36 @@ async function refreshProposals(skipDispatch = false) {
       toast('Agent synthesis currently in progress…');
     }
 
-    // Background agent is synthesizing, poll for completion every 2s
+    // Background agent is synthesizing, poll for completion every 2s (up to 15m)
     const pollInterval = 2000;
-    const maxPolls = 40; // ~80s
+    const maxPolls = 450;
     let finished = false;
 
     for (let i = 0; i < maxPolls; i++) {
       if (isSynthesisCancelled) break;
       const progressBar = $('ns-progress-bar');
       const progressSub = $('ns-loading-sub');
-      const pct = Math.min(92, Math.round(15 + ((i + 1) / maxPolls) * 80));
+
+      let pct = 15;
+      if (i < 15) {
+        pct = Math.round(15 + (i / 15) * 25);
+        if (progressSub) progressSub.textContent = 'Inspecting specifications & history…';
+      } else if (i < 45) {
+        pct = Math.round(40 + ((i - 15) / 30) * 28);
+        if (progressSub) progressSub.textContent = 'Evaluating codebase architecture & entry points…';
+      } else if (i < 100) {
+        pct = Math.round(68 + ((i - 45) / 55) * 20);
+        if (progressSub) progressSub.textContent = 'Formulating 4 implementation plans…';
+      } else if (i < 180) {
+        pct = Math.round(88 + ((i - 100) / 80) * 6);
+        if (progressSub) progressSub.textContent = 'Authoring plan specifications & task breakdowns…';
+      } else {
+        pct = Math.min(96, Math.round(94 + (1 - Math.exp(-(i - 180) / 60)) * 2));
+        if (progressSub) progressSub.textContent = 'Finalizing proposal deliverables & verification plans…';
+      }
+
       if (progressBar) {
         progressBar.style.width = `${pct}%`;
-      }
-      if (progressSub) {
-        if (pct < 35) {
-          progressSub.textContent = 'Inspecting specifications & history…';
-        } else if (pct < 65) {
-          progressSub.textContent = 'Evaluating codebase architecture & entry points…';
-        } else {
-          progressSub.textContent = 'Formulating 4 implementation plans…';
-        }
       }
 
       await new Promise((r) => setTimeout(r, pollInterval));
@@ -846,16 +862,30 @@ async function refreshProposals(skipDispatch = false) {
       try {
         const check = await callApi('/api/next-steps', { body: { repo: activeRepo.repoPath } });
         if (isSynthesisCancelled) break;
-        if (check.ok && check.synthesizing === false && Array.isArray(check.proposals) && check.proposals.length > 0) {
-          if (progressBar) progressBar.style.width = '100%';
-          if (progressSub) progressSub.textContent = 'Proposals ready!';
-          await new Promise((r) => setTimeout(r, 200));
-          activeRepo.proposals = check.proposals;
-          if (check.goal) activeRepo.goal = check.goal;
-          activeRepo.synthesizing = false;
-          finished = true;
-          toast('Synthesized 4 next steps');
-          break;
+
+        if (check && check.ok) {
+          if (check.synthesizing === false) {
+            if (Array.isArray(check.proposals) && check.proposals.length > 0) {
+              if (progressBar) progressBar.style.width = '100%';
+              if (progressSub) progressSub.textContent = 'Proposals ready!';
+              await new Promise((r) => setTimeout(r, 250));
+              activeRepo.proposals = check.proposals;
+              if (check.goal) activeRepo.goal = check.goal;
+              activeRepo.synthesizing = false;
+              finished = true;
+              toast('Synthesized 4 next steps');
+              break;
+            } else if (check.status === 'failed' || check.status === 'error') {
+              activeRepo.synthesizing = false;
+              toast(check.error || 'Synthesis ended without generating proposals.', true);
+              break;
+            } else if (check.status === 'cancelled') {
+              activeRepo.synthesizing = false;
+              break;
+            }
+          } else {
+            activeRepo.synthesizing = true;
+          }
         }
       } catch (pollErr) {
         console.warn('Synthesis poll error:', pollErr);
@@ -863,17 +893,14 @@ async function refreshProposals(skipDispatch = false) {
     }
 
     if (!finished && !isSynthesisCancelled) {
-      const finalCheck = await callApi('/api/next-steps', { body: { repo: activeRepo.repoPath } });
-      if (finalCheck.ok && Array.isArray(finalCheck.proposals) && finalCheck.proposals.length > 0) {
-        activeRepo.proposals = finalCheck.proposals;
-        if (finalCheck.goal) activeRepo.goal = finalCheck.goal;
-        activeRepo.synthesizing = Boolean(finalCheck.synthesizing);
-      } else {
-        toast('Agent synthesis is still in progress in background.', false);
+      if (activeRepo.synthesizing) {
+        activeRepo.synthesizing = false;
+        toast('Synthesis timed out after 15 minutes.', true);
       }
     }
   } catch (err) {
     if (!isSynthesisCancelled) {
+      activeRepo.synthesizing = false;
       toast(`Synthesis error: ${err.message}`, true);
     }
   } finally {

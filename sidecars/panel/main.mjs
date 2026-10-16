@@ -332,7 +332,21 @@ function inspectSingleRepo(topLevel) {
     try {
       const sData = JSON.parse(readFileSync(synthStateFile, 'utf8'));
       if (sData.status === 'synthesizing') {
-        synthesizing = true;
+        const startedTs = sData.startedAt ? new Date(sData.startedAt).getTime() : 0;
+        const elapsed = startedTs ? Date.now() - startedTs : 0;
+        const propFile = join(nextStepsDir, 'proposals.json');
+        let proposalsFresh = false;
+        if (existsSync(propFile) && startedTs) {
+          const mtime = statSync(propFile).mtimeMs;
+          if (mtime >= startedTs - 2000) {
+            proposalsFresh = true;
+          }
+        }
+        if (proposalsFresh || elapsed > 15 * 60 * 1000) {
+          synthesizing = false;
+        } else {
+          synthesizing = true;
+        }
       }
     } catch {
       // ignore

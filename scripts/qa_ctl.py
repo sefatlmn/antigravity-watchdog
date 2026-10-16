@@ -1545,6 +1545,63 @@ flowchart TD
 
 
 
+def is_conversation_active(conv_id: str, max_age_seconds: int = 900) -> bool:
+    """
+    Check if an Antigravity subagent conversation is actively running.
+    Inspects the transcript log in ~/.gemini/antigravity/brain/<conv_id>/.system_generated/logs/transcript.jsonl
+    """
+    if not conv_id:
+        return False
+    t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+    if not t_file.exists():
+        return True
+
+    try:
+        mtime = t_file.stat().st_mtime
+        age = datetime.datetime.now().timestamp() - mtime
+        if age > max_age_seconds:
+            return False
+
+        last_step = None
+        with open(t_file, "rb") as fp:
+            fp.seek(0, 2)
+            size = fp.tell()
+            fp.seek(max(0, size - 16384), 0)
+            chunk = fp.read().decode("utf-8", errors="ignore")
+            lines = chunk.strip().split("\n")
+            for line in reversed(lines):
+                line = line.strip()
+                if line and line.startswith("{"):
+                    try:
+                        parsed = json.loads(line)
+                        if isinstance(parsed, dict) and "type" in parsed:
+                            last_step = parsed
+                            break
+                    except Exception:
+                        pass
+
+        if not last_step:
+            return True
+
+        status = last_step.get("status")
+        if status in ("ERROR", "CANCELLED", "CANCELED"):
+            return False
+
+        step_type = last_step.get("type")
+        if step_type in ("USER_INPUT", "GENERIC"):
+            return True
+
+        if step_type == "PLANNER_RESPONSE":
+            tool_calls = last_step.get("tool_calls")
+            if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
+                return True
+            return False
+
+        return True
+    except Exception:
+        return True
+
+
 def complete_synthesis(repo_root: Path) -> Dict[str, Any]:
     """
     Mark on-demand agent next-steps synthesis complete.
@@ -1552,11 +1609,26 @@ def complete_synthesis(repo_root: Path) -> Dict[str, Any]:
     ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
     ns_dir.mkdir(parents=True, exist_ok=True)
     state_file = ns_dir / "synthesis_state.json"
-    state_data = {
-        "status": "ready",
-        "completedAt": now_iso(),
-    }
+    state_data: Dict[str, Any] = {}
+    if state_file.exists():
+        try:
+            state_data = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            state_data = {}
+    conv_id = state_data.get("conversationId")
+    state_data["status"] = "ready"
+    state_data["completedAt"] = now_iso()
     state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+
+    if conv_id:
+        with StateLock():
+            global_state = load_state()
+            if "active_qa_conversations" in global_state:
+                global_state["active_qa_conversations"] = [
+                    c for c in global_state["active_qa_conversations"] if c != conv_id
+                ]
+                save_state(global_state)
+
     return {"ok": True, "status": "ready"}
 
 
@@ -1654,21 +1726,60 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
         try:
             s_data = json.loads(state_file.read_text(encoding="utf-8"))
             status_val = s_data.get("status", "ready")
+            conv_id = s_data.get("conversationId")
+
             if status_val == "synthesizing":
                 started_str = s_data.get("startedAt", "")
+                started_ts = 0.0
                 if started_str:
                     try:
-                        started_dt = datetime.datetime.fromisoformat(started_str)
-                        # 90-second safety timeout
-                        if (datetime.datetime.now(datetime.timezone.utc) - started_dt).total_seconds() > 90:
-                            complete_synthesis(repo_root)
-                            status_val = "ready"
-                        else:
-                            is_synthesizing = True
+                        started_ts = datetime.datetime.fromisoformat(started_str).timestamp()
                     except Exception:
-                        is_synthesizing = True
+                        pass
+
+                # 1. Check if proposals.json has been written with fresh valid proposals
+                proposals_fresh = False
+                if proposals_file.exists():
+                    try:
+                        p_mtime = proposals_file.stat().st_mtime
+                        if started_ts == 0.0 or p_mtime >= (started_ts - 2.0):
+                            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
+                            p_list = p_data.get("proposals", [])
+                            if isinstance(p_list, list) and len(p_list) > 0:
+                                proposals_fresh = True
+                    except Exception:
+                        pass
+
+                if proposals_fresh:
+                    complete_synthesis(repo_root)
+                    status_val = "ready"
+                    is_synthesizing = False
                 else:
-                    is_synthesizing = True
+                    now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
+                    elapsed = (now_ts - started_ts) if started_ts > 0 else 0
+
+                    if elapsed > 900:  # 15-minute safety timeout
+                        s_data["status"] = "failed"
+                        s_data["error"] = "Synthesis timed out after 15 minutes."
+                        state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+                        status_val = "failed"
+                        is_synthesizing = False
+                    elif conv_id:
+                        if is_conversation_active(conv_id, max_age_seconds=900):
+                            is_synthesizing = True
+                            status_val = "synthesizing"
+                        else:
+                            if elapsed < 15:
+                                is_synthesizing = True
+                                status_val = "synthesizing"
+                            else:
+                                s_data["status"] = "failed"
+                                s_data["error"] = "Synthesis agent terminated without generating proposals."
+                                state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+                                status_val = "failed"
+                                is_synthesizing = False
+                    else:
+                        is_synthesizing = True
             elif status_val == "cancelled":
                 is_synthesizing = False
         except Exception:
@@ -1690,6 +1801,7 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
         "synthesizing": is_synthesizing,
         "status": status_val,
         "conversationId": s_data.get("conversationId"),
+        "error": s_data.get("error"),
         "proposals": proposals,
         "goal": goal_data,
         "conversationsCount": len(get_project_conversations(repo_root)),
