@@ -328,7 +328,7 @@ function renderJobBadge(job) {
   const status = (job.status || 'queued').toLowerCase();
   const verdict = (job.verdict || 'PENDING').toUpperCase();
 
-  if (status === 'running' || status === 'queued') {
+  if (status === 'running' || status === 'queued' || status === 'interrupted') {
     return '';
   }
   if (job.fixes_applied || verdict === 'PASS') {
@@ -413,19 +413,36 @@ function renderDashboard(data) {
 
       if (runBtn) {
         runBtn.classList.remove('warn-btn');
+        runBtn.classList.remove('accent-btn');
+        delete runBtn.dataset.action;
+        delete runBtn.dataset.jobId;
+        delete runBtn.dataset.repo;
+        delete runBtn.dataset.sha;
 
         if (matchingJob) {
-          runBtn.disabled = true;
-          if (runBtnIcon) runBtnIcon.innerHTML = ICONS.check;
-          if (matchingJob.status === 'running') {
+          if (matchingJob.status === 'interrupted') {
+            runBtn.disabled = false;
+            runBtn.classList.add('accent-btn');
+            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
+            if (runBtnText) runBtnText.textContent = `Continue Audit (${activeShortSha})`;
+            runBtn.title = `The previous audit for ${activeShortSha} was interrupted. Click to continue audit.`;
+            runBtn.dataset.action = 'continue-audit';
+            runBtn.dataset.jobId = matchingJob.id || '';
+            runBtn.dataset.repo = matchingJob.repo_path || activeRepo.repoPath || '';
+            runBtn.dataset.sha = matchingJob.sha || activeSha || '';
+          } else if (matchingJob.status === 'running') {
+            runBtn.disabled = true;
             if (runBtnIcon) runBtnIcon.innerHTML = ICONS.dots;
             if (runBtnText) runBtnText.textContent = `Auditing ${activeShortSha}…`;
             runBtn.title = `An audit is currently running for commit ${activeShortSha}.`;
           } else if (matchingJob.status === 'queued') {
+            runBtn.disabled = true;
             if (runBtnIcon) runBtnIcon.innerHTML = ICONS.dots;
             if (runBtnText) runBtnText.textContent = `Commit ${activeShortSha} Queued`;
             runBtn.title = `Commit ${activeShortSha} is already queued for audit.`;
           } else {
+            runBtn.disabled = true;
+            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.check;
             if (runBtnText) runBtnText.textContent = `Commit ${activeShortSha} Audited`;
             runBtn.title = `Commit ${activeShortSha} has already been audited. Make a new commit to audit again.`;
           }
@@ -450,6 +467,11 @@ function renderDashboard(data) {
     } else {
       if (runBtn) {
         runBtn.classList.remove('warn-btn');
+        runBtn.classList.remove('accent-btn');
+        delete runBtn.dataset.action;
+        delete runBtn.dataset.jobId;
+        delete runBtn.dataset.repo;
+        delete runBtn.dataset.sha;
         runBtn.disabled = true;
         runBtn.title = '';
         if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
@@ -463,6 +485,11 @@ function renderDashboard(data) {
   } else {
     if (runBtn) {
       runBtn.classList.remove('warn-btn');
+      runBtn.classList.remove('accent-btn');
+      delete runBtn.dataset.action;
+      delete runBtn.dataset.jobId;
+      delete runBtn.dataset.repo;
+      delete runBtn.dataset.sha;
       runBtn.disabled = true;
       runBtn.title = '';
       if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
@@ -497,9 +524,10 @@ function renderDashboard(data) {
     const status = (job.status || 'queued').toLowerCase();
     const isRunning = status === 'running';
     const isQueued = status === 'queued';
+    const isInterrupted = status === 'interrupted';
     const hasFixToApply = Boolean(job.fixes_committed && job.fix_branch && !job.fixes_applied);
     const isApplied = Boolean(job.fixes_applied);
-    const isPassed = (job.verdict || '').toUpperCase() === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued;
+    const isPassed = (job.verdict || '').toUpperCase() === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued && !isInterrupted;
 
     return `
       <div class="job-item">
@@ -515,8 +543,10 @@ function renderDashboard(data) {
         <div class="job-actions">
           ${isRunning ? `<span class="applied-badge running"><span class="dot"></span>Auditing…</span>` : ''}
           ${isQueued ? `<span class="applied-badge running"><span class="dot"></span>Queued</span>` : ''}
+          ${isInterrupted ? `<span class="applied-badge warn"><span class="dot"></span>Interrupted</span>` : ''}
           ${isApplied ? `<span class="applied-badge">${ICONS.check} Applied to ${escapeHtml(currentBranch)}</span>` : ''}
           ${isPassed ? `<span class="applied-badge">${ICONS.check} Passed</span>` : ''}
+          ${isInterrupted ? `<button type="button" class="btn small-btn accent-btn" data-action="continue-audit" data-job-id="${escapeHtml(job.id)}" data-repo="${escapeHtml(job.repo_path)}" data-sha="${escapeHtml(job.sha)}">${ICONS.play} Continue Audit</button>` : ''}
           ${hasFixToApply ? `<button type="button" class="btn small-btn accent-btn" data-action="apply-fix" data-repo="${escapeHtml(job.repo_path)}" data-sha="${escapeHtml(job.sha)}" title="Merge the bug fix commit into your active branch">Apply Fix to ${escapeHtml(currentBranch)}</button>` : ''}
           <button type="button" class="icon-btn job-report-btn" data-action="view-report" data-report="${escapeHtml(job.report_path)}" data-sha="${escapeHtml(job.short_sha)}" title="View Report" aria-label="View Report">${ICONS.doc}</button>
           ${isArchived
@@ -1047,6 +1077,15 @@ async function syncGit({ silent = false } = {}) {
 }
 
 async function runAudit() {
+  const runBtn = $('btn-run-qa');
+  if (runBtn && runBtn.dataset.action === 'continue-audit') {
+    const jobId = runBtn.dataset.jobId;
+    const repo = runBtn.dataset.repo;
+    const sha = runBtn.dataset.sha;
+    await continueAudit(jobId, repo, sha);
+    return;
+  }
+
   const activeRepo = getActiveRepo();
   if (!activeRepo) {
     toast('No Git repository detected.', true);
@@ -1094,6 +1133,25 @@ async function runAudit() {
     await syncGit({ silent: true });
   } catch (err) {
     toast(`Failed to start audit: ${err.message}`, true);
+  }
+}
+
+async function continueAudit(jobId, repoPath, sha) {
+  try {
+    toast('Resuming Watchdog audit…');
+    const res = await callApi('/api/continue-audit', { body: { jobId, repoPath, sha } });
+    if (!res.ok) {
+      toast(res.error || 'Could not continue audit.', true);
+      return;
+    }
+    if (res.completed) {
+      toast(`Audit for ${res.shortSha || 'commit'} already completed!`);
+    } else {
+      toast(`Resumed Watchdog audit for ${res.shortSha || 'commit'}`);
+    }
+    await syncGit({ silent: true });
+  } catch (err) {
+    toast(`Failed to continue audit: ${err.message}`, true);
   }
 }
 
@@ -1367,7 +1425,9 @@ async function init() {
     const btn = e.target.closest('button[data-action]');
     if (!btn) return;
     const action = btn.dataset.action;
-    if (action === 'apply-fix') {
+    if (action === 'continue-audit') {
+      continueAudit(btn.dataset.jobId, btn.dataset.repo, btn.dataset.sha);
+    } else if (action === 'apply-fix') {
       applyFix(btn.dataset.repo, btn.dataset.sha);
     } else if (action === 'view-report') {
       openReport(btn.dataset.report, btn.dataset.sha);
@@ -1431,16 +1491,28 @@ async function init() {
     }
   }
 
+  let pollTimeout = null;
+  function scheduleNextPoll() {
+    clearTimeout(pollTimeout);
+    const hasRunningJob = Boolean(
+      currentDashboard?.jobs?.some((j) => j.status === 'running' || j.status === 'queued')
+    );
+    const delay = hasRunningJob ? 2500 : 8000;
+    pollTimeout = setTimeout(async () => {
+      if (!document.hidden) {
+        await syncGit({ silent: true });
+      }
+      scheduleNextPoll();
+    }, delay);
+  }
+
   await syncGit({ silent: true });
-  setInterval(() => {
-    if (!document.hidden) {
-      syncGit({ silent: true });
-    }
-  }, 8000);
+  scheduleNextPoll();
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
       syncGit({ silent: true });
+      scheduleNextPoll();
     }
   });
 }

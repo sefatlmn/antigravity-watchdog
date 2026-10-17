@@ -972,6 +972,21 @@ body {
   flex-shrink: 0;
 }
 
+.applied-badge.warn {
+  color: var(--warning, #f59e0b);
+  background: var(--warning-bg, rgba(245, 158, 11, 0.12));
+  border-color: var(--warning-border, rgba(245, 158, 11, 0.25));
+  gap: 5px;
+}
+
+.applied-badge.warn .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warning, #f59e0b);
+  flex-shrink: 0;
+}
+
 .small-applied-tag {
   height: auto;
   padding: 1px 6px;

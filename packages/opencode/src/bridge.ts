@@ -104,6 +104,14 @@ export async function applyFix(repo: string, sha: string): Promise<any> {
   return runCtlJson(["apply-fix", "--repo", repo, "--sha", sha]);
 }
 
+export async function continueAudit(repo?: string, sha?: string, jobId?: string): Promise<any> {
+  const args = ["continue-job"];
+  if (jobId) args.push("--job-id", jobId);
+  if (repo) args.push("--repo", repo);
+  if (sha) args.push("--sha", sha);
+  return runCtlJson(args);
+}
+
 export async function pauseWatchdog(): Promise<any> {
   return runCtlJson(["pause"]);
 }

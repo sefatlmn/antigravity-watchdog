@@ -97,6 +97,16 @@ export async function queueAudit(repo, sha, userComment) {
 export async function applyFix(repo, sha) {
     return runCtlJson(["apply-fix", "--repo", repo, "--sha", sha]);
 }
+export async function continueAudit(repo, sha, jobId) {
+    const args = ["continue-job"];
+    if (jobId)
+        args.push("--job-id", jobId);
+    if (repo)
+        args.push("--repo", repo);
+    if (sha)
+        args.push("--sha", sha);
+    return runCtlJson(args);
+}
 export async function pauseWatchdog() {
     return runCtlJson(["pause"]);
 }

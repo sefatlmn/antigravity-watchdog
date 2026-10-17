@@ -2234,6 +2234,10 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
                 j for j in state.get("jobs", []) if j.get("repo_path") not in empty_wrapper_paths
             ]
 
+        # Reconcile any running, queued, or interrupted jobs against disk reports or conversation state
+        for j in state.get("jobs", []):
+            reconcile_job(j)
+
         # Reconcile any completed jobs whose fix commits have already been applied to HEAD
         for j in state.get("jobs", []):
             if j.get("fixes_committed") and j.get("fix_branch") and not j.get("fixes_applied"):
@@ -2520,10 +2524,15 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
             conv_id = None
             try:
                 data = json.loads(proc.stdout)
-                conv_id = data.get("conversationId") or data.get("response", {}).get("conversationId")
+                conv_id = (
+                    data.get("conversationId")
+                    or data.get("response", {}).get("conversationId")
+                    or data.get("response", {}).get("newConversation", {}).get("conversationId")
+                )
             except Exception:
                 pass
             if conv_id:
+                job["conversation_id"] = conv_id
                 with StateLock():
                     st = load_state()
                     active = st.setdefault("active_qa_conversations", [])
@@ -2735,6 +2744,260 @@ def complete_job(
         save_state(state)
 
     return result_payload
+
+
+def remove_active_conversation(conv_id: str) -> None:
+    if not conv_id:
+        return
+    with StateLock():
+        st = load_state()
+        if "active_qa_conversations" in st and conv_id in st["active_qa_conversations"]:
+            st["active_qa_conversations"] = [c for c in st["active_qa_conversations"] if c != conv_id]
+            save_state(st)
+
+
+def find_qa_conversation_for_job(job: Dict[str, Any]) -> Optional[str]:
+    """
+    Search recent conversations in BRAIN_DIR for a QA Watchdog session for this job's commit.
+    """
+    short_sha = job.get("short_sha") or (job.get("sha") or "")[:7]
+    if not short_sha or not BRAIN_DIR.exists():
+        return None
+
+    try:
+        dirs = sorted([d for d in BRAIN_DIR.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
+        for d in dirs[:30]:
+            t_file = d / ".system_generated" / "logs" / "transcript.jsonl"
+            if not t_file.exists():
+                continue
+            try:
+                with open(t_file, "r", encoding="utf-8", errors="ignore") as fp:
+                    header = fp.readline()
+                    if "[QA-WATCHDOG-SESSION]" in header and short_sha in header:
+                        return d.name
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def reconcile_job(j: Dict[str, Any]) -> bool:
+    """
+    Reconcile a job's status by checking if audit reports were produced on disk,
+    or if the subagent conversation has terminated / been interrupted.
+    Returns True if the job was modified.
+    """
+    curr_status = j.get("status", "queued")
+    if curr_status not in ("running", "queued", "interrupted"):
+        return False
+
+    repo_path_str = j.get("repo_path")
+    if not repo_path_str:
+        return False
+    repo_root = Path(repo_path_str)
+    short_sha = j.get("short_sha") or (j.get("sha") or "")[:7]
+    full_sha = j.get("sha") or short_sha
+    if not repo_root.exists() or not short_sha:
+        return False
+
+    audits_dir = repo_root / ".antigravity" / "audits"
+    report_json = audits_dir / f"review-{short_sha}.json"
+    report_md = audits_dir / f"review-{short_sha}.md"
+
+    # 1. Report JSON exists -> mark completed immediately
+    if report_json.exists():
+        try:
+            r_data = json.loads(report_json.read_text(encoding="utf-8"))
+            j["status"] = "completed"
+            j["verdict"] = r_data.get("verdict") or "PASS"
+            j["summary"] = r_data.get("summary") or j.get("summary") or "QA review completed."
+            j["bugs_count"] = r_data.get("bugs_count", 0)
+            j["fixes_committed"] = bool(r_data.get("fixes_committed", False))
+            j["fix_branch"] = r_data.get("fix_branch")
+            j["completed_at"] = r_data.get("completed_at") or now_iso()
+            j["report_path"] = str(report_md) if report_md.exists() else str(report_json)
+            conv_id = j.get("conversation_id")
+            if conv_id:
+                remove_active_conversation(conv_id)
+            return True
+        except Exception:
+            pass
+
+    # 2. Report Markdown exists and has substance -> parse and complete
+    if report_md.exists():
+        try:
+            content = report_md.read_text(encoding="utf-8")
+            if len(content.strip()) > 80:
+                verdict = "PASS"
+                v_match = re.search(r"\*\*Verdict\*\*:\s*`?([A-Za-z0-9_]+)`?", content, re.IGNORECASE)
+                if v_match and v_match.group(1):
+                    verdict = v_match.group(1).upper()
+
+                summary = j.get("summary") or "QA review completed."
+                s_match = re.search(r"##\s*1\.\s*Executive Summary\s*\n+([^\n#]+)", content, re.IGNORECASE)
+                if s_match and s_match.group(1).strip():
+                    summary = s_match.group(1).strip()
+
+                fix_branch = f"fix/qa-{short_sha}"
+                rc, ahead_out, _ = run_git(repo_root, ["rev-list", "--count", f"{full_sha}..{fix_branch}"])
+                has_commits = rc == 0 and ahead_out.isdigit() and int(ahead_out) > 0
+                if has_commits and verdict == "PASS":
+                    verdict = "FIXED_ON_BRANCH"
+
+                j["status"] = "completed"
+                j["verdict"] = verdict
+                j["summary"] = summary
+                j["fixes_committed"] = has_commits
+                j["fix_branch"] = fix_branch if has_commits else None
+                j["completed_at"] = j.get("completed_at") or now_iso()
+                j["report_path"] = str(report_md)
+                conv_id = j.get("conversation_id")
+                if conv_id:
+                    remove_active_conversation(conv_id)
+                return True
+        except Exception:
+            pass
+
+    # 3. No report exists. Check if conversation has stopped or been interrupted
+    conv_id = j.get("conversation_id")
+    if not conv_id:
+        found_id = find_qa_conversation_for_job(j)
+        if found_id:
+            j["conversation_id"] = found_id
+            conv_id = found_id
+
+    if curr_status == "running":
+        if conv_id:
+            if not is_conversation_active(conv_id, max_age_seconds=120):
+                j["status"] = "interrupted"
+                j["summary"] = "Audit subagent was interrupted before completion. Click Continue Audit to resume."
+                return True
+        else:
+            started = j.get("started_at") or j.get("queued_at")
+            if started:
+                try:
+                    s_dt = datetime.datetime.fromisoformat(started)
+                    elapsed = (datetime.datetime.now(datetime.timezone.utc) - s_dt).total_seconds()
+                    if elapsed > 180:
+                        j["status"] = "interrupted"
+                        j["summary"] = "Audit process stopped before completion. Click Continue Audit to resume."
+                        return True
+                except Exception:
+                    pass
+
+    return False
+
+
+def reconcile_jobs(repo_filter: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """
+    Reconcile all running or interrupted jobs in state.
+    """
+    with StateLock():
+        st = load_state()
+        modified = False
+        for j in st.get("jobs", []):
+            if repo_filter:
+                jr_path = j.get("repo_path")
+                if jr_path and Path(jr_path).resolve() != repo_filter.resolve():
+                    continue
+            if reconcile_job(j):
+                modified = True
+        if modified:
+            save_state(st)
+        return st.get("jobs", [])
+
+
+def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = "") -> Dict[str, Any]:
+    """
+    Resume / continue an interrupted audit job or auto-complete if report is already present.
+    """
+    reconcile_jobs(repo_root)
+
+    with StateLock():
+        st = load_state()
+        target_job = None
+        for j in st.get("jobs", []):
+            if job_id and j.get("id") == job_id:
+                target_job = j
+                break
+            if repo_root and sha:
+                if j.get("repo_path") == str(repo_root) and (j.get("sha") == sha or j.get("short_sha") == sha[:7]):
+                    target_job = j
+                    break
+
+        if not target_job and repo_root:
+            for j in st.get("jobs", []):
+                if j.get("repo_path") == str(repo_root):
+                    target_job = j
+                    break
+
+        if not target_job:
+            return {"ok": False, "error": "No matching audit job found to continue."}
+
+        # If already completed during reconciliation
+        if target_job.get("status") == "completed":
+            return {
+                "ok": True,
+                "completed": True,
+                "shortSha": target_job.get("short_sha"),
+                "verdict": target_job.get("verdict"),
+                "summary": target_job.get("summary"),
+            }
+
+        conv_id = target_job.get("conversation_id") or find_qa_conversation_for_job(target_job)
+        if conv_id:
+            target_job["conversation_id"] = conv_id
+
+        resumed_chat = False
+        env = get_cached_ls_env()
+        agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+        ctl_script_path = str(Path(__file__).resolve())
+        r_path = target_job.get("report_path") or f"{target_job['repo_path']}/.antigravity/audits/review-{target_job['short_sha']}.md"
+
+        continue_msg = f"""[QA-WATCHDOG-CONTINUE]
+Please continue and complete the autonomous QA Watchdog audit for commit `{target_job['short_sha']}` in worktree `{target_job['worktree_path']}`.
+
+When your checks and visual QA testing are finished:
+1. Write the final audit report markdown to `{r_path}`.
+2. Run the completion command:
+python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{target_job['sha']}" --verdict <PASS|FIXED_ON_BRANCH|NEEDS_ATTENTION> --summary "<concise summary>" --bugs-count <count> --fixes-committed <true|false>
+"""
+
+        if conv_id and Path(agentapi_bin).exists():
+            if "language_server" in Path(agentapi_bin).name:
+                cmd = [agentapi_bin, "agentapi", "send-message", conv_id, continue_msg]
+            else:
+                cmd = [agentapi_bin, "send-message", conv_id, continue_msg]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=target_job["repo_path"],
+                    env=env,
+                    timeout=8,
+                )
+                if proc.returncode == 0:
+                    resumed_chat = True
+            except Exception:
+                pass
+
+        if not resumed_chat:
+            spawn_detached_agent(target_job)
+
+        target_job["status"] = "running"
+        target_job["started_at"] = now_iso()
+        target_job["summary"] = "Resumed QA Watchdog review in progress…"
+        save_state(st)
+
+        return {
+            "ok": True,
+            "resumed": True,
+            "notifiedChat": resumed_chat,
+            "conversationId": conv_id,
+            "shortSha": target_job.get("short_sha"),
+        }
 
 
 def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Dict[str, Any]:
@@ -2957,7 +3220,27 @@ def main() -> int:
     p_exec.add_argument("--repo", required=True)
     p_exec.add_argument("--plan-id", required=True)
 
+    p_continue = sub.add_parser("continue-job", help="Resume an interrupted audit job or complete if report exists", parents=[p_common])
+    p_continue.add_argument("--job-id", default="")
+    p_continue.add_argument("--repo", default="")
+    p_continue.add_argument("--sha", default="")
+
+    p_reconcile = sub.add_parser("reconcile-jobs", help="Reconcile running/interrupted jobs against disk audit reports", parents=[p_common])
+    p_reconcile.add_argument("--repo", default="")
+
     args, _ = parser.parse_known_args()
+
+    if args.cmd == "continue-job":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve() if getattr(args, "repo", "") else None
+        res = continue_job(repo_root=root, sha=getattr(args, "sha", ""), job_id=getattr(args, "job_id", ""))
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
+
+    if args.cmd == "reconcile-jobs":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve() if getattr(args, "repo", "") else None
+        jobs = reconcile_jobs(root)
+        print(json.dumps({"ok": True, "count": len(jobs), "jobs": jobs}, indent=2))
+        return 0
 
     if args.cmd == "sync":
         res = sync_git_history(args.repo or [])
@@ -2965,6 +3248,8 @@ def main() -> int:
         return 0
 
     if args.cmd == "status" or not args.cmd:
+        root = resolve_git_root(args.repo) if getattr(args, "repo", "") else None
+        reconcile_jobs(root)
         state = load_state()
         if getattr(args, "repo", ""):
             root = resolve_git_root(args.repo)

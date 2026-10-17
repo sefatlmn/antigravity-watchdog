@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode/plugin";
 import { Schema } from "effect";
-import { getStatus, prepareWorktree, queueAudit, applyFix, pauseWatchdog, resumeWatchdog, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, triggerStopHook, syncRepo, } from "./bridge.js";
+import { getStatus, prepareWorktree, queueAudit, continueAudit, applyFix, pauseWatchdog, resumeWatchdog, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, triggerStopHook, syncRepo, } from "./bridge.js";
 export default Plugin.define({
     id: "qa-watchdog",
     async setup(ctx) {
@@ -43,6 +43,37 @@ export default Plugin.define({
                                 sessionID,
                                 text: `Queued QA Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
                             });
+                            return;
+                        }
+                        if (sub === "continue" || sub === "resume-audit") {
+                            const targetSha = args[1] || "";
+                            try {
+                                const res = await continueAudit(dir, targetSha);
+                                if (res.completed) {
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `Audit for commit \`${res.shortSha || "HEAD"}\` has already completed.\nVerdict: **${res.verdict || "PASS"}**\n${res.summary || ""}`,
+                                    });
+                                }
+                                else if (res.ok) {
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `Resumed QA Watchdog audit for commit \`${res.shortSha || "HEAD"}\` in worktree.\nRun \`/watchdog\` to check progress.`,
+                                    });
+                                }
+                                else {
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `Could not continue audit: ${res.error || "No active or interrupted audit found."}`,
+                                    });
+                                }
+                            }
+                            catch (err) {
+                                await ctx.session.synthetic({
+                                    sessionID,
+                                    text: `Failed to continue audit: ${err.message}`,
+                                });
+                            }
                             return;
                         }
                         if (sub === "apply-fix" || sub === "apply") {
@@ -98,6 +129,7 @@ export default Plugin.define({
                         }
                         output += `\n---\n**Available Commands**:\n`;
                         output += `- \`/watchdog audit [notes]\`: Run QA review on latest commit\n`;
+                        output += `- \`/watchdog continue [sha]\`: Resume an interrupted audit or auto-complete if report is ready\n`;
                         output += `- \`/watchdog apply-fix [sha]\`: Apply fixes from isolated branch\n`;
                         output += `- \`/watchdog pause\` / \`/watchdog resume\`: Toggle background reviews\n`;
                         await ctx.session.synthetic({
@@ -266,6 +298,23 @@ export default Plugin.define({
                     }),
                     execute: async (input) => {
                         const result = await applyFix(input.repo, input.sha);
+                        return {
+                            output: result,
+                            content: JSON.stringify(result, null, 2),
+                        };
+                    },
+                });
+                editor.add({
+                    name: "qa_watchdog_continue",
+                    description: "Resume an interrupted audit job or auto-complete if report is already generated",
+                    input: Schema.Struct({
+                        repo: Schema.optional(Schema.String),
+                        sha: Schema.optional(Schema.String),
+                        jobId: Schema.optional(Schema.String),
+                    }),
+                    execute: async (input) => {
+                        const targetRepo = input.repo || ctx.location.directory;
+                        const result = await continueAudit(targetRepo, input.sha, input.jobId);
                         return {
                             output: result,
                             content: JSON.stringify(result, null, 2),

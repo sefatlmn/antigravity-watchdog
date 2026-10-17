@@ -89,7 +89,7 @@ function runGit(repoPath, args) {
   }
 }
 
-function loadState() {
+function loadState(skipReconcile = false) {
   mkdirSync(WATCHDOG_DIR, { recursive: true });
   if (!existsSync(STATE_FILE)) {
     return {
@@ -100,10 +100,11 @@ function loadState() {
       jobs: [],
     };
   }
+  let state;
   try {
-    return JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+    state = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
   } catch {
-    return {
+    state = {
       paused: false,
       auto_dispatch: true,
       skip_docs_only: true,
@@ -111,6 +112,117 @@ function loadState() {
       jobs: [],
     };
   }
+  if (!skipReconcile) {
+    state = reconcileJobs(state);
+  }
+  return state;
+}
+
+function reconcileJobs(state) {
+  let modified = false;
+  const jobs = Array.isArray(state?.jobs) ? state.jobs : [];
+  for (const j of jobs) {
+    if (j.status === 'running' || j.status === 'interrupted' || j.status === 'queued') {
+      const repoPath = j.repo_path;
+      const shortSha = j.short_sha || (j.sha ? j.sha.slice(0, 7) : '');
+      if (!repoPath || !shortSha) continue;
+
+      const auditsDir = join(repoPath, '.antigravity', 'audits');
+      const jsonReport = join(auditsDir, `review-${shortSha}.json`);
+      const mdReport = join(auditsDir, `review-${shortSha}.md`);
+
+      // 1. JSON report exists -> mark completed
+      if (existsSync(jsonReport)) {
+        try {
+          const rData = JSON.parse(readFileSync(jsonReport, 'utf8'));
+          j.status = 'completed';
+          j.verdict = rData.verdict || 'PASS';
+          j.summary = rData.summary || j.summary || 'Audit completed.';
+          j.bugs_count = typeof rData.bugs_count === 'number' ? rData.bugs_count : (j.bugs_count || 0);
+          j.fixes_committed = Boolean(rData.fixes_committed);
+          j.fix_branch = rData.fix_branch || null;
+          j.completed_at = rData.completed_at || new Date().toISOString();
+          j.report_path = mdReport;
+          modified = true;
+          continue;
+        } catch {}
+      }
+
+      // 2. Markdown report exists -> mark completed
+      if (existsSync(mdReport)) {
+        try {
+          const content = readFileSync(mdReport, 'utf8');
+          if (content.length > 80) {
+            let verdict = 'PASS';
+            const vMatch = content.match(/\*\*Verdict\*\*:\s*`?([A-Za-z0-9_]+)`?/i);
+            if (vMatch && vMatch[1]) {
+              verdict = vMatch[1].toUpperCase();
+            }
+            j.status = 'completed';
+            j.verdict = verdict;
+            j.completed_at = j.completed_at || new Date().toISOString();
+            j.report_path = mdReport;
+            modified = true;
+            continue;
+          }
+        } catch {}
+      }
+
+      // 3. Check for interruption if no report exists and status is 'running'
+      if (j.status === 'running') {
+        const convId = j.conversation_id;
+        if (convId) {
+          const tFile = join(homedir(), '.gemini', 'antigravity', 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
+          if (existsSync(tFile)) {
+            try {
+              const stat = statSync(tFile);
+              const age = (Date.now() - stat.mtimeMs) / 1000;
+              if (age > 45) {
+                const chunk = readFileSync(tFile, 'utf8').trim().split('\n');
+                for (let i = chunk.length - 1; i >= 0; i--) {
+                  const line = chunk[i].trim();
+                  if (line.startsWith('{')) {
+                    const parsed = JSON.parse(line);
+                    if (parsed.status === 'ERROR' || parsed.status === 'CANCELLED' || parsed.status === 'CANCELED') {
+                      j.status = 'interrupted';
+                      j.summary = 'Audit subagent was interrupted or encountered an error.';
+                      modified = true;
+                      break;
+                    }
+                    if (parsed.type === 'PLANNER_RESPONSE' && (!parsed.tool_calls || parsed.tool_calls.length === 0)) {
+                      j.status = 'interrupted';
+                      j.summary = 'Audit subagent stopped before generating report.';
+                      modified = true;
+                      break;
+                    }
+                    if (age > 180) {
+                      j.status = 'interrupted';
+                      j.summary = 'Audit conversation timed out with no recent activity.';
+                      modified = true;
+                      break;
+                    }
+                    break;
+                  }
+                }
+              }
+            } catch {}
+          }
+        } else if (j.started_at) {
+          const elapsed = (Date.now() - new Date(j.started_at).getTime()) / 1000;
+          if (elapsed > 180) {
+            j.status = 'interrupted';
+            j.summary = 'Audit process stopped with no report produced.';
+            modified = true;
+          }
+        }
+      }
+    }
+  }
+
+  if (modified) {
+    saveStatePatch({ jobs: state.jobs });
+  }
+  return state;
 }
 
 function saveStatePatch(patch) {
@@ -545,6 +657,20 @@ app.api('/api/dispatch', (data) => {
   const args = ['dispatch'];
   if (jobId) args.push('--job-id', jobId);
   return runPythonCtl(args);
+});
+
+// POST /api/continue-audit { jobId?, repoPath?, sha? }
+app.api('/api/continue-audit', (data) => {
+  const jobId = String(data?.jobId || '').trim();
+  const repoPath = String(data?.repoPath || '').trim();
+  const sha = String(data?.sha || '').trim();
+
+  const ctlArgs = ['continue-job'];
+  if (jobId) ctlArgs.push('--job-id', jobId);
+  if (repoPath) ctlArgs.push('--repo', repoPath);
+  if (sha) ctlArgs.push('--sha', sha);
+
+  return runPythonCtl(ctlArgs);
 });
 
 // POST /api/report { reportPath }
