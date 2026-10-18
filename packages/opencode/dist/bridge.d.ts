@@ -10,8 +10,6 @@ export declare function queueAudit(repo: string, sha: string, userComment?: stri
 export declare function applyFix(repo: string, sha: string): Promise<any>;
 export declare function continueAudit(repo?: string, sha?: string, jobId?: string): Promise<any>;
 export declare function sendAuditComment(repo: string, comment: string, jobId?: string): Promise<any>;
-export declare function pauseWatchdog(): Promise<any>;
-export declare function resumeWatchdog(): Promise<any>;
 export declare function synthesizeNextSteps(repo: string, force?: boolean): Promise<any>;
 export declare function checkSynthesis(repo: string): Promise<any>;
 export declare function dispatchSynthesis(repo: string): Promise<any>;

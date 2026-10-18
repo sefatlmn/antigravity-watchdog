@@ -82,9 +82,6 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
         return
 
     state = qa_ctl.load_state()
-    if state.get("paused", False):
-        return
-
     if is_qa_watchdog_conversation(payload, state):
         return
 

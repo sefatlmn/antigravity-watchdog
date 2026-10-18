@@ -118,14 +118,6 @@ export async function sendAuditComment(repo: string, comment: string, jobId?: st
   return runCtlJson(args);
 }
 
-export async function pauseWatchdog(): Promise<any> {
-  return runCtlJson(["pause"]);
-}
-
-export async function resumeWatchdog(): Promise<any> {
-  return runCtlJson(["resume"]);
-}
-
 export async function synthesizeNextSteps(repo: string, force = false): Promise<any> {
   const args = ["next-steps", "--repo", repo];
   if (force) args.push("--force");

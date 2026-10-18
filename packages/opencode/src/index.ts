@@ -7,8 +7,6 @@ import {
   continueAudit,
   sendAuditComment,
   applyFix,
-  pauseWatchdog,
-  resumeWatchdog,
   synthesizeNextSteps,
   cancelSynthesis,
   manageGoal,
@@ -29,30 +27,12 @@ export default Plugin.define({
         // /watchdog command
         editor.add({
           name: "watchdog",
-          description: "QA Watchdog management: status, audit, apply-fix, pause, resume",
+          description: "QA Watchdog management: status, audit, apply-fix, continue, comment",
           execute: async ({ sessionID, prompt }) => {
             const dir = ctx.location.directory;
             const text = (prompt?.text || "").trim();
             const args = text.split(/\s+/).filter(Boolean);
             const sub = (args[0] || "").toLowerCase();
-
-            if (sub === "pause") {
-              await pauseWatchdog();
-              await ctx.session.synthetic({
-                sessionID,
-                text: "QA Watchdog paused. Automatic post-commit background reviews are disabled.",
-              });
-              return;
-            }
-
-            if (sub === "resume") {
-              await resumeWatchdog();
-              await ctx.session.synthetic({
-                sessionID,
-                text: "QA Watchdog resumed. Automatic post-commit background reviews are active.",
-              });
-              return;
-            }
 
             if (sub === "audit") {
               const comment = args.slice(1).join(" ");
@@ -177,11 +157,10 @@ export default Plugin.define({
             const status = await getStatus(dir);
             const sync = await syncRepo(dir);
             const repoInfo = sync.bestRepo || {};
-            const paused = Boolean(status.paused);
             const jobs = status.jobs || [];
             const latestJob = jobs[0];
 
-            let output = `## QA Watchdog Status: ${paused ? "PAUSED" : "ACTIVE"}\n\n`;
+            let output = `## QA Watchdog Status: ACTIVE\n\n`;
             output += `- **Repository**: \`${repoInfo.repoName || dir}\` (\`${repoInfo.branch || "main"}\`)\n`;
             output += `- **Head Commit**: \`${(repoInfo.headSha || "").slice(0, 7)}\` - ${repoInfo.headSubject || "No commits"}\n`;
 
@@ -205,7 +184,6 @@ export default Plugin.define({
             output += `- \`/watchdog comment <notes>\`: Send guidance/focus note to in-progress audit\n`;
             output += `- \`/watchdog continue [sha]\`: Resume an interrupted audit or auto-complete if report is ready\n`;
             output += `- \`/watchdog apply-fix [sha]\`: Apply fixes from isolated branch\n`;
-            output += `- \`/watchdog pause\` / \`/watchdog resume\`: Toggle background reviews\n`;
 
             await ctx.session.synthetic({
               sessionID,

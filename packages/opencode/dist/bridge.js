@@ -113,12 +113,6 @@ export async function sendAuditComment(repo, comment, jobId) {
         args.push("--job-id", jobId);
     return runCtlJson(args);
 }
-export async function pauseWatchdog() {
-    return runCtlJson(["pause"]);
-}
-export async function resumeWatchdog() {
-    return runCtlJson(["resume"]);
-}
 export async function synthesizeNextSteps(repo, force = false) {
     const args = ["next-steps", "--repo", repo];
     if (force)

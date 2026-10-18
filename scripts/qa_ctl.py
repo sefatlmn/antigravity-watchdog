@@ -67,7 +67,6 @@ def ensure_dirs() -> None:
 
 def default_state() -> Dict[str, Any]:
     return {
-        "paused": False,
         "auto_dispatch": True,
         "skip_docs_only": True,
         "repos": {},
@@ -2682,7 +2681,7 @@ def queue_commit(
         }
         save_state(state)
 
-    should_dispatch = dispatch_now and not state.get("paused", False) and state.get("auto_dispatch", True)
+    should_dispatch = dispatch_now and state.get("auto_dispatch", True)
     if should_dispatch:
         dispatched = spawn_detached_agent(job)
         if dispatched:
@@ -3336,9 +3335,6 @@ def main() -> int:
     p_apply.add_argument("--sha", required=True)
     p_apply.add_argument("--mode", choices=["cherry-pick", "merge"], default="cherry-pick")
 
-    p_pause = sub.add_parser("pause", help="Pause automatic QA Watchdog triggers", parents=[p_common])
-    p_resume = sub.add_parser("resume", help="Resume automatic QA Watchdog triggers", parents=[p_common])
-
     p_disp = sub.add_parser("dispatch", help="Dispatch a queued QA Watchdog review job", parents=[p_common])
     p_disp.add_argument("--job-id", default="", help="Specific job ID to dispatch")
 
@@ -3427,7 +3423,7 @@ def main() -> int:
         if getattr(args, "json", False):
             print(json.dumps(state, indent=2))
         else:
-            print(f"QA Watchdog Status: {'PAUSED' if state.get('paused') else 'ACTIVE'}")
+            print("QA Watchdog Status: ACTIVE")
             print(f"Auto-Dispatch:      {state.get('auto_dispatch', True)}")
             print(f"Tracked Repos:      {len(state.get('repos', {}))}")
             print(f"Jobs ({len(state.get('jobs', []))}):")
@@ -3521,14 +3517,6 @@ def main() -> int:
         res = apply_fix_branch(root, args.sha, mode=args.mode)
         print(json.dumps(res, indent=2))
         return 0 if res.get("ok") else 1
-
-    if args.cmd in ("pause", "resume"):
-        with StateLock():
-            state = load_state()
-            state["paused"] = args.cmd == "pause"
-            save_state(state)
-        print(json.dumps({"ok": True, "paused": state["paused"]}))
-        return 0
 
     if args.cmd == "dispatch":
         with StateLock():

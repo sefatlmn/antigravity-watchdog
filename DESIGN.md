@@ -55,7 +55,7 @@ rounded:
   md: "6px"
   card: "8px"
   modal: "10px"
-  pill: "999px"
+  tag: "4px"
 spacing:
   xs: "4px"
   sm: "6px"
@@ -108,11 +108,11 @@ components:
     backgroundColor: "{colors.surface-midnight}"
     rounded: "{rounded.card}"
     padding: "10px 12px"
-  pill-ok:
+  tag-ok:
     backgroundColor: "rgba(16, 185, 129, 0.12)"
     textColor: "{colors.radar-emerald}"
-    rounded: "{rounded.pill}"
-    padding: "3px 9px"
+    rounded: "{rounded.tag}"
+    padding: "2px 7px"
 ---
 
 # Design System: Watchdog
@@ -145,7 +145,7 @@ A calibrated dark and light adaptive palette balancing deep obsidian tones with 
 - **Radar Emerald** (`#10b981`): Verified QA test passes, applied fixes, and active watchdog status beacons.
 
 ### Tertiary
-- **Signal Amber** (`#f59e0b`): Warning states, documentation-only commit notices, and paused background status.
+- **Signal Amber** (`#f59e0b`): Warning states and documentation-only commit notices.
 - **Danger Rose** (`#ef4444`): Destructive reset actions, failed audits, and network error alerts.
 
 ### Neutral
@@ -180,7 +180,7 @@ The design system dynamically synchronizes with Google Antigravity's active host
 
 **The Semantic Status Rule.** Colors have unambiguous roles: green means verified/applied; amber means caution/docs-only; cyan means live/running; red means failed/cancelled. Neutral cards never adopt semantic border colors unless actively communicating state.
 
-**The Dual-Theme Contrast Rule.** Every text label, status pill, badge, and actionable icon must meet or exceed WCAG AA contrast thresholds (>= 4.5:1 for body copy and >= 3.0:1 for large display text or badges) across both Dark and Light themes.
+**The Dual-Theme Contrast Rule.** Every text label, status tag, badge, and actionable icon must meet or exceed WCAG AA contrast thresholds (>= 4.5:1 for body copy and >= 3.0:1 for large display text or badges) across both Dark and Light themes.
 
 ## Typography
 
@@ -196,7 +196,7 @@ The typography pairs Apple/System UI sans-serif for UI labels and prose with cle
 - **Body / Prose** (Regular 400, 12px, line-height 1.55, text-wrap pretty): Proposal summaries, goal statements, and report markdown.
 - **Control / Label** (Medium 500 / SemiBold 600, 12px / 11px, line-height 1.25): Tab labels, primary/secondary buttons, input placeholders.
 - **Telemetry & Hashes** (SemiBold 600 / Medium 500, 11px, tracking 0.01em, tabular-nums): Commit SHAs, branch tags, file chips, and timestamps.
-- **Micro-Badges & Tags** (SemiBold 600, 10px, uppercase, tracking 0.03em, tabular-nums): Status pills, difficulty tags, tab counters.
+- **Micro-Badges & Tags** (SemiBold 600, 10px, uppercase, tracking 0.03em, tabular-nums): Status tags, difficulty tags, tab counters.
 
 ### Named Rules
 **The Monospace Discipline Rule.** Monospace typography is strictly reserved for Git commit hashes, branch names, file paths, and execution commands. Standard UI copy and headings must always use the system sans-serif stack.
@@ -243,7 +243,7 @@ The form language balances technical precision with subtle corner softening:
 - **Interactive Controls (Buttons, Inputs, Tabs):** `border-radius: 6px` (`{rounded.md}`).
 - **Surface Containers (Cards, Wells):** `border-radius: 8px` (`{rounded.card}`).
 - **Floating Modals:** `border-radius: 10px` (`{rounded.modal}`).
-- **Status Pills & Count Badges:** `border-radius: 999px` (`{rounded.pill}`).
+- **Status Tags & Count Badges:** `border-radius: 4px` (`{rounded.tag}`).
 
 ## Components
 
@@ -273,9 +273,9 @@ All interactive controls and state tags within card footers (`.job-actions` on A
 - **Track (`.proposals-progress`):** Height `4px`, background `var(--surface-well)`, `border-radius: 2px`, overflow `hidden`.
 - **Indicator (`.proposals-progress-bar`):** Background `var(--accent)`, width animated via smooth cubic-bezier (`width 0.4s cubic-bezier(0.16, 1, 0.3, 1)`). Devoid of marquee shimmers or infinite loops.
 
-### Status Pills & Indicators
-- **Style:** Fully pill-shaped (`border-radius: 999px`), padding `3px 9px`, font size `11px`, font weight 500.
-- **Active / Ok:** Background `rgba(16, 185, 129, 0.12)`, border `rgba(16, 185, 129, 0.25)`, color `#34d399` (dark) / `#047857` (light), with a `6px` solid emerald dot.
+### Status Tags & Indicators
+- **Style:** Crisp technical tag (`border-radius: 4px`), padding `2px 7px`, font size `10px`, font weight 600, uppercase with letter-tracking.
+- **Active / Ok:** Background `rgba(16, 185, 129, 0.12)`, border `rgba(16, 185, 129, 0.25)`, color `#34d399` (dark) / `#047857` (light), with a `5px` solid emerald square indicator.
 - **Warning:** Background `rgba(245, 158, 11, 0.12)`, border `rgba(245, 158, 11, 0.25)`, color `#fbbf24` (dark) / `#b45309` (light).
 - **Running / Auditing:** Same position, height, and geometry as applied badges, featuring a steady 6px accent dot.
 

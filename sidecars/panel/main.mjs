@@ -93,7 +93,6 @@ function loadState(skipReconcile = false) {
   mkdirSync(WATCHDOG_DIR, { recursive: true });
   if (!existsSync(STATE_FILE)) {
     return {
-      paused: false,
       auto_dispatch: true,
       skip_docs_only: true,
       repos: {},
@@ -105,7 +104,6 @@ function loadState(skipReconcile = false) {
     state = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
   } catch {
     state = {
-      paused: false,
       auto_dispatch: true,
       skip_docs_only: true,
       repos: {},
@@ -545,7 +543,6 @@ app.api('/api/dashboard', (data) => {
   const activeRepos = collectActiveRepos(uris, state);
 
   return {
-    paused: Boolean(state.paused),
     auto_dispatch: state.auto_dispatch !== false,
     skip_docs_only: state.skip_docs_only !== false,
     activeRepos,
@@ -592,16 +589,14 @@ app.api('/api/sync', (data) => {
   };
 });
 
-// POST /api/settings { paused?, auto_dispatch?, skip_docs_only? }
+// POST /api/settings { auto_dispatch?, skip_docs_only? }
 app.api('/api/settings', (data) => {
   const patch = {};
-  if (typeof data.paused === 'boolean') patch.paused = data.paused;
   if (typeof data.auto_dispatch === 'boolean') patch.auto_dispatch = data.auto_dispatch;
   if (typeof data.skip_docs_only === 'boolean') patch.skip_docs_only = data.skip_docs_only;
   const updated = saveStatePatch(patch);
   return {
     ok: true,
-    paused: Boolean(updated.paused),
     auto_dispatch: updated.auto_dispatch !== false,
     skip_docs_only: updated.skip_docs_only !== false,
   };

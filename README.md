@@ -68,8 +68,6 @@ opencode plugin add /path/to/qa-watchdog/packages/opencode
   - `/watchdog`: Formatted status report with current repo, branch, latest audit verdict, and available fix branches.
   - `/watchdog audit [notes]`: Trigger a QA review on the latest commit in an isolated worktree.
   - `/watchdog apply-fix [sha]`: Merge confirmed bug fixes from `fix/qa-<sha>` onto your working branch.
-  - `/watchdog pause`: Pause automatic background post-commit reviews.
-  - `/watchdog resume`: Resume automatic background reviews.
 
 - **`/next-steps`**:
   - `/next-steps`: Synthesizes and prints 4 structured implementation proposals directly into chat.
@@ -124,10 +122,6 @@ python3 scripts/qa_ctl.py apply-fix --repo /path/to/project --sha <short_sha>
 
 # Cancel an ongoing next-steps synthesis
 python3 scripts/qa_ctl.py cancel-synthesis --repo /path/to/project
-
-# Pause or resume background processing
-python3 scripts/qa_ctl.py pause
-python3 scripts/qa_ctl.py resume
 ```
 
 ---

@@ -309,21 +309,6 @@ function switchTab(tab) {
 }
 window.switchTab = switchTab;
 
-function renderStatusPill(paused) {
-  const pill = $('btn-status-pill');
-  const text = $('status-text');
-  if (!pill || !text) return;
-  if (paused) {
-    pill.className = 'pill warn';
-    text.textContent = 'Paused';
-    pill.title = 'Watchdog is paused. Click to resume automatic audits.';
-  } else {
-    pill.className = 'pill ok';
-    text.textContent = 'Active';
-    pill.title = 'Watchdog is active. Click to pause automatic audits.';
-  }
-}
-
 function renderJobBadge(job) {
   const status = (job.status || 'queued').toLowerCase();
   const verdict = (job.verdict || 'PENDING').toUpperCase();
@@ -335,17 +320,16 @@ function renderJobBadge(job) {
     return '';
   }
   if (job.fixes_committed && job.fix_branch) {
-    return '<span class="pill fix">Ready</span>';
+    return '<span class="tag fix">Ready</span>';
   }
   if (verdict === 'NEEDS_ATTENTION') {
-    return `<span class="pill warn">${ICONS.warn} Issues</span>`;
+    return `<span class="tag warn">${ICONS.warn} Issues</span>`;
   }
-  return `<span class="pill">${escapeHtml(verdict)}</span>`;
+  return `<span class="tag">${escapeHtml(verdict)}</span>`;
 }
 
 function renderDashboard(data) {
   currentDashboard = data;
-  renderStatusPill(Boolean(data.paused));
 
   const repos = data.activeRepos || [];
   const repoSelect = $('select-repo');
@@ -740,7 +724,7 @@ function renderNextSteps(activeRepo) {
             <div class="proposal-card" data-proposal-id="${escapeHtml(planId)}">
               <div class="proposal-meta-row">
                 <div class="proposal-badge-group">
-                  <span class="pill ok">${escapeHtml(badge)}</span>
+                  <span class="tag ok">${escapeHtml(badge)}</span>
                   <span class="muted small">${escapeHtml(difficulty)}</span>
                 </div>
                 <span class="muted small">~${escapeHtml(estTime)}</span>
@@ -1280,17 +1264,6 @@ async function sendReportToChat() {
   }
 }
 
-async function togglePause() {
-  const next = !Boolean(currentDashboard?.paused);
-  try {
-    await callApi('/api/settings', { body: { paused: next } });
-    renderStatusPill(next);
-    toast(next ? 'Watchdog paused' : 'Watchdog active');
-  } catch (err) {
-    toast(`Failed to update setting: ${err.message}`, true);
-  }
-}
-
 async function toggleArchiveJob(jobId, archived) {
   try {
     const res = await callApi('/api/archive-job', { body: { jobId, archived } });
@@ -1321,8 +1294,6 @@ async function init() {
   if (btnNextSteps) btnNextSteps.addEventListener('click', () => switchTab('next-steps'));
 
   // Header actions
-  const btnPill = $('btn-status-pill');
-  if (btnPill) btnPill.addEventListener('click', togglePause);
   const btnSync = $('btn-sync');
   if (btnSync) btnSync.addEventListener('click', () => syncGit({ silent: false }));
   const btnRunQa = $('btn-run-qa');
