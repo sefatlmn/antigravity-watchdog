@@ -618,6 +618,33 @@ app.api('/api/trigger', (data) => {
       contentType: 'application/json',
     });
   }
+
+  // Prevent double auditing if an audit is already running for this repo
+  const state = loadState();
+  const running = (state.jobs || []).find(
+    (j) => (!j.repo_path || j.repo_path === repoPath) && (j.status === 'running' || j.status === 'queued')
+  );
+
+  if (running) {
+    if (comment) {
+      const ctlRes = runPythonCtl(['send-comment', '--repo', repoPath, '--comment', comment, '--job-id', running.id || '']);
+      return {
+        ok: true,
+        alreadyRunning: true,
+        commentSent: true,
+        job: running,
+        shortSha: running.short_sha || '',
+        message: `An audit for commit ${running.short_sha || 'current'} is already running. Comment forwarded to auditor.`,
+      };
+    }
+    return {
+      ok: false,
+      alreadyRunning: true,
+      job: running,
+      error: `An audit for commit ${running.short_sha || 'current'} is already running. Double auditing prevented.`,
+    };
+  }
+
   const ctlArgs = ['queue', '--repo', repoPath, '--sha', sha, '--no-dispatch', '--force'];
   if (comment) {
     ctlArgs.push('--comment', comment);
@@ -669,6 +696,26 @@ app.api('/api/continue-audit', (data) => {
   if (jobId) ctlArgs.push('--job-id', jobId);
   if (repoPath) ctlArgs.push('--repo', repoPath);
   if (sha) ctlArgs.push('--sha', sha);
+
+  return runPythonCtl(ctlArgs);
+});
+
+// POST /api/send-comment { repoPath?, comment, jobId? }
+app.api('/api/send-comment', (data) => {
+  const repoPath = String(data?.repoPath || '').trim();
+  const comment = String(data?.comment || '').trim();
+  const jobId = String(data?.jobId || '').trim();
+
+  if (!comment) {
+    return new Response(JSON.stringify({ error: 'Missing comment' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+
+  const ctlArgs = ['send-comment', '--comment', comment];
+  if (repoPath) ctlArgs.push('--repo', repoPath);
+  if (jobId) ctlArgs.push('--job-id', jobId);
 
   return runPythonCtl(ctlArgs);
 });

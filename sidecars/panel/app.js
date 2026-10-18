@@ -411,6 +411,22 @@ function renderDashboard(data) {
         commitTagBadge.hidden = !isAppliedFix;
       }
 
+      // Check for any currently running or queued job for this repo to prevent double auditing
+      const activeRunningJob = (data.jobs || []).find((j) => {
+        const jRepo = (j.repo_path || '').trim();
+        const repoMatches = !jRepo || jRepo === activeRepo.repoPath;
+        return repoMatches && (j.status === 'running' || j.status === 'queued');
+      });
+
+      const commentInput = $('input-audit-comment');
+      if (commentInput) {
+        if (activeRunningJob) {
+          commentInput.placeholder = `Send comment/guidance to in-progress audit (${activeRunningJob.short_sha || activeShortSha})…`;
+        } else {
+          commentInput.placeholder = 'Add a comment or focus note for this audit…';
+        }
+      }
+
       if (runBtn) {
         runBtn.classList.remove('warn-btn');
         runBtn.classList.remove('accent-btn');
@@ -419,7 +435,25 @@ function renderDashboard(data) {
         delete runBtn.dataset.repo;
         delete runBtn.dataset.sha;
 
-        if (matchingJob) {
+        if (activeRunningJob) {
+          const commentVal = commentInput ? commentInput.value.trim() : '';
+          if (commentVal) {
+            runBtn.disabled = false;
+            runBtn.classList.add('accent-btn');
+            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
+            if (runBtnText) runBtnText.textContent = 'Send Comment to Auditor';
+            runBtn.title = `Send your comment to the active audit for commit ${activeRunningJob.short_sha || activeShortSha}.`;
+            runBtn.dataset.action = 'send-comment';
+            runBtn.dataset.jobId = activeRunningJob.id || '';
+            runBtn.dataset.repo = activeRunningJob.repo_path || activeRepo.repoPath || '';
+            runBtn.dataset.sha = activeRunningJob.sha || '';
+          } else {
+            runBtn.disabled = true;
+            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.dots;
+            if (runBtnText) runBtnText.textContent = `Auditing ${activeRunningJob.short_sha || activeShortSha}…`;
+            runBtn.title = `An audit is currently running for commit ${activeRunningJob.short_sha || activeShortSha}. Type a comment above to send guidance.`;
+          }
+        } else if (matchingJob) {
           if (matchingJob.status === 'interrupted') {
             runBtn.disabled = false;
             runBtn.classList.add('accent-btn');
@@ -430,16 +464,6 @@ function renderDashboard(data) {
             runBtn.dataset.jobId = matchingJob.id || '';
             runBtn.dataset.repo = matchingJob.repo_path || activeRepo.repoPath || '';
             runBtn.dataset.sha = matchingJob.sha || activeSha || '';
-          } else if (matchingJob.status === 'running') {
-            runBtn.disabled = true;
-            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.dots;
-            if (runBtnText) runBtnText.textContent = `Auditing ${activeShortSha}…`;
-            runBtn.title = `An audit is currently running for commit ${activeShortSha}.`;
-          } else if (matchingJob.status === 'queued') {
-            runBtn.disabled = true;
-            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.dots;
-            if (runBtnText) runBtnText.textContent = `Commit ${activeShortSha} Queued`;
-            runBtn.title = `Commit ${activeShortSha} is already queued for audit.`;
           } else {
             runBtn.disabled = true;
             if (runBtnIcon) runBtnIcon.innerHTML = ICONS.check;
@@ -1091,6 +1115,25 @@ async function runAudit() {
     toast('No Git repository detected.', true);
     return;
   }
+
+  const commentInput = $('input-audit-comment');
+  const comment = commentInput ? commentInput.value.trim() : '';
+
+  // Prevent double auditing: check if an audit is already running for this repo
+  const activeRunningJob = (currentDashboard?.jobs || []).find(
+    (j) => (!j.repo_path || j.repo_path === activeRepo.repoPath) && (j.status === 'running' || j.status === 'queued')
+  );
+
+  if (activeRunningJob || runBtn?.dataset.action === 'send-comment') {
+    if (comment) {
+      await sendCommentToAuditor(activeRepo.repoPath, comment, activeRunningJob?.id || runBtn?.dataset.jobId);
+      if (commentInput) commentInput.value = '';
+      return;
+    }
+    toast(`An audit for ${activeRunningJob?.short_sha || 'commit'} is already in progress. Type a comment above to send guidance.`, true);
+    return;
+  }
+
   const latest = activeRepo.youngestCommit || activeRepo.head;
   const SKIP_TAGS = ['[auto-review]', '[qa-watchdog]', '[skip-qa]'];
   const subject = latest?.subject || '';
@@ -1100,12 +1143,20 @@ async function runAudit() {
   }
   const sha = latest?.sha || 'YOUNGEST';
   const repoPath = activeRepo.repoPath;
-  const commentInput = $('input-audit-comment');
-  const comment = commentInput ? commentInput.value.trim() : '';
 
   try {
     toast('Preparing isolated worktree & dispatching Watchdog…');
     const res = await callApi('/api/trigger', { body: { repoPath, sha, comment } });
+    if (res.alreadyRunning) {
+      if (res.commentSent) {
+        toast(`Comment forwarded to in-progress audit for ${res.shortSha || 'commit'}!`);
+      } else {
+        toast(`An audit for commit ${res.shortSha || 'commit'} is already in progress. Double auditing prevented.`, true);
+      }
+      if (commentInput) commentInput.value = '';
+      await syncGit({ silent: true });
+      return;
+    }
     if (!res.ok || !res.job) {
       toast(res.reason || res.error || 'Could not queue review.', true);
       return;
@@ -1133,6 +1184,21 @@ async function runAudit() {
     await syncGit({ silent: true });
   } catch (err) {
     toast(`Failed to start audit: ${err.message}`, true);
+  }
+}
+
+async function sendCommentToAuditor(repoPath, comment, jobId) {
+  try {
+    toast('Sending comment to in-progress audit…');
+    const res = await callApi('/api/send-comment', { body: { repoPath, comment, jobId } });
+    if (!res.ok) {
+      toast(res.error || 'Could not send comment.', true);
+      return;
+    }
+    toast(`Comment sent to in-progress audit for ${res.short_sha || 'commit'}!`);
+    await syncGit({ silent: true });
+  } catch (err) {
+    toast(`Failed to send comment: ${err.message}`, true);
   }
 }
 
@@ -1408,6 +1474,9 @@ async function init() {
         e.preventDefault();
         runAudit();
       }
+    });
+    commentInput.addEventListener('input', () => {
+      if (currentDashboard) renderDashboard(currentDashboard);
     });
   }
 

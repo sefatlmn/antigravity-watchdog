@@ -104,6 +104,42 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
             repo_key = str(repo_root)
             repo_entry = state.get("repos", {}).get(repo_key)
 
+            # Check if an audit is already running for this repo to prevent double auditing
+            running_job = qa_ctl.get_running_job(repo_root)
+            if running_job:
+                # An audit is currently running. Double auditing must be prevented!
+                # Forward user messages from this finished turn as a comment to the in-progress audit.
+                conv_id = payload.get("conversationId", "")
+                transcript_path = payload.get("transcriptPath", "")
+                user_reqs = qa_ctl.get_conversation_user_requests(
+                    conv_id,
+                    limit=1,
+                    transcript_path=Path(transcript_path) if transcript_path else None,
+                )
+                user_msg = user_reqs[-1] if user_reqs else ""
+
+                comment_parts = []
+                if user_msg:
+                    comment_parts.append(user_msg)
+                if youngest_info["sha"] != running_job.get("sha"):
+                    comment_parts.append(
+                        f"New commit: {youngest_info['short_sha']} ({youngest_info['subject']})"
+                    )
+
+                if comment_parts:
+                    full_comment = " — ".join(comment_parts)
+                    qa_ctl.send_comment_to_job(running_job, full_comment)
+
+                with qa_ctl.StateLock():
+                    st = qa_ctl.load_state()
+                    st.setdefault("repos", {})[repo_key] = {
+                        "name": repo_root.name,
+                        "baseline_sha": youngest_info["sha"],
+                        "updated_at": qa_ctl.now_iso(),
+                    }
+                    qa_ctl.save_state(st)
+                continue
+
             if not repo_entry or not repo_entry.get("baseline_sha"):
                 age_seconds = time.time() - youngest_info["timestamp"]
                 if age_seconds <= 1200:

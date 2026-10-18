@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode/plugin";
 import { Schema } from "effect";
-import { getStatus, prepareWorktree, queueAudit, continueAudit, applyFix, pauseWatchdog, resumeWatchdog, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, triggerStopHook, syncRepo, } from "./bridge.js";
+import { getStatus, prepareWorktree, queueAudit, continueAudit, sendAuditComment, applyFix, pauseWatchdog, resumeWatchdog, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, triggerStopHook, syncRepo, } from "./bridge.js";
 export default Plugin.define({
     id: "qa-watchdog",
     async setup(ctx) {
@@ -35,6 +35,25 @@ export default Plugin.define({
                         }
                         if (sub === "audit") {
                             const comment = args.slice(1).join(" ");
+                            const status = await getStatus(dir);
+                            const runningJob = (status.jobs || []).find((j) => j.status === "running" || j.status === "queued");
+                            if (runningJob) {
+                                const targetSha = runningJob.shortSha || runningJob.sha?.slice(0, 7) || "current";
+                                if (comment) {
+                                    await sendAuditComment(dir, comment, runningJob.id);
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `An audit for commit \`${targetSha}\` is already in progress. Your comment was forwarded to the active auditor:\n> "${comment}"`,
+                                    });
+                                }
+                                else {
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `An audit for commit \`${targetSha}\` is already in progress. Double auditing prevented.\nTo send guidance to the auditor, run \`/watchdog comment <notes>\`.`,
+                                    });
+                                }
+                                return;
+                            }
                             const sync = await syncRepo(dir);
                             const sha = sync.bestRepo?.headSha || "HEAD";
                             await prepareWorktree(dir, sha);
@@ -43,6 +62,38 @@ export default Plugin.define({
                                 sessionID,
                                 text: `Queued QA Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
                             });
+                            return;
+                        }
+                        if (sub === "comment" || sub === "note") {
+                            const comment = args.slice(1).join(" ");
+                            if (!comment) {
+                                await ctx.session.synthetic({
+                                    sessionID,
+                                    text: "Please provide a comment. Usage: `/watchdog comment <your message>`",
+                                });
+                                return;
+                            }
+                            try {
+                                const res = await sendAuditComment(dir, comment);
+                                if (res.ok) {
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `Sent comment to in-progress audit for commit \`${res.short_sha || "active"}\`:\n> "${comment}"`,
+                                    });
+                                }
+                                else {
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `Could not send comment: ${res.error || "No in-progress audit found."}`,
+                                    });
+                                }
+                            }
+                            catch (err) {
+                                await ctx.session.synthetic({
+                                    sessionID,
+                                    text: `Failed to send comment: ${err.message}`,
+                                });
+                            }
                             return;
                         }
                         if (sub === "continue" || sub === "resume-audit") {
@@ -128,7 +179,8 @@ export default Plugin.define({
                             output += `\nNo recent audits recorded.\n`;
                         }
                         output += `\n---\n**Available Commands**:\n`;
-                        output += `- \`/watchdog audit [notes]\`: Run QA review on latest commit\n`;
+                        output += `- \`/watchdog audit [notes]\`: Run QA review on latest commit (forwards notes if running)\n`;
+                        output += `- \`/watchdog comment <notes>\`: Send guidance/focus note to in-progress audit\n`;
                         output += `- \`/watchdog continue [sha]\`: Resume an interrupted audit or auto-complete if report is ready\n`;
                         output += `- \`/watchdog apply-fix [sha]\`: Apply fixes from isolated branch\n`;
                         output += `- \`/watchdog pause\` / \`/watchdog resume\`: Toggle background reviews\n`;
@@ -315,6 +367,23 @@ export default Plugin.define({
                     execute: async (input) => {
                         const targetRepo = input.repo || ctx.location.directory;
                         const result = await continueAudit(targetRepo, input.sha, input.jobId);
+                        return {
+                            output: result,
+                            content: JSON.stringify(result, null, 2),
+                        };
+                    },
+                });
+                editor.add({
+                    name: "qa_watchdog_send_comment",
+                    description: "Send a comment or guidance message to an in-progress QA Watchdog audit",
+                    input: Schema.Struct({
+                        comment: Schema.String,
+                        repo: Schema.optional(Schema.String),
+                        jobId: Schema.optional(Schema.String),
+                    }),
+                    execute: async (input) => {
+                        const targetRepo = input.repo || ctx.location.directory;
+                        const result = await sendAuditComment(targetRepo, input.comment, input.jobId);
                         return {
                             output: result,
                             content: JSON.stringify(result, null, 2),

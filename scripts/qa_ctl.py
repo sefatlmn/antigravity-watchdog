@@ -455,11 +455,19 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
     return conversations
 
 
-def get_conversation_user_requests(conv_id: str, limit: int = 5) -> List[str]:
+def get_conversation_user_requests(
+    conv_id: str, limit: int = 5, transcript_path: Optional[Path] = None
+) -> List[str]:
     """
     Extract recent user requests from a conversation transcript.
     """
-    t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+    if transcript_path and Path(transcript_path).exists():
+        t_file = Path(transcript_path)
+    elif conv_id:
+        t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+    else:
+        return []
+
     if not t_file.exists():
         return []
     requests: List[str] = []
@@ -474,7 +482,14 @@ def get_conversation_user_requests(conv_id: str, limit: int = 5) -> List[str]:
                         content = step.get("content", "")
                         m = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
                         req_text = m.group(1).strip() if m else content.strip()
-                        if req_text and not req_text.startswith("Comments on artifact URI:") and req_text not in requests:
+                        if (
+                            req_text
+                            and not req_text.startswith("Comments on artifact URI:")
+                            and not req_text.startswith("[QA-WATCHDOG")
+                            and not req_text.startswith("[NEXT-STEPS")
+                            and not req_text.startswith("[Notice]")
+                            and req_text not in requests
+                        ):
                             requests.append(req_text)
                 except Exception:
                     pass
@@ -2584,6 +2599,30 @@ def queue_commit(
         state = load_state()
         repo_key = str(repo_root)
 
+        # Check if an audit is already in progress for this repository to prevent double auditing
+        running_job = None
+        for j in state.get("jobs", []):
+            if j.get("repo_path") == repo_key and j.get("status") in ("running", "queued"):
+                running_job = j
+                break
+
+        if running_job:
+            state.setdefault("repos", {})[repo_key] = {
+                "name": repo_root.name,
+                "baseline_sha": full_sha,
+                "updated_at": now_iso(),
+            }
+            save_state(state)
+
+            comment_to_send = user_comment.strip()
+            if not comment_to_send and running_job.get("id") != job_id:
+                comment_to_send = f"Commit {short_sha} ('{info['subject']}') was made while this audit is in progress."
+            if comment_to_send:
+                send_comment_to_job(running_job, comment_to_send)
+
+            running_job["already_running"] = True
+            return running_job
+
         if not force and state.get("skip_docs_only", True):
             if is_docs_only_commit(repo_root, full_sha, base_sha or info.get("parent_sha", "")):
                 state.setdefault("repos", {})[repo_key] = {
@@ -2602,7 +2641,7 @@ def queue_commit(
                 "updated_at": now_iso(),
             }
             if user_comment:
-                state["jobs"][existing_idx]["user_comment"] = user_comment.strip()
+                send_comment_to_job(state["jobs"][existing_idx], user_comment)
             save_state(state)
             return state["jobs"][existing_idx]
 
@@ -2906,6 +2945,125 @@ def reconcile_jobs(repo_filter: Optional[Path] = None) -> List[Dict[str, Any]]:
         if modified:
             save_state(st)
         return st.get("jobs", [])
+
+
+def get_running_job(repo_root: Optional[Path] = None, exclude_job_id: str = "") -> Optional[Dict[str, Any]]:
+    """
+    Find any in-progress (running or queued) audit job for the repository.
+    Reconciles jobs first to ensure terminated/completed jobs aren't reported as running.
+    """
+    reconcile_jobs(repo_root)
+    with StateLock():
+        st = load_state()
+        repo_str = str(repo_root.resolve()) if repo_root else ""
+        for j in st.get("jobs", []):
+            if exclude_job_id and j.get("id") == exclude_job_id:
+                continue
+            if j.get("status") in ("running", "queued"):
+                if not repo_str:
+                    return j
+                jr = j.get("repo_path")
+                if jr and Path(jr).resolve() == Path(repo_str).resolve():
+                    return j
+    return None
+
+
+def send_comment_to_job(job: Dict[str, Any], comment: str) -> Dict[str, Any]:
+    """
+    Send a comment, instruction, or user message to an in-progress audit job.
+    Updates job metadata in state.json and notifies the subagent conversation via AgentAPI send-message.
+    """
+    clean_comment = comment.strip()
+    if not clean_comment:
+        return {"ok": False, "error": "Empty comment."}
+
+    job_id = job.get("id")
+    repo_path = job.get("repo_path")
+    short_sha = job.get("short_sha") or (job.get("sha") or "")[:7]
+
+    with StateLock():
+        st = load_state()
+        target_j = None
+        for j in st.get("jobs", []):
+            if (job_id and j.get("id") == job_id) or (repo_path and j.get("repo_path") == repo_path and j.get("status") in ("running", "queued")):
+                target_j = j
+                break
+
+        if not target_j:
+            target_j = job
+
+        comments_history = target_j.setdefault("comments_history", [])
+        if clean_comment in comments_history:
+            return {"ok": True, "already_sent": True, "job_id": target_j.get("id"), "short_sha": short_sha}
+        comments_history.append(clean_comment)
+
+        curr_comment = target_j.get("user_comment") or ""
+        if curr_comment:
+            target_j["user_comment"] = f"{curr_comment} | {clean_comment}"
+        else:
+            target_j["user_comment"] = clean_comment
+
+        save_state(st)
+
+    conv_id = target_j.get("conversation_id") or find_qa_conversation_for_job(target_j)
+    notified = False
+    if conv_id:
+        env = get_cached_ls_env()
+        agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+        if Path(agentapi_bin).exists():
+            msg = f"""[QA-WATCHDOG-USER-COMMENT]
+The user added a comment/instruction for your in-progress audit of commit `{short_sha}`:
+"{clean_comment}"
+
+Please take this into account for your ongoing audit, checks, and testing."""
+            if "language_server" in Path(agentapi_bin).name:
+                cmd = [agentapi_bin, "agentapi", "send-message", conv_id, msg]
+            else:
+                cmd = [agentapi_bin, "send-message", conv_id, msg]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=repo_path or str(Path.cwd()),
+                    env=env,
+                    timeout=8,
+                )
+                if proc.returncode == 0:
+                    notified = True
+            except Exception:
+                pass
+
+    return {
+        "ok": True,
+        "job_id": target_j.get("id"),
+        "short_sha": short_sha,
+        "notified_chat": notified,
+        "user_comment": target_j.get("user_comment"),
+    }
+
+
+def send_comment_to_running_audit(repo_root: Optional[Path] = None, comment: str = "", job_id: str = "") -> Dict[str, Any]:
+    """
+    Find in-progress audit for repository (or job ID) and forward comment to it.
+    """
+    running = None
+    if job_id:
+        with StateLock():
+            st = load_state()
+            for j in st.get("jobs", []):
+                if j.get("id") == job_id:
+                    running = j
+                    break
+    if not running and repo_root:
+        running = get_running_job(repo_root)
+    if not running:
+        running = get_running_job(None)
+
+    if not running:
+        return {"ok": False, "error": "No in-progress audit found to receive comment."}
+
+    return send_comment_to_job(running, comment)
 
 
 def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = "") -> Dict[str, Any]:
@@ -3228,7 +3386,18 @@ def main() -> int:
     p_reconcile = sub.add_parser("reconcile-jobs", help="Reconcile running/interrupted jobs against disk audit reports", parents=[p_common])
     p_reconcile.add_argument("--repo", default="")
 
+    p_sc = sub.add_parser("send-comment", help="Send comment/note to an in-progress audit job", parents=[p_common])
+    p_sc.add_argument("--repo", default="")
+    p_sc.add_argument("--comment", required=True)
+    p_sc.add_argument("--job-id", default="")
+
     args, _ = parser.parse_known_args()
+
+    if args.cmd == "send-comment":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve() if getattr(args, "repo", "") else None
+        res = send_comment_to_running_audit(repo_root=root, comment=args.comment, job_id=getattr(args, "job_id", ""))
+        print(json.dumps(res, indent=2))
+        return 0 if res.get("ok") else 1
 
     if args.cmd == "continue-job":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve() if getattr(args, "repo", "") else None
@@ -3309,6 +3478,20 @@ def main() -> int:
                         "skipped": True,
                         "reason": "Commit skipped (tag, docs-only, or already queued).",
                     }
+                )
+            )
+            return 0
+        if job.get("already_running"):
+            print(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "already_running": True,
+                        "job": job,
+                        "shortSha": job.get("short_sha"),
+                        "message": f"An audit for commit {job.get('short_sha')} is already running. Double auditing prevented.",
+                    },
+                    indent=2,
                 )
             )
             return 0

@@ -107,6 +107,12 @@ export async function continueAudit(repo, sha, jobId) {
         args.push("--sha", sha);
     return runCtlJson(args);
 }
+export async function sendAuditComment(repo, comment, jobId) {
+    const args = ["send-comment", "--repo", repo, "--comment", comment];
+    if (jobId)
+        args.push("--job-id", jobId);
+    return runCtlJson(args);
+}
 export async function pauseWatchdog() {
     return runCtlJson(["pause"]);
 }
