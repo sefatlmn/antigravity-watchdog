@@ -552,6 +552,7 @@ function renderDashboard(data) {
     const hasFixToApply = Boolean(job.fixes_committed && job.fix_branch && !job.fixes_applied);
     const isApplied = Boolean(job.fixes_applied);
     const isPassed = (job.verdict || '').toUpperCase() === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued && !isInterrupted;
+    const hasReport = Boolean(job.report_path || status === 'completed');
 
     return `
       <div class="job-item">
@@ -572,7 +573,7 @@ function renderDashboard(data) {
           ${isPassed ? `<span class="applied-badge">${ICONS.check} Passed</span>` : ''}
           ${isInterrupted ? `<button type="button" class="btn small-btn accent-btn" data-action="continue-audit" data-job-id="${escapeHtml(job.id)}" data-repo="${escapeHtml(job.repo_path)}" data-sha="${escapeHtml(job.sha)}">${ICONS.play} Continue Audit</button>` : ''}
           ${hasFixToApply ? `<button type="button" class="btn small-btn accent-btn" data-action="apply-fix" data-repo="${escapeHtml(job.repo_path)}" data-sha="${escapeHtml(job.sha)}" title="Merge the bug fix commit into your active branch">Apply Fix to ${escapeHtml(currentBranch)}</button>` : ''}
-          <button type="button" class="icon-btn job-report-btn" data-action="view-report" data-report="${escapeHtml(job.report_path)}" data-sha="${escapeHtml(job.short_sha)}" title="View Report" aria-label="View Report">${ICONS.doc}</button>
+          ${hasReport ? `<button type="button" class="icon-btn job-report-btn" data-action="view-report" data-report="${escapeHtml(job.report_path || '')}" data-sha="${escapeHtml(job.short_sha)}" title="View Report" aria-label="View Report">${ICONS.doc}</button>` : ''}
           ${isArchived
             ? `<button type="button" class="icon-btn job-archive-btn" data-action="unarchive" data-job-id="${escapeHtml(job.id)}" title="Restore audit from archive" aria-label="Restore audit from archive">${ICONS.unarchive}</button>`
             : `<button type="button" class="icon-btn job-archive-btn" data-action="archive" data-job-id="${escapeHtml(job.id)}" title="Archive audit" aria-label="Archive audit">${ICONS.archive}</button>`

@@ -210,6 +210,19 @@ h1, h2, h3, h4, h5, h6 {
   color: var(--text-main, var(--foreground, #f8fafc));
 }
 
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  text-decoration-skip-ink: auto;
+  transition: color var(--transition-fast);
+}
+
+a:hover {
+  color: var(--primary-hover, var(--text-main));
+}
+
 /* Badges */
 .badge {
   display: inline-flex;
@@ -703,6 +716,27 @@ body {
   transform: translateY(1px);
 }
 
+.primary-btn.accent-btn {
+  font-size: var(--font-size-sm);
+  height: 34px;
+  min-height: 34px;
+  background: var(--accent-bg, rgba(56, 189, 248, 0.18));
+  border: 1px solid var(--accent-border, rgba(56, 189, 248, 0.35));
+  color: var(--accent);
+  font-weight: var(--weight-semibold);
+  box-shadow: 0 1px 3px rgba(56, 189, 248, 0.2);
+}
+
+.primary-btn.accent-btn:hover:not(:disabled) {
+  background: var(--accent-hover, rgba(56, 189, 248, 0.28));
+  border-color: rgba(56, 189, 248, 0.55);
+  box-shadow: 0 2px 8px rgba(56, 189, 248, 0.3);
+}
+
+.primary-btn.accent-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
 .small-btn {
   width: auto;
   height: var(--card-action-height, 26px);
@@ -886,18 +920,25 @@ body {
 }
 
 .job-comment {
-  margin: 0;
+  margin: 2px 0 0;
+  padding: 5px 8px;
   font-size: var(--font-size-xs);
   color: var(--text-muted, var(--muted-foreground, #94a3b8));
-  font-style: italic;
+  background: var(--surface-well);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
   line-height: var(--leading-normal);
+  word-break: break-word;
 }
 
 .job-comment .comment-tag {
-  color: var(--accent);
-  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
   font-weight: var(--weight-semibold);
-  margin-right: 3px;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-right: 5px;
 }
 
 .job-actions {
