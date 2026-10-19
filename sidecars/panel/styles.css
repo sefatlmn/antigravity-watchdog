@@ -1369,16 +1369,6 @@ body {
   letter-spacing: var(--tracking-tight);
 }
 
-.source-tag {
-  font-size: var(--font-size-2xs);
-  font-weight: var(--weight-medium);
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--hover-overlay);
-  color: var(--text-muted, var(--muted-foreground, #94a3b8));
-  font-family: var(--font-mono);
-}
-
 .goal-text {
   margin: 0;
   font-size: var(--font-size-sm);

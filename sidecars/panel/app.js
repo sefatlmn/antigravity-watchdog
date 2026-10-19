@@ -617,19 +617,15 @@ function renderNextSteps(activeRepo) {
   try {
     // 1. Goal Banner
     const goalTextEl = $('ns-goal-text');
-    const goalSourceEl = $('ns-goal-source');
     const goalData = activeRepo.goal;
 
     if (goalTextEl) {
       if (goalData && typeof goalData === 'object' && goalData.goal) {
         goalTextEl.textContent = goalData.goal;
-        if (goalSourceEl) goalSourceEl.textContent = goalData.source || 'Auto';
       } else if (typeof goalData === 'string' && goalData) {
         goalTextEl.textContent = goalData;
-        if (goalSourceEl) goalSourceEl.textContent = 'Auto';
       } else {
         goalTextEl.textContent = `Develop and maintain ${activeRepo.repoName}`;
-        if (goalSourceEl) goalSourceEl.textContent = 'Auto';
       }
     }
 
@@ -640,15 +636,7 @@ function renderNextSteps(activeRepo) {
       tabBadge.textContent = proposals.length || 4;
     }
 
-    // 3. Commit context
-    const contextEl = $('ns-commit-context');
-    const latest = activeRepo.youngestCommit || activeRepo.head;
-    if (contextEl && latest) {
-      const ssha = latest.shortSha || latest.short_sha || '';
-      contextEl.textContent = ssha ? `Based on: ${ssha}` : '';
-    }
-
-    // 4. Proposals List
+    // 3. Proposals List
     const proposalsList = $('proposals-list');
     const cancelHeaderBtn = $('btn-cancel-synthesis-header');
     if (proposalsList) {
