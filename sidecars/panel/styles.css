@@ -325,7 +325,10 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
   color: var(--accent);
+  transform: translateY(1px);
 }
 
 .icon-svg {
@@ -350,10 +353,12 @@ body {
 
 .header-title h1 {
   margin: 0;
+  display: inline-flex;
+  align-items: center;
   font-size: var(--font-size-md);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
-  line-height: var(--leading-snug);
+  line-height: 1;
   text-wrap: balance;
 }
 
@@ -1134,8 +1139,21 @@ body {
   gap: 6px;
 }
 
+.report-title-group .icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+  color: var(--accent);
+  transform: translateY(1px);
+}
+
 .report-title-group h2 {
   margin: 0;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
   font-size: var(--font-size-base);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
@@ -1284,6 +1302,21 @@ body {
   font-weight: var(--weight-semibold);
 }
 
+.tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+  transform: translateY(1.5px);
+}
+
+.tab-title {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
 .tab-badge {
   padding: 1px 6px;
   font-size: var(--font-size-2xs);
@@ -1335,8 +1368,21 @@ body {
   flex-wrap: wrap;
 }
 
+.goal-title-group .icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+  flex-shrink: 0;
+  color: var(--accent);
+  transform: translateY(1.5px);
+}
+
 .goal-title-group h2 {
   margin: 0;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
   font-size: var(--font-size-base);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
