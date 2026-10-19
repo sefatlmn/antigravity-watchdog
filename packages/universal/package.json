@@ -1,0 +1,54 @@
+{
+  "name": "qa-watchdog-universal",
+  "displayName": "QA Watchdog Universal Agentic Edition",
+  "version": "1.1.0",
+  "description": "Universal Agentic Edition: Autonomous post-commit QA watchdog and next-step synthesis for Claude Code, OpenCode, Codex, Cursor, and MCP clients",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "qa-watchdog": "./bin/watchdog.js",
+    "watchdog": "./bin/watchdog.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "import": "./dist/mcp.js",
+      "default": "./dist/mcp.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js",
+      "default": "./dist/cli.js"
+    },
+    "./bridge": {
+      "types": "./dist/bridge.d.ts",
+      "import": "./dist/bridge.js",
+      "default": "./dist/bridge.js"
+    },
+    "./server": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "mcp": "node ./dist/mcp.js",
+    "cli": "node ./bin/watchdog.js",
+    "setup": "node ./bin/watchdog.js setup"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.29"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "typescript": "^5.7.2"
+  }
+}

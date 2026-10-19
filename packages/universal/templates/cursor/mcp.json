@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "qa-watchdog": {
+      "command": "node",
+      "args": [
+        "${workspaceFolder}/.gemini/config/plugins/qa-watchdog/packages/universal/dist/mcp.js"
+      ]
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "plugins": [
+    "/path/to/qa-watchdog/packages/universal"
+  ]
+}

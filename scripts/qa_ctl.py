@@ -2064,6 +2064,7 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str) -> Dict[str, Any]:
     """
     Prepare prompt or launch detached agent conversation for an approved next step plan.
     """
+    repo_root = Path(repo_root).resolve()
     ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
     proposals_file = ns_dir / "proposals.json"
     if not proposals_file.exists():
@@ -2072,7 +2073,18 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str) -> Dict[str, Any]:
     try:
         data = json.loads(proposals_file.read_text(encoding="utf-8"))
         proposals = data.get("proposals", [])
-        matched = next((p for p in proposals if p["id"] == plan_id), None)
+        matched = None
+        clean_id = str(plan_id).strip()
+        for idx, p in enumerate(proposals):
+            p_id = str(p.get("id", ""))
+            if (
+                p_id == clean_id
+                or p_id == f"prop-{clean_id}"
+                or p_id.startswith(f"prop-{clean_id}-")
+                or str(idx + 1) == clean_id
+            ):
+                matched = p
+                break
         if not matched:
             return {"ok": False, "error": f"Proposal '{plan_id}' not found."}
 

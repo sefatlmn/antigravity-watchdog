@@ -1,8 +1,17 @@
-# Watchdog
+# QA Watchdog & Next Steps
 
-Post-commit QA auditing and next steps planning for Google Antigravity and OpenCode Desktop.
+Autonomous post-commit QA auditing, visual verification, and sequential next-step synthesis across agentic code editors.
 
-Runs visual and code verification in isolated Git worktrees, tests UI in headless Playwright, records fixes to isolated `fix/qa-<sha>` branches, and proposes milestone-aligned next steps.
+QA Watchdog operates non-intrusively in isolated Git worktrees. It verifies code correctness, executes headless Playwright passes, commits reproducible fixes to isolated `fix/qa-<sha>` branches, and synthesizes 4 project-grounded `/plan`-compliant implementation plans.
+
+Supported environments:
+- **Google Antigravity**: Native plugin with visual companion panel, lifecycle hooks, and skills.
+- **Claude Code**: Model Context Protocol (MCP) stdio server with custom slash commands (`/watchdog`, `/next-steps`).
+- **OpenCode Desktop**: Native plugin with chat commands and agent tools (backwards-compatible).
+- **Cursor & Windsurf**: Standard stdio MCP integration.
+- **OpenAI Codex & Custom Agents**: Structured CLI tools and agent rules.
+
+---
 
 ## Requirements
 
@@ -15,7 +24,7 @@ Runs visual and code verification in isolated Git worktrees, tests UI in headles
 
 ## Installation
 
-### Method 1: Google Antigravity (Visual Companion Panel)
+### Method 1: Google Antigravity (Companion Panel)
 
 Clone the repository into your Antigravity plugins directory:
 
@@ -28,101 +37,172 @@ To enable:
 2. Ensure `qa-watchdog` is enabled.
 3. The companion panel opens from the side pane or runs as a sidecar dashboard.
 
-The root of this repository is a native Antigravity plugin containing the lifecycle stop hook (`hooks.json`), agent rules (`rules/AGENTS.md`), agent skills (`skills/qa-watchdog/`, `skills/next-steps/`), CLI engines (`scripts/`), and the sidecar UI panel (`sidecars/panel/`).
+The repository root is a native Antigravity plugin containing lifecycle hooks (`hooks.json`), agent rules (`rules/AGENTS.md`), agent skills (`skills/`), and the webview panel (`sidecars/panel/`).
 
 ---
 
-### Method 2: OpenCode Desktop (Chat-Driven Plugin)
+### Method 2: Universal Agentic Edition (Claude Code, Cursor, Codex, OpenCode)
 
-OpenCode does not host webview sidecars. The OpenCode integration is packaged as a pure, UI-less plugin in `packages/opencode/` that operates entirely through chat commands and native agent tools.
-
-#### 1. Build the Package
+Build the universal package:
 
 ```bash
-cd packages/opencode
+cd packages/universal
 npm install
 npm run build
 ```
 
-#### 2. Register in OpenCode
+#### Automated Setup Assistant
 
-Add the package path to your `~/.config/opencode/opencode.json` (or project-level `opencode.json`):
+Run the built-in setup wizard in your target repository:
+
+```bash
+node /path/to/qa-watchdog/packages/universal/bin/watchdog.js setup [claude|cursor|opencode|codex|all]
+```
+
+---
+
+### Editor Integrations
+
+#### 1. Claude Code
+
+Add the QA Watchdog MCP server to Claude Code:
+
+```bash
+claude mcp add qa-watchdog node /path/to/qa-watchdog/packages/universal/dist/mcp.js
+```
+
+Or configure `.mcp.json` in your project:
+
+```json
+{
+  "mcpServers": {
+    "qa-watchdog": {
+      "command": "node",
+      "args": [
+        "/path/to/qa-watchdog/packages/universal/dist/mcp.js"
+      ]
+    }
+  }
+}
+```
+
+To enable slash commands in Claude Code, copy the provided templates into your project:
+
+```bash
+mkdir -p .claude/commands
+cp /path/to/qa-watchdog/packages/universal/templates/claude/commands/* .claude/commands/
+```
+
+Commands available in Claude Code:
+- `/watchdog`: Review status, run audits, and apply fixes.
+- `/next-steps`: Synthesize proposals and load approved implementation plans.
+
+#### 2. Cursor / Windsurf
+
+Add the server to `.cursor/mcp.json` or your Windsurf MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "qa-watchdog": {
+      "command": "node",
+      "args": [
+        "/path/to/qa-watchdog/packages/universal/dist/mcp.js"
+      ]
+    }
+  }
+}
+```
+
+#### 3. OpenCode Desktop
+
+Add the package path to `~/.config/opencode/opencode.json` (or project-level `opencode.json`):
 
 ```json
 {
   "plugins": [
-    "/path/to/qa-watchdog/packages/opencode"
+    "/path/to/qa-watchdog/packages/universal"
   ]
 }
 ```
 
-Or install via the OpenCode CLI:
+Existing configurations pointing to `/path/to/qa-watchdog/packages/opencode` continue to resolve through the backwards-compatible symlink.
+
+#### 4. OpenAI Codex & Agent Rules
+
+Add the guidelines in `packages/universal/templates/codex/CODEX.md` to your repository's `CODEX.md` or `AGENTS.md`.
+
+---
+
+## Universal MCP Tools Reference
+
+When connected via MCP, the following tools are available to agents:
+
+| Tool | Description |
+| :--- | :--- |
+| `qa_watchdog_status` | Inspect repository QA status, recent audit verdicts, active jobs, and fix branches |
+| `qa_watchdog_audit` | Queue an autonomous QA code & visual review in an isolated Git worktree |
+| `qa_watchdog_apply_fix` | Apply verified fixes from an isolated `fix/qa-<sha>` branch onto the working branch |
+| `qa_watchdog_next_steps` | Synthesize 4 project-grounded next-step implementation plans adhering to `/plan` |
+| `qa_watchdog_execute_plan` | Retrieve the full specification prompt for an approved next-step implementation plan |
+| `qa_watchdog_goal` | Inspect, set, or clear the repository milestone goal |
+| `qa_watchdog_comment` | Send guidance or focus notes to an in-progress QA Watchdog audit |
+| `qa_watchdog_continue` | Resume an interrupted audit or check completed audit report |
+| `qa_watchdog_cancel_synthesis` | Cancel an ongoing next-steps synthesis turn |
+
+MCP Prompts exposed:
+- `qa_audit`: Instructions and testing guidelines for reviewing commits.
+- `qa_next_steps`: Instructions for evaluating and executing proposed implementation plans.
+
+---
+
+## Universal CLI Usage
+
+You can execute QA Watchdog directly from the command line or scripts:
 
 ```bash
-opencode plugin add /path/to/qa-watchdog/packages/opencode
+# Check status and latest verdicts
+./packages/universal/bin/watchdog.js status
+
+# Machine-readable JSON output
+./packages/universal/bin/watchdog.js status --json
+
+# Trigger an audit on HEAD in an isolated worktree
+./packages/universal/bin/watchdog.js audit "Focus on state persistence and edge cases"
+
+# Apply confirmed fixes from fix/qa-<sha> to working branch
+./packages/universal/bin/watchdog.js apply-fix <sha>
+
+# Synthesize and display 4 structured implementation proposals
+./packages/universal/bin/watchdog.js next-steps
+
+# Display approved implementation plan specification for agent execution
+./packages/universal/bin/watchdog.js plan 1
+
+# Inspect or set project milestone goal
+./packages/universal/bin/watchdog.js goal --set "Ship production v2 release"
+
+# Start the MCP stdio server
+./packages/universal/bin/watchdog.js mcp
 ```
-
-#### 3. Chat Commands in OpenCode
-
-- **`/watchdog`**:
-  - `/watchdog`: Formatted status report with current repo, branch, latest audit verdict, and available fix branches.
-  - `/watchdog audit [notes]`: Trigger a QA review on the latest commit in an isolated worktree.
-  - `/watchdog apply-fix [sha]`: Merge confirmed bug fixes from `fix/qa-<sha>` onto your working branch.
-
-- **`/next-steps`**:
-  - `/next-steps`: Synthesizes and prints 4 structured implementation proposals directly into chat.
-  - `/next-steps execute <id>`: Loads the approved plan specification into the session for implementation.
-  - `/next-steps refresh`: Forces a fresh context synthesis and generates new proposals.
-  - `/next-steps cancel`: Cancels an ongoing next steps synthesis turn.
-  - `/next-steps goal <text>`: Sets the milestone goal (or `/next-steps goal clear`).
-
-- **Native Tools Available to Agents**:
-  - `qa_watchdog_status`
-  - `qa_watchdog_audit`
-  - `qa_watchdog_apply_fix`
-  - `qa_watchdog_next_steps`
-  - `qa_watchdog_execute_plan`
-  - `qa_watchdog_cancel_synthesis`
-  - `qa_watchdog_goal`
-
-- **Background Hook**: Automatically audits new commits on session `idle` in isolated worktrees.
 
 ---
 
 ## How It Works
 
-- **Stop Hook**: When an agent finishes a turn and commits code, Watchdog detects the commit.
-- **Isolated Worktree**: Audits run in detached worktrees under `~/.gemini/antigravity/qa_watchdog/worktrees/` so your working branch is never modified.
-- **Fix Branch**: Reproducible test or lint fixes are committed to `fix/qa-<short_sha>`. Apply them to your working branch with one click in Antigravity or via `/watchdog apply-fix` in OpenCode.
-- **Next Steps**: Synthesizes 4 forward-looking implementation plans in `.antigravity/next_steps/` based on repo goals, commits, and handoffs.
+- **Isolated Worktree**: Audits run in detached worktrees under `~/.gemini/antigravity/qa_watchdog/worktrees/`. The agent's working tree is never touched during reviews.
+- **Fix Branch**: Reproducible test or lint fixes are committed to `fix/qa-<short_sha>`. Apply them cleanly using `apply-fix` or the UI companion panel.
+- **Next Steps**: Synthesizes 4 forward-looking implementation plans in `.antigravity/next_steps/` based on repo goals, commits, and handoffs, strictly following the `/plan` methodology.
 
 ---
 
 ## Preventing Auto-Audits
 
-Add any of these tags to your commit message to skip the QA watchdog:
+Include any of these tags in your commit message to skip background QA watchdog execution:
 
 - `[skip-qa]`
 - `[auto-review]`
 - `[qa-watchdog]`
-
----
-
-## CLI Usage
-
-```bash
-# Check status and active repos
-python3 scripts/qa_ctl.py status
-
-# Run an audit on the latest commit
-python3 scripts/qa_ctl.py run --repo /path/to/project
-
-# Apply a fix from fix/qa-<sha> to active branch
-python3 scripts/qa_ctl.py apply-fix --repo /path/to/project --sha <short_sha>
-
-# Cancel an ongoing next-steps synthesis
-python3 scripts/qa_ctl.py cancel-synthesis --repo /path/to/project
-```
 
 ---
 
