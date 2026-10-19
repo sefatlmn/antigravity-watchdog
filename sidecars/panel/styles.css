@@ -1581,19 +1581,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 8px;
+  line-height: var(--leading-normal);
 }
 
-.proposal-badge-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.proposal-badge-group .tag,
-.proposal-badge-group .pill,
-.proposal-card .tag,
-.proposal-card .pill,
 #modal-category-badge {
   transform: none !important;
   cursor: default !important;

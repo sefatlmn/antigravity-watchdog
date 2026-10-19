@@ -701,7 +701,6 @@ function renderNextSteps(activeRepo) {
           const rawBadge = p.badge || p.tag || p.category || 'Feature';
           const badge = stripEmojis(rawBadge) || 'Feature';
           const difficulty = p.difficulty || p.archetype || 'Medium';
-          const estTime = p.estimatedTime || p.estimated_effort || '20m';
           const title = stripEmojis(p.title || 'Next Step Plan');
           const subtitle = stripEmojis(p.subtitle || '');
           const summary = stripEmojis(p.summary || '');
@@ -723,11 +722,8 @@ function renderNextSteps(activeRepo) {
           return `
             <div class="proposal-card" data-proposal-id="${escapeHtml(planId)}">
               <div class="proposal-meta-row">
-                <div class="proposal-badge-group">
-                  <span class="tag ok">${escapeHtml(badge)}</span>
-                  <span class="muted small">${escapeHtml(difficulty)}</span>
-                </div>
-                <span class="muted small">~${escapeHtml(estTime)}</span>
+                <span class="muted small">${escapeHtml(badge)}</span>
+                <span class="muted small">${escapeHtml(difficulty)}</span>
               </div>
 
               <h3>${escapeHtml(title)}</h3>
