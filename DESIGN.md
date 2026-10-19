@@ -201,7 +201,7 @@ The typography pairs Apple/System UI sans-serif for UI labels and prose with cle
 ### Named Rules
 **The Monospace Discipline Rule.** Monospace typography is strictly reserved for Git commit hashes, branch names, file paths, and execution commands. Standard UI copy and headings must always use the system sans-serif stack.
 
-**The Tabular Alignment Rule.** All numerical readouts—including commit timestamps, estimated durations (`~20m`), badge counts, and Git commit hashes—must declare `font-variant-numeric: tabular-nums` to maintain pixel-perfect vertical alignment and eliminate jitter during live telemetry refreshes.
+**The Tabular Alignment Rule.** All numerical readouts—including commit timestamps, metric counts, and Git commit hashes—must declare `font-variant-numeric: tabular-nums` to maintain pixel-perfect vertical alignment and eliminate jitter during live telemetry refreshes.
 
 **The Themed Surface Rule.** Browser defaults for text selection (`::selection`), focus rings (`:focus-visible`), caret colors, and scrollbars are explicitly styled to match the active host theme (`#38bdf8` caret/focus in dark, `#0369a1` in light, translucent selection, thin 5px rounded scrollbars).
 
@@ -287,6 +287,7 @@ All interactive controls and state tags within card footers (`.job-actions` on A
 ### Cards & Wells
 - **Card:** Background `var(--card)`, border `1px solid var(--card-border)`, radius `8px`, padding `10px 12px`.
 - **Inner Well:** Background `var(--surface-well)`, border `1px solid var(--surface-well-border)`, radius `6px`, padding `8px 10px`.
+- **Proposal Card Meta Row:** Single-line space-between flex container pairing muted category on left with difficulty on right, sharing identical typography (`font-size: 11px`, color `var(--text-muted)`).
 
 ### Inputs
 - **Style:** Background `var(--surface-well)`, border `1px solid var(--border)`, radius `6px`, padding `6px 9px`.

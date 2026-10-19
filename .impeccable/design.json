@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-10-14T20:33:00Z",
+  "generatedAt": "2026-10-19T00:45:00Z",
   "title": "Design System: Watchdog",
   "extensions": {
     "colorMeta": {
@@ -97,7 +97,7 @@
     },
     "shadows": [
       {
-        "name": "tab-pill",
+        "name": "tab-active",
         "value": "0 1px 3px rgba(0, 0, 0, 0.3)",
         "purpose": "Subtle grounding contrast for the active segmented tab."
       },
@@ -180,12 +180,12 @@
       "css": ".ds-btn-primary { display: inline-flex; align-items: center; justify-content: center; gap: 6px; width: 100%; padding: 8px 14px; font-family: system-ui, -apple-system, sans-serif; font-size: 12px; font-weight: 600; color: #ffffff; background: #2563eb; border: 1px solid transparent; border-radius: 6px; cursor: pointer; transition: background 0.15s ease; } .ds-btn-primary:hover { background: #1d4ed8; } .ds-btn-primary:active { transform: translateY(1px); } .ds-icon { vertical-align: middle; }"
     },
     {
-      "name": "Status Pill",
+      "name": "Status Tag",
       "kind": "chip",
-      "refersTo": "pill-ok",
-      "description": "Compact pill with steady accent dot indicating engine state or test verdicts.",
-      "html": "<span class=\"ds-pill-ok\"><span class=\"ds-dot\"></span>Active</span>",
-      "css": ".ds-pill-ok { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-family: system-ui, -apple-system, sans-serif; font-size: 11px; font-weight: 500; border-radius: 999px; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.25); color: #34d399; } .ds-dot { width: 6px; height: 6px; border-radius: 50%; background: #10b981; }"
+      "refersTo": "tag-ok",
+      "description": "Crisp technical tag with square status indicator for engine state and test verdicts.",
+      "html": "<span class=\"ds-tag-ok\"><span class=\"ds-dot\"></span>PASS</span>",
+      "css": ".ds-tag-ok { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; font-family: system-ui, -apple-system, sans-serif; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; border-radius: 4px; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.25); color: #34d399; } .ds-tag-ok .ds-dot { width: 5px; height: 5px; border-radius: 1px; background: #10b981; }"
     },
     {
       "name": "Surface Card",
@@ -237,7 +237,7 @@
       },
       {
         "name": "The Tabular Alignment Rule",
-        "body": "All numerical readouts—including commit timestamps, estimated durations (~20m), badge counts, and Git commit hashes—must declare font-variant-numeric: tabular-nums to maintain pixel-perfect vertical alignment and eliminate jitter during live telemetry refreshes.",
+        "body": "All numerical readouts—including commit timestamps, metric counts, and Git commit hashes—must declare font-variant-numeric: tabular-nums to maintain pixel-perfect vertical alignment and eliminate jitter during live telemetry refreshes.",
         "section": "typography"
       },
       {
