@@ -2762,6 +2762,8 @@ def complete_job(
                 j["summary"] = summary
                 j["bugs_count"] = bugs_count
                 j["fixes_committed"] = has_branch_commits
+                j["fix_branch"] = result_payload["fix_branch"]
+                j["report_path"] = result_payload["report_path"]
                 matched = True
                 conv_id = j.get("conversation_id")
                 if conv_id and "active_qa_conversations" in state:
@@ -2827,7 +2829,12 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
     Returns True if the job was modified.
     """
     curr_status = j.get("status", "queued")
-    if curr_status not in ("running", "queued", "interrupted"):
+    is_unfinished = curr_status in ("running", "queued", "interrupted")
+    is_stale_completed = curr_status == "completed" and (
+        (not j.get("fixes_committed") and (j.get("verdict") == "FIXED_ON_BRANCH" or j.get("fix_branch")))
+        or "in progress" in j.get("summary", "").lower()
+    )
+    if not (is_unfinished or is_stale_completed):
         return False
 
     repo_path_str = j.get("repo_path")
@@ -2851,8 +2858,9 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
             j["verdict"] = r_data.get("verdict") or "PASS"
             j["summary"] = r_data.get("summary") or j.get("summary") or "QA review completed."
             j["bugs_count"] = r_data.get("bugs_count", 0)
-            j["fixes_committed"] = bool(r_data.get("fixes_committed", False))
-            j["fix_branch"] = r_data.get("fix_branch")
+            has_fixes = bool(r_data.get("fixes_committed", False)) or j["verdict"] == "FIXED_ON_BRANCH"
+            j["fixes_committed"] = has_fixes
+            j["fix_branch"] = r_data.get("fix_branch") or (f"fix/qa-{short_sha}" if has_fixes else None)
             j["completed_at"] = r_data.get("completed_at") or now_iso()
             j["report_path"] = str(report_md) if report_md.exists() else str(report_json)
             conv_id = j.get("conversation_id")

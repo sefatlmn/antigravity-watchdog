@@ -319,7 +319,8 @@ function renderJobBadge(job) {
   if (job.fixes_applied || verdict === 'PASS') {
     return '';
   }
-  if (job.fixes_committed && job.fix_branch) {
+  const hasFix = Boolean(job.fixes_committed || verdict === 'FIXED_ON_BRANCH');
+  if (hasFix && (job.fix_branch || !job.fixes_applied)) {
     return '<span class="tag fix">Ready</span>';
   }
   if (verdict === 'NEEDS_ATTENTION') {
@@ -533,7 +534,9 @@ function renderDashboard(data) {
     const isRunning = status === 'running';
     const isQueued = status === 'queued';
     const isInterrupted = status === 'interrupted';
-    const hasFixToApply = Boolean(job.fixes_committed && job.fix_branch && !job.fixes_applied);
+    const isFixedOnBranch = (job.verdict || '').toUpperCase() === 'FIXED_ON_BRANCH';
+    const fixBranch = job.fix_branch || (isFixedOnBranch ? `fix/qa-${job.short_sha}` : null);
+    const hasFixToApply = Boolean((job.fixes_committed || isFixedOnBranch) && fixBranch && !job.fixes_applied);
     const isApplied = Boolean(job.fixes_applied);
     const isPassed = (job.verdict || '').toUpperCase() === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued && !isInterrupted;
     const hasReport = Boolean(job.report_path || status === 'completed');

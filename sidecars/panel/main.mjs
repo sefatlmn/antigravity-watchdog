@@ -120,7 +120,9 @@ function reconcileJobs(state) {
   let modified = false;
   const jobs = Array.isArray(state?.jobs) ? state.jobs : [];
   for (const j of jobs) {
-    if (j.status === 'running' || j.status === 'interrupted' || j.status === 'queued') {
+    const isUnfinished = j.status === 'running' || j.status === 'interrupted' || j.status === 'queued';
+    const isStaleCompleted = j.status === 'completed' && (!j.fixes_committed && (j.verdict === 'FIXED_ON_BRANCH' || (j.summary && j.summary.includes('in progress'))));
+    if (isUnfinished || isStaleCompleted) {
       const repoPath = j.repo_path;
       const shortSha = j.short_sha || (j.sha ? j.sha.slice(0, 7) : '');
       if (!repoPath || !shortSha) continue;
@@ -137,10 +139,11 @@ function reconcileJobs(state) {
           j.verdict = rData.verdict || 'PASS';
           j.summary = rData.summary || j.summary || 'Audit completed.';
           j.bugs_count = typeof rData.bugs_count === 'number' ? rData.bugs_count : (j.bugs_count || 0);
-          j.fixes_committed = Boolean(rData.fixes_committed);
-          j.fix_branch = rData.fix_branch || null;
-          j.completed_at = rData.completed_at || new Date().toISOString();
-          j.report_path = mdReport;
+          const hasFixes = Boolean(rData.fixes_committed || j.verdict === 'FIXED_ON_BRANCH');
+          j.fixes_committed = hasFixes;
+          j.fix_branch = rData.fix_branch || (hasFixes ? `fix/qa-${shortSha}` : null);
+          j.completed_at = rData.completed_at || j.completed_at || new Date().toISOString();
+          j.report_path = existsSync(mdReport) ? mdReport : jsonReport;
           modified = true;
           continue;
         } catch {}
@@ -156,8 +159,23 @@ function reconcileJobs(state) {
             if (vMatch && vMatch[1]) {
               verdict = vMatch[1].toUpperCase();
             }
+            let summary = j.summary;
+            if (!summary || summary.includes('in progress')) {
+              const sMatch = content.match(/##\s*1\.\s*Executive Summary\s*\n+([^\n#]+)/i);
+              if (sMatch && sMatch[1]) {
+                summary = sMatch[1].trim();
+              } else {
+                summary = 'QA review completed.';
+              }
+            }
+            const fixBranch = `fix/qa-${shortSha}`;
+            const hasFixes = verdict === 'FIXED_ON_BRANCH' || content.includes(fixBranch);
+
             j.status = 'completed';
             j.verdict = verdict;
+            j.summary = summary;
+            j.fixes_committed = Boolean(hasFixes);
+            j.fix_branch = hasFixes ? fixBranch : null;
             j.completed_at = j.completed_at || new Date().toISOString();
             j.report_path = mdReport;
             modified = true;
