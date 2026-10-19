@@ -1,14 +1,14 @@
-# OpenAI Codex & Agent Rules for QA Watchdog
+# OpenAI Codex & Agent Rules for Watchdog
 
 ## Operating Principles
-- **Autonomous QA Audits**: The repository uses QA Watchdog to verify code correctness and visual UX in isolated Git worktrees.
+- **Autonomous Audits**: The repository uses Watchdog to verify code correctness and visual UX in isolated Git worktrees.
 - **Commit Tagging**: Intermediate commits, refactors, and test commits should include `[skip-qa]` in the commit message.
 - **Fix Application**: When an audit produces verified fixes on `fix/qa-<sha>`, apply them via the CLI:
   ```bash
-  qa-watchdog apply-fix <sha>
+  watchdog apply-fix <sha>
   ```
 - **Next Steps Planning**: Propose and inspect project-grounded Next Steps adhering to the `/plan` methodology:
   ```bash
-  qa-watchdog next-steps
-  qa-watchdog plan <id>
+  watchdog next-steps
+  watchdog plan <id>
   ```

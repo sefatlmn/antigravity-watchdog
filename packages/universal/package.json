@@ -1,14 +1,14 @@
 {
-  "name": "qa-watchdog-universal",
-  "displayName": "QA Watchdog Universal Agentic Edition",
+  "name": "watchdog-universal",
+  "displayName": "Watchdog Universal Agentic Edition",
   "version": "1.1.0",
-  "description": "Universal Agentic Edition: Autonomous post-commit QA watchdog and next-step synthesis for Claude Code, OpenCode, Codex, Cursor, and MCP clients",
+  "description": "Universal Agentic Edition: Autonomous post-commit watchdog and next-step synthesis for Claude Code, OpenCode, Codex, Cursor, and MCP clients",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "qa-watchdog": "./bin/watchdog.js",
-    "watchdog": "./bin/watchdog.js"
+    "watchdog": "./bin/watchdog.js",
+    "qa-watchdog": "./bin/watchdog.js"
   },
   "exports": {
     ".": {

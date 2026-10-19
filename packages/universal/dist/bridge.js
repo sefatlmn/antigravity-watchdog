@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 function findPluginRoot(startDir) {
-    if (process.env.QA_WATCHDOG_PLUGIN_ROOT && existsSync(join(process.env.QA_WATCHDOG_PLUGIN_ROOT, "scripts", "qa_ctl.py"))) {
-        return process.env.QA_WATCHDOG_PLUGIN_ROOT;
+    const envRoot = process.env.WATCHDOG_PLUGIN_ROOT || process.env.QA_WATCHDOG_PLUGIN_ROOT;
+    if (envRoot && existsSync(join(envRoot, "scripts", "qa_ctl.py"))) {
+        return envRoot;
     }
     let curr = startDir;
     for (let i = 0; i < 6; i++) {
@@ -79,7 +80,7 @@ export async function runCtlJson(args) {
             }
         }
         const message = err.stderr ? String(err.stderr).trim() : err.message;
-        throw new Error(`QA Watchdog error: ${message}`);
+        throw new Error(`Watchdog error: ${message}`);
     }
 }
 export async function getStatus(repo) {
@@ -209,7 +210,7 @@ export function formatStatusReport(status, syncInfo) {
     const repoInfo = syncInfo?.bestRepo || {};
     const jobs = status.jobs || [];
     const latestJob = jobs[0];
-    let output = `## QA Watchdog Status: ACTIVE\n\n`;
+    let output = `## Watchdog Status: ACTIVE\n\n`;
     if (repoInfo.repoName || repoInfo.branch) {
         output += `- **Repository**: \`${repoInfo.repoName || "active"}\` (\`${repoInfo.branch || "main"}\`)\n`;
     }
@@ -265,7 +266,7 @@ export function formatNextStepsReport(proposalsRes) {
             if (Array.isArray(p.affectedFiles) && p.affectedFiles.length > 0) {
                 output += `*Files*: ${p.affectedFiles.map((f) => `\`${f}\``).join(", ")}\n`;
             }
-            output += `*Execute*: \`qa-watchdog plan ${num}\` (or tool \`qa_watchdog_execute_plan\` with \`"${num}"\`)\n\n`;
+            output += `*Execute*: \`watchdog plan ${num}\` (or tool \`watchdog_execute_plan\` with \`"${num}"\`)\n\n`;
         });
     }
     return output;

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-QA Watchdog Controller (qa_ctl.py)
+Watchdog Controller (qa_ctl.py)
 
 Manages state, isolated Git worktrees, git history sync (automatic youngest-commit
 resolution across branches and nested repos), job queueing, background agent dispatch,
-fix-branch application, and cleanup for the global Antigravity QA Watchdog plugin.
+fix-branch application, and cleanup for the global Antigravity Watchdog plugin.
 """
 
 import argparse
@@ -2468,7 +2468,7 @@ def build_qa_prompt(job: Dict[str, Any]) -> str:
 
     ctl_script_path = str(Path(__file__).resolve())
     return f"""[QA-WATCHDOG-SESSION]
-You are the **Autonomous Code & Visual QA Watchdog** reviewing a newly committed change.
+You are the **Autonomous Code & Visual Watchdog** reviewing a newly committed change.
 
 First, read your operating skill instructions using `view_file`:
 `{SKILL_PATH}`
@@ -2487,14 +2487,14 @@ First, read your operating skill instructions using `view_file`:
    - Run applicable static checks (typecheck, linter, unit tests) inside `{worktree_path}`.
    - Evaluate correctness, edge cases, security, architecture, performance, functionality, and scalability.
 
-2. **Live Visual & Functional QA (Playwright MCP)**:
+2. **Live Visual & Functional Verification (Playwright MCP)**:
    - If this project has a web UI / frontend or HTTP server, start an isolated instance from `{worktree_path}` on a free port (so you do not collide with any running dev server).
    - Use the `playwright` MCP tools (`browser_navigate`, `browser_snapshot`, `browser_take_screenshot`, `browser_click`, `browser_type`, `browser_resize`, `browser_console_messages`, `browser_network_requests`) to test affected routes and user flows like a real user at both Desktop (`1440x900`) and Mobile (`390x844`) viewports.
    - Stop any server process you started once browser testing is complete.
 
 3. **Immediate Bug Fixes on Isolated Branch (`{fix_branch}`)**:
    - If you find confirmed, reproducible bugs (broken logic, crashes, build/type errors, broken UI layouts), fix them directly inside `{worktree_path}` on branch `{fix_branch}`, verify the fix, and commit with:
-     `git commit -m "fix(qa): resolve issues in {short_sha} [auto-review]"`
+     `git commit -m "fix: resolve issues in {short_sha} [auto-review]"`
    - Do NOT auto-commit speculative refactors or architectural rewrites; document those in the report.
 
 4. **Write Report & Mark Job Complete**:
@@ -2514,7 +2514,7 @@ First, read your operating skill instructions using `view_file`:
 
 def spawn_detached_agent(job: Dict[str, Any]) -> bool:
     """
-    Launch a background QA conversation via `agentapi new-conversation`.
+    Launch a background review conversation via `agentapi new-conversation`.
     """
     env = get_cached_ls_env()
     agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
@@ -2522,7 +2522,7 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
         return False
 
     prompt = build_qa_prompt(job)
-    title = f"QA Watchdog: {job['repo_name']} @ {job['short_sha']}"
+    title = f"Watchdog: {job['repo_name']} @ {job['short_sha']}"
     log_file = LOGS_DIR / f"agent-{job['id']}.log"
 
     if "language_server" in Path(agentapi_bin).name:
@@ -2540,7 +2540,7 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
             timeout=10,
         )
         with open(log_file, "a", encoding="utf-8") as lf:
-            lf.write(f"\n[{now_iso()}] Dispatched QA Watchdog via {agentapi_bin} for {job['id']}\n")
+            lf.write(f"\n[{now_iso()}] Dispatched Watchdog via {agentapi_bin} for {job['id']}\n")
             if proc.stdout:
                 lf.write(f"STDOUT:\n{proc.stdout}\n")
             if proc.stderr:
@@ -2703,7 +2703,7 @@ def queue_commit(
                     if j["id"] == job_id:
                         j["status"] = "running"
                         j["started_at"] = now_iso()
-                        j["summary"] = "Autonomous QA Watchdog review in progress…"
+                        j["summary"] = "Autonomous Watchdog review in progress…"
                         break
                 save_state(state)
                 job["status"] = "running"
@@ -2810,7 +2810,7 @@ def remove_active_conversation(conv_id: str) -> None:
 
 def find_qa_conversation_for_job(job: Dict[str, Any]) -> Optional[str]:
     """
-    Search recent conversations in BRAIN_DIR for a QA Watchdog session for this job's commit.
+    Search recent conversations in BRAIN_DIR for a Watchdog session for this job's commit.
     """
     short_sha = job.get("short_sha") or (job.get("sha") or "")[:7]
     if not short_sha or not BRAIN_DIR.exists():
@@ -3133,9 +3133,9 @@ def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = 
         r_path = target_job.get("report_path") or f"{target_job['repo_path']}/.antigravity/audits/review-{target_job['short_sha']}.md"
 
         continue_msg = f"""[QA-WATCHDOG-CONTINUE]
-Please continue and complete the autonomous QA Watchdog audit for commit `{target_job['short_sha']}` in worktree `{target_job['worktree_path']}`.
+Please continue and complete the autonomous Watchdog audit for commit `{target_job['short_sha']}` in worktree `{target_job['worktree_path']}`.
 
-When your checks and visual QA testing are finished:
+When your checks and visual verification testing are finished:
 1. Write the final audit report markdown to `{r_path}`.
 2. Run the completion command:
 python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{target_job['sha']}" --verdict <PASS|FIXED_ON_BRANCH|NEEDS_ATTENTION> --summary "<concise summary>" --bugs-count <count> --fixes-committed <true|false>
@@ -3165,7 +3165,7 @@ python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{
 
         target_job["status"] = "running"
         target_job["started_at"] = now_iso()
-        target_job["summary"] = "Resumed QA Watchdog review in progress…"
+        target_job["summary"] = "Resumed Watchdog review in progress…"
         save_state(st)
 
         return {
@@ -3317,10 +3317,10 @@ def main() -> int:
     p_common = argparse.ArgumentParser(add_help=False)
     p_common.add_argument("--json", action="store_true", help="Output JSON")
 
-    parser = argparse.ArgumentParser(description="Antigravity QA Watchdog Controller", parents=[p_common])
+    parser = argparse.ArgumentParser(description="Antigravity Watchdog Controller", parents=[p_common])
     sub = parser.add_subparsers(dest="cmd")
 
-    p_status = sub.add_parser("status", help="Show QA Watchdog status and jobs", parents=[p_common])
+    p_status = sub.add_parser("status", help="Show Watchdog status and jobs", parents=[p_common])
     p_status.add_argument("--repo", default="", help="Optional repository path filter")
 
     p_sync = sub.add_parser(
@@ -3334,7 +3334,7 @@ def main() -> int:
     p_prep.add_argument("--repo", required=True)
     p_prep.add_argument("--sha", default="YOUNGEST")
 
-    p_queue = sub.add_parser("queue", help="Queue a commit for QA Watchdog review", parents=[p_common])
+    p_queue = sub.add_parser("queue", help="Queue a commit for Watchdog review", parents=[p_common])
     p_queue.add_argument("--repo", required=True)
     p_queue.add_argument("--sha", default="YOUNGEST")
     p_queue.add_argument("--base-sha", default="")
@@ -3342,7 +3342,7 @@ def main() -> int:
     p_queue.add_argument("--no-dispatch", action="store_true")
     p_queue.add_argument("--force", action="store_true")
 
-    p_comp = sub.add_parser("complete", help="Mark a QA Watchdog review job complete", parents=[p_common])
+    p_comp = sub.add_parser("complete", help="Mark a Watchdog review job complete", parents=[p_common])
     p_comp.add_argument("--repo", required=True)
     p_comp.add_argument("--sha", required=True)
     p_comp.add_argument("--verdict", default="PASS")
@@ -3355,7 +3355,7 @@ def main() -> int:
     p_apply.add_argument("--sha", required=True)
     p_apply.add_argument("--mode", choices=["cherry-pick", "merge"], default="cherry-pick")
 
-    p_disp = sub.add_parser("dispatch", help="Dispatch a queued QA Watchdog review job", parents=[p_common])
+    p_disp = sub.add_parser("dispatch", help="Dispatch a queued Watchdog review job", parents=[p_common])
     p_disp.add_argument("--job-id", default="", help="Specific job ID to dispatch")
 
     p_base = sub.add_parser("init-baseline", help="Initialize baseline commit SHA for a repository", parents=[p_common])
@@ -3443,7 +3443,7 @@ def main() -> int:
         if getattr(args, "json", False):
             print(json.dumps(state, indent=2))
         else:
-            print("QA Watchdog Status: ACTIVE")
+            print("Watchdog Status: ACTIVE")
             print(f"Auto-Dispatch:      {state.get('auto_dispatch', True)}")
             print(f"Tracked Repos:      {len(state.get('repos', {}))}")
             print(f"Jobs ({len(state.get('jobs', []))}):")
@@ -3564,7 +3564,7 @@ def main() -> int:
                     if j.get("id") == job["id"]:
                         j["status"] = "running"
                         j["started_at"] = now_iso()
-                        j["summary"] = "Autonomous QA Watchdog review in progress…"
+                        j["summary"] = "Autonomous Watchdog review in progress…"
                         break
                 save_state(state)
             print(json.dumps({"ok": True, "job_id": job["id"], "dispatched": True}))

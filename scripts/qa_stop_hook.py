@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Antigravity Stop Lifecycle Hook for QA Watchdog (qa_stop_hook.py)
+Antigravity Stop Lifecycle Hook for Watchdog (qa_stop_hook.py)
 
 Fires when an agent conversation execution loop terminates.
 Checks:
@@ -9,7 +9,7 @@ Checks:
 3. Inspects `workspacePaths` for Git repositories (including nested project repos,
    ignoring empty-tree workspace wrapper repos) and resolves the youngest commit.
 4. Prepares an isolated Git worktree (`fix/qa-<short_sha>`) and dispatches an
-   independent background QA Watchdog review without blocking the coding chat.
+   independent background Watchdog review without blocking the coding chat.
 """
 
 import json

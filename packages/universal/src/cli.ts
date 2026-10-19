@@ -22,14 +22,14 @@ import { startMcpServer } from "./mcp.js";
 
 function printHelp(): void {
   const help = `
-QA Watchdog Universal CLI (Universal Agentic Edition)
+Watchdog Universal CLI (Universal Agentic Edition)
 
 Usage:
-  qa-watchdog <command> [options] [arguments]
+  watchdog <command> [options] [arguments]
 
 Commands:
   status                   Show repository status, latest audit verdict, and fix branches
-  audit [notes...]         Queue QA audit in isolated worktree for HEAD or --sha
+  audit [notes...]         Queue audit in isolated worktree for HEAD or --sha
   apply-fix [sha]          Apply confirmed fixes from fix/qa-<sha> to active branch
   continue [sha]           Resume an interrupted audit or check completed audit report
   comment <notes...>       Send guidance note to an in-progress audit
@@ -91,7 +91,7 @@ async function handleSetup(editor?: string, targetRepo?: string): Promise<void> 
   const repo = resolveRepo(targetRepo);
   const ed = (editor || "all").toLowerCase();
 
-  console.log(`Setting up QA Watchdog Universal Edition for repository: ${repo}`);
+  console.log(`Setting up Watchdog Universal Edition for repository: ${repo}`);
 
   const universalDistMcp = join(PLUGIN_ROOT, "packages", "universal", "dist", "mcp.js");
 
@@ -103,11 +103,11 @@ async function handleSetup(editor?: string, targetRepo?: string): Promise<void> 
       writeFileSync(
         join(claudeCommandsDir, "watchdog.md"),
         `---
-description: QA Watchdog audit status and verification
+description: Watchdog audit status, review trigger, and bugfix application
 ---
 
-Run \`qa_watchdog_status\` to inspect status. If an audit is needed, run \`qa_watchdog_audit\`.
-If a fix branch exists, apply it using \`qa_watchdog_apply_fix\`.
+Run \`watchdog_status\` to inspect status. If an audit is needed, run \`watchdog_audit\`.
+If a fix branch exists, apply it using \`watchdog_apply_fix\`.
 `,
         "utf8"
       );
@@ -117,8 +117,8 @@ If a fix branch exists, apply it using \`qa_watchdog_apply_fix\`.
 description: Propose or execute next-step implementation plans
 ---
 
-Run \`qa_watchdog_next_steps\` to synthesize 4 structured implementation plans adhering to the /plan standard.
-To execute a proposal, call \`qa_watchdog_execute_plan\` with the plan ID.
+Run \`watchdog_next_steps\` to synthesize 4 structured implementation plans adhering to the /plan standard.
+To execute a proposal, call \`watchdog_execute_plan\` with the plan ID.
 `,
         "utf8"
       );
@@ -129,8 +129,8 @@ To execute a proposal, call \`qa_watchdog_execute_plan\` with the plan ID.
       console.warn(`Could not create .claude/commands: ${err.message}`);
     }
 
-    console.log("\nTo add QA Watchdog MCP server to Claude Code CLI, run:");
-    console.log(`  claude mcp add qa-watchdog node "${universalDistMcp}"`);
+    console.log("\nTo add Watchdog MCP server to Claude Code CLI, run:");
+    console.log(`  claude mcp add watchdog node "${universalDistMcp}"`);
   }
 
   if (ed === "cursor" || ed === "all") {
@@ -139,7 +139,7 @@ To execute a proposal, call \`qa_watchdog_execute_plan\` with the plan ID.
     const mcpConfigPath = join(cursorDir, "mcp.json");
     const mcpConfig = {
       mcpServers: {
-        "qa-watchdog": {
+        watchdog: {
           command: "node",
           args: [universalDistMcp],
         },
@@ -173,11 +173,11 @@ To execute a proposal, call \`qa_watchdog_execute_plan\` with the plan ID.
     console.log("\n--- OpenAI Codex / Agents Rule Setup ---");
     const agentsPath = join(repo, "AGENTS.md");
     const snippet = `
-## QA Watchdog Rules
-- QA audits run asynchronously in isolated Git worktrees without touching active working branches.
+## Watchdog Rules
+- Audits run asynchronously in isolated Git worktrees without touching active working branches.
 - Tag commits with [skip-qa] when intermediate or reviewing code.
-- Reproducible fixes are committed to fix/qa-<sha>. Apply fixes via \`qa-watchdog apply-fix\`.
-- View milestone-aligned next steps via \`qa-watchdog next-steps\`.
+- Reproducible fixes are committed to fix/qa-<sha>. Apply fixes via \`watchdog apply-fix\`.
+- View milestone-aligned next steps via \`watchdog next-steps\`.
 `;
     if (!existsSync(agentsPath)) {
       writeFileSync(agentsPath, snippet.trim() + "\n", "utf8");
@@ -235,7 +235,7 @@ async function main(): Promise<void> {
           if (res?.already_running) {
             console.log(`Audit for commit ${shortSha} is already running.`);
           } else {
-            console.log(`Queued QA Watchdog audit for commit ${shortSha} in an isolated Git worktree.`);
+            console.log(`Queued Watchdog audit for commit ${shortSha} in an isolated Git worktree.`);
           }
         }
         break;
@@ -274,7 +274,7 @@ async function main(): Promise<void> {
       case "note": {
         const comment = positionals.join(" ").trim();
         if (!comment) {
-          console.error("Error: Comment text is required. Usage: qa-watchdog comment <text>");
+          console.error("Error: Comment text is required. Usage: watchdog comment <text>");
           process.exit(1);
         }
         const jobId = typeof flags["job-id"] === "string" ? flags["job-id"] : undefined;

@@ -27,7 +27,7 @@ export default Plugin.define({
         // /watchdog command
         editor.add({
           name: "watchdog",
-          description: "QA Watchdog management: status, audit, apply-fix, continue, comment",
+          description: "Watchdog management: status, audit, apply-fix, continue, comment",
           execute: async ({ sessionID, prompt }) => {
             const dir = ctx.location.directory;
             const text = (prompt?.text || "").trim();
@@ -62,7 +62,7 @@ export default Plugin.define({
               await queueAudit(dir, sha, comment || undefined);
               await ctx.session.synthetic({
                 sessionID,
-                text: `Queued QA Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
+                text: `Queued Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
               });
               return;
             }
@@ -110,7 +110,7 @@ export default Plugin.define({
                 } else if (res.ok) {
                   await ctx.session.synthetic({
                     sessionID,
-                    text: `Resumed QA Watchdog audit for commit \`${res.shortSha || "HEAD"}\` in worktree.\nRun \`/watchdog\` to check progress.`,
+                    text: `Resumed Watchdog audit for commit \`${res.shortSha || "HEAD"}\` in worktree.\nRun \`/watchdog\` to check progress.`,
                   });
                 } else {
                   await ctx.session.synthetic({
@@ -160,7 +160,7 @@ export default Plugin.define({
             const jobs = status.jobs || [];
             const latestJob = jobs[0];
 
-            let output = `## QA Watchdog Status: ACTIVE\n\n`;
+            let output = `## Watchdog Status: ACTIVE\n\n`;
             output += `- **Repository**: \`${repoInfo.repoName || dir}\` (\`${repoInfo.branch || "main"}\`)\n`;
             output += `- **Head Commit**: \`${(repoInfo.headSha || "").slice(0, 7)}\` - ${repoInfo.headSubject || "No commits"}\n`;
 
@@ -180,7 +180,7 @@ export default Plugin.define({
             }
 
             output += `\n---\n**Available Commands**:\n`;
-            output += `- \`/watchdog audit [notes]\`: Run QA review on latest commit (forwards notes if running)\n`;
+            output += `- \`/watchdog audit [notes]\`: Run review on latest commit (forwards notes if running)\n`;
             output += `- \`/watchdog comment <notes>\`: Send guidance/focus note to in-progress audit\n`;
             output += `- \`/watchdog continue [sha]\`: Resume an interrupted audit or auto-complete if report is ready\n`;
             output += `- \`/watchdog apply-fix [sha]\`: Apply fixes from isolated branch\n`;
@@ -311,37 +311,42 @@ export default Plugin.define({
         });
       });
     } catch (err: any) {
-      console.warn(`[QA Watchdog] Command registration skipped: ${err.message}`);
+      console.warn(`[Watchdog] Command registration skipped: ${err.message}`);
     }
 
     // 2. Register native tools
     try {
       await ctx.tool.transform((editor) => {
-        editor.add({
-          name: "qa_watchdog_status",
-          description: "Inspect QA Watchdog status, active audits, worktrees, and proposals",
-          input: Schema.Struct({
-            repo: Schema.optional(Schema.String),
-          }),
-          execute: async (input) => {
+        const registerTool = (name: string, description: string, input: any, execute: (i: any) => Promise<any>) => {
+          editor.add({ name, description, input, execute });
+          if (!name.startsWith("qa_")) {
+            editor.add({ name: `qa_${name}`, description, input, execute });
+          }
+        };
+
+        registerTool(
+          "watchdog_status",
+          "Inspect Watchdog status, active audits, worktrees, and proposals",
+          Schema.Struct({ repo: Schema.optional(Schema.String) }),
+          async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
             const status = await getStatus(targetRepo);
             return {
               output: status,
               content: JSON.stringify(status, null, 2),
             };
-          },
-        });
+          }
+        );
 
-        editor.add({
-          name: "qa_watchdog_audit",
-          description: "Prepare an isolated worktree and trigger a QA Watchdog review for a commit",
-          input: Schema.Struct({
+        registerTool(
+          "watchdog_audit",
+          "Prepare an isolated worktree and trigger a Watchdog review for a commit",
+          Schema.Struct({
             repo: Schema.String,
             sha: Schema.String,
             comment: Schema.optional(Schema.String),
           }),
-          execute: async (input) => {
+          async (input) => {
             await prepareWorktree(input.repo, input.sha);
             await queueAudit(input.repo, input.sha, input.comment);
             const status = await getStatus(input.repo);
@@ -349,102 +354,102 @@ export default Plugin.define({
               output: status,
               content: `Prepared isolated worktree and queued audit for commit ${input.sha}`,
             };
-          },
-        });
+          }
+        );
 
-        editor.add({
-          name: "qa_watchdog_apply_fix",
-          description: "Apply confirmed bug fixes from an isolated fix/qa-<sha> branch onto the active branch",
-          input: Schema.Struct({
+        registerTool(
+          "watchdog_apply_fix",
+          "Apply confirmed bug fixes from an isolated fix/qa-<sha> branch onto the active branch",
+          Schema.Struct({
             repo: Schema.String,
             sha: Schema.String,
           }),
-          execute: async (input) => {
+          async (input) => {
             const result = await applyFix(input.repo, input.sha);
             return {
               output: result,
               content: JSON.stringify(result, null, 2),
             };
-          },
-        });
+          }
+        );
 
-        editor.add({
-          name: "qa_watchdog_continue",
-          description: "Resume an interrupted audit job or auto-complete if report is already generated",
-          input: Schema.Struct({
+        registerTool(
+          "watchdog_continue",
+          "Resume an interrupted audit job or auto-complete if report is already generated",
+          Schema.Struct({
             repo: Schema.optional(Schema.String),
             sha: Schema.optional(Schema.String),
             jobId: Schema.optional(Schema.String),
           }),
-          execute: async (input) => {
+          async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
             const result = await continueAudit(targetRepo, input.sha, input.jobId);
             return {
               output: result,
               content: JSON.stringify(result, null, 2),
             };
-          },
-        });
+          }
+        );
 
-        editor.add({
-          name: "qa_watchdog_send_comment",
-          description: "Send a comment or guidance message to an in-progress QA Watchdog audit",
-          input: Schema.Struct({
+        registerTool(
+          "watchdog_send_comment",
+          "Send a comment or guidance message to an in-progress Watchdog audit",
+          Schema.Struct({
             comment: Schema.String,
             repo: Schema.optional(Schema.String),
             jobId: Schema.optional(Schema.String),
           }),
-          execute: async (input) => {
+          async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
             const result = await sendAuditComment(targetRepo, input.comment, input.jobId);
             return {
               output: result,
               content: JSON.stringify(result, null, 2),
             };
-          },
-        });
+          }
+        );
 
-        editor.add({
-          name: "qa_watchdog_next_steps",
-          description: "Synthesize 4 project-grounded next-step implementation plans adhering to /plan standard",
-          input: Schema.Struct({
+        registerTool(
+          "watchdog_next_steps",
+          "Synthesize 4 project-grounded next-step implementation plans adhering to /plan standard",
+          Schema.Struct({
             repo: Schema.optional(Schema.String),
             force: Schema.optional(Schema.Boolean),
           }),
-          execute: async (input) => {
+          async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
             const proposals = await synthesizeNextSteps(targetRepo, Boolean(input.force));
             return {
               output: proposals,
               content: JSON.stringify(proposals, null, 2),
             };
-          },
-        });
+          }
+        );
 
-        editor.add({
-          name: "qa_watchdog_execute_plan",
-          description: "Load an approved implementation plan by ID for active coding execution",
-          input: Schema.Struct({
+        registerTool(
+          "watchdog_execute_plan",
+          "Load an approved implementation plan by ID for active coding execution",
+          Schema.Struct({
             repo: Schema.optional(Schema.String),
             planId: Schema.String,
           }),
-          execute: async (input) => {
+          async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
             const result = await executePlan(targetRepo, input.planId);
             return {
               output: result,
               content: JSON.stringify(result, null, 2),
             };
-          },
-        });
+          }
+        );
 
-        editor.add({
-          name: "qa_watchdog_cancel_synthesis",
-          description: "Cancel or stop an ongoing Next Steps refresh and interrupt the synthesis turn",
-          input: Schema.Struct({
+        registerTool(
+          "watchdog_cancel_synthesis",
+          "Cancel or stop an ongoing Next Steps refresh and interrupt the synthesis turn",
+          Schema.Struct({
             repo: Schema.optional(Schema.String),
           }),
-          execute: async (input) => {
+          async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
             const result = await cancelSynthesis(targetRepo);
             if (result.conversationId) {
@@ -458,29 +463,29 @@ export default Plugin.define({
               output: result,
               content: JSON.stringify(result, null, 2),
             };
-          },
-        });
+          }
+        );
 
-        editor.add({
-          name: "qa_watchdog_goal",
-          description: "Inspect or configure the repository milestone goal",
-          input: Schema.Struct({
+        registerTool(
+          "watchdog_goal",
+          "Inspect or configure the repository milestone goal",
+          Schema.Struct({
             repo: Schema.optional(Schema.String),
             goal: Schema.optional(Schema.String),
             clear: Schema.optional(Schema.Boolean),
           }),
-          execute: async (input) => {
+          async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
             const result = await manageGoal(targetRepo, input.goal, Boolean(input.clear));
             return {
               output: result,
               content: JSON.stringify(result, null, 2),
             };
-          },
-        });
+          }
+        );
       });
     } catch (err: any) {
-      console.warn(`[QA Watchdog] Tool registration skipped: ${err.message}`);
+      console.warn(`[Watchdog] Tool registration skipped: ${err.message}`);
     }
 
     // 3. Update agent instructions
@@ -489,7 +494,7 @@ export default Plugin.define({
         editor.update("build", (agent) => {
           if (agent.system) {
             agent.system +=
-              "\n\n[QA Watchdog Guideline]: When making commits, ensure clean commit messages. The QA Watchdog monitors commits in an isolated git worktree without touching your working tree. Use /watchdog to check review verdicts and /next-steps to view proposed implementation plans.";
+              "\n\n[Watchdog Guideline]: When making commits, ensure clean commit messages. Watchdog monitors commits in an isolated git worktree without touching your working tree. Use /watchdog to check review verdicts and /next-steps to view proposed implementation plans.";
           }
         });
       });

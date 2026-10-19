@@ -8,15 +8,15 @@ web
 
 ## Users
 
-Antigravity developers running autonomous coding sessions who need non-intrusive background QA audits and structured next-step implementation plans without leaving the IDE.
+Antigravity developers running autonomous coding sessions who need non-intrusive background audits and structured next-step implementation plans without leaving the IDE.
 
 ## Product Purpose
 
-Autonomous post-commit code review, visual verification, and sequential next-step synthesis. QA Watchdog operates non-intrusively in isolated Git worktrees and presents actionable findings, verified fixes, and `/plan`-compliant implementation roadmaps directly inside the Antigravity auxiliary pane.
+Autonomous post-commit code review, visual verification, and sequential next-step synthesis. Watchdog operates non-intrusively in isolated Git worktrees and presents actionable findings, verified fixes, and `/plan`-compliant implementation roadmaps directly inside the Antigravity auxiliary pane.
 
 ## Positioning
 
-Zero-friction assurance and intelligent momentum. Unlike static linters, detached external CI dashboards, or intrusive modal blockers, QA Watchdog:
+Zero-friction assurance and intelligent momentum. Unlike static linters, detached external CI dashboards, or intrusive modal blockers, Watchdog:
 - Listens to coding agent stop events and audits committed snapshots in isolated Git worktrees using Playwright MCP.
 - Commits verified bug fixes directly to isolated `fix/qa-<short_sha>` branches for one-click application to the active branch.
 - Inspects repository state, commit history, and linked conversations to synthesize 4 structured Next Steps proposals adhering to the official `/plan` standard.
@@ -25,11 +25,11 @@ Zero-friction assurance and intelligent momentum. Unlike static linters, detache
 
 - **Environment:** Antigravity IDE right-side auxiliary pane webview (`sidecar://qa-watchdog/panel/`).
 - **Runtime:** Background Node.js sidecar service communicating with local Git CLI, Antigravity Language Server, and AgentAPI.
-- **Workflow:** Developers write code and commit changes; QA Watchdog transparently evaluates quality in the background, updates status in the aux pane, and supplies the next 4 actionable steps to sustain project velocity.
+- **Workflow:** Developers write code and commit changes; Watchdog transparently evaluates quality in the background, updates status in the aux pane, and supplies the next 4 actionable steps to sustain project velocity.
 
 ## Capabilities and Constraints
 
-- **Dual-Pane Navigation:** Seamless switching between `QA Audits` (commit verification, manual audit triggers, interactive report reader, 1-click cherry-pick fix application, and collapsible archive stack) and `Next Steps` (goal discovery and editing, project conversation tracking, and 4 structured implementation proposals).
+- **Dual-Pane Navigation:** Seamless switching between `Audits` (commit verification, manual audit triggers, interactive report reader, 1-click cherry-pick fix application, and collapsible archive stack) and `Next Steps` (goal discovery and editing, project conversation tracking, and 4 structured implementation proposals).
 - **Zero Active-Tree Disruption:** Audits and fix commits execute in isolated worktrees (`~/.gemini/antigravity/qa_watchdog/worktrees/`), ensuring active files, uncommitted edits, and running dev servers are never disturbed.
 - **Visual Studio Aesthetics:** Prominent status banners, spacious proposal cards, rich metadata chips, and expansive layout spacing suited for deep inspection.
 - **Clean Iconography:** Strict zero-emoji policy; uses lightweight inline vector SVGs and clean semantic text labels.

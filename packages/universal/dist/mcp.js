@@ -1,9 +1,9 @@
 import { createInterface } from "node:readline";
 import { getStatus, syncRepo, prepareWorktree, queueAudit, applyFix, continueAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, } from "./bridge.js";
-const TOOLS = [
+const PRIMARY_TOOLS = [
     {
-        name: "qa_watchdog_status",
-        description: "Inspect repository QA status, recent audit verdicts, active jobs, and fix branches.",
+        name: "watchdog_status",
+        description: "Inspect repository status, recent audit verdicts, active jobs, and fix branches.",
         inputSchema: {
             type: "object",
             properties: {
@@ -15,8 +15,8 @@ const TOOLS = [
         },
     },
     {
-        name: "qa_watchdog_audit",
-        description: "Queue an autonomous QA code and visual audit in an isolated Git worktree.",
+        name: "watchdog_audit",
+        description: "Queue an autonomous code and visual audit in an isolated Git worktree.",
         inputSchema: {
             type: "object",
             properties: {
@@ -36,7 +36,7 @@ const TOOLS = [
         },
     },
     {
-        name: "qa_watchdog_apply_fix",
+        name: "watchdog_apply_fix",
         description: "Apply verified fixes from an isolated fix/qa-<sha> branch onto the active branch.",
         inputSchema: {
             type: "object",
@@ -53,7 +53,7 @@ const TOOLS = [
         },
     },
     {
-        name: "qa_watchdog_next_steps",
+        name: "watchdog_next_steps",
         description: "Synthesize 4 project-grounded next-step implementation plans adhering to /plan methodology.",
         inputSchema: {
             type: "object",
@@ -70,7 +70,7 @@ const TOOLS = [
         },
     },
     {
-        name: "qa_watchdog_execute_plan",
+        name: "watchdog_execute_plan",
         description: "Retrieve the full specification prompt for an approved next-step implementation plan.",
         inputSchema: {
             type: "object",
@@ -88,7 +88,7 @@ const TOOLS = [
         },
     },
     {
-        name: "qa_watchdog_goal",
+        name: "watchdog_goal",
         description: "Inspect, set, or clear the repository milestone goal.",
         inputSchema: {
             type: "object",
@@ -109,8 +109,8 @@ const TOOLS = [
         },
     },
     {
-        name: "qa_watchdog_comment",
-        description: "Send guidance or focus notes to an in-progress QA Watchdog audit.",
+        name: "watchdog_comment",
+        description: "Send guidance or focus notes to an in-progress Watchdog audit.",
         inputSchema: {
             type: "object",
             properties: {
@@ -131,7 +131,7 @@ const TOOLS = [
         },
     },
     {
-        name: "qa_watchdog_continue",
+        name: "watchdog_continue",
         description: "Resume an interrupted audit or check if report is already generated.",
         inputSchema: {
             type: "object",
@@ -152,7 +152,7 @@ const TOOLS = [
         },
     },
     {
-        name: "qa_watchdog_cancel_synthesis",
+        name: "watchdog_cancel_synthesis",
         description: "Cancel an ongoing next-steps synthesis turn.",
         inputSchema: {
             type: "object",
@@ -165,10 +165,16 @@ const TOOLS = [
         },
     },
 ];
+// Add backwards-compatible qa_watchdog_* tool aliases
+const ALIAS_TOOLS = PRIMARY_TOOLS.map((t) => ({
+    ...t,
+    name: `qa_${t.name}`,
+}));
+const ALL_TOOLS = [...PRIMARY_TOOLS, ...ALIAS_TOOLS];
 const PROMPTS = [
     {
-        name: "qa_audit",
-        description: "Guidelines and instructions for reviewing a commit with QA Watchdog.",
+        name: "watchdog_audit",
+        description: "Guidelines and instructions for reviewing a commit with Watchdog.",
         arguments: [
             {
                 name: "notes",
@@ -178,7 +184,7 @@ const PROMPTS = [
         ],
     },
     {
-        name: "qa_next_steps",
+        name: "watchdog_next_steps",
         description: "Guidelines for selecting and executing proposed next steps.",
         arguments: [
             {
@@ -189,10 +195,11 @@ const PROMPTS = [
         ],
     },
 ];
-async function handleToolCall(name, args = {}) {
+async function handleToolCall(rawName, args = {}) {
+    const name = rawName.replace(/^qa_/, "");
     try {
         switch (name) {
-            case "qa_watchdog_status": {
+            case "watchdog_status": {
                 const status = await getStatus(args.repo);
                 let syncInfo = null;
                 try {
@@ -204,7 +211,7 @@ async function handleToolCall(name, args = {}) {
                 const text = formatStatusReport(status, syncInfo);
                 return { text };
             }
-            case "qa_watchdog_audit": {
+            case "watchdog_audit": {
                 await prepareWorktree(args.repo, args.sha);
                 const res = await queueAudit(args.repo, args.sha, args.comment);
                 const shortSha = res?.job?.short_sha || (args.sha ? String(args.sha).slice(0, 7) : "HEAD");
@@ -212,22 +219,22 @@ async function handleToolCall(name, args = {}) {
                     return { text: `Audit for commit \`${shortSha}\` is already running. Double auditing prevented.` };
                 }
                 return {
-                    text: `Queued QA Watchdog audit for commit \`${shortSha}\` in an isolated Git worktree.\n` +
+                    text: `Queued Watchdog audit for commit \`${shortSha}\` in an isolated Git worktree.\n` +
                         `Reviewers will test code correctness, run Playwright browser passes, and commit reproducible fixes to \`fix/qa-${shortSha}\`.`,
                 };
             }
-            case "qa_watchdog_apply_fix": {
+            case "watchdog_apply_fix": {
                 const res = await applyFix(args.repo, args.sha);
                 return {
                     text: `Applied fixes to working branch.\n${res?.message || JSON.stringify(res, null, 2)}`,
                 };
             }
-            case "qa_watchdog_next_steps": {
+            case "watchdog_next_steps": {
                 const res = await synthesizeNextSteps(args.repo, Boolean(args.force));
                 const text = formatNextStepsReport(res);
                 return { text };
             }
-            case "qa_watchdog_execute_plan": {
+            case "watchdog_execute_plan": {
                 if (!args.planId) {
                     return { text: "Error: planId is required (e.g. '1', '2', '3', '4').", isError: true };
                 }
@@ -239,7 +246,7 @@ async function handleToolCall(name, args = {}) {
                     text: `### Approved Plan #${args.planId}: ${res.title || "Implementation"}\n\n${res.prompt}`,
                 };
             }
-            case "qa_watchdog_goal": {
+            case "watchdog_goal": {
                 const res = await manageGoal(args.repo, args.goal, Boolean(args.clear));
                 if (args.clear) {
                     return { text: "Repository milestone goal cleared." };
@@ -251,7 +258,7 @@ async function handleToolCall(name, args = {}) {
                     text: res?.goal ? `Current milestone goal: "${res.goal}"` : "No goal currently set.",
                 };
             }
-            case "qa_watchdog_comment": {
+            case "watchdog_comment": {
                 if (!args.comment) {
                     return { text: "Error: comment is required.", isError: true };
                 }
@@ -261,7 +268,7 @@ async function handleToolCall(name, args = {}) {
                 }
                 return { text: `Could not send comment: ${res?.error || "No in-progress audit found."}`, isError: true };
             }
-            case "qa_watchdog_continue": {
+            case "watchdog_continue": {
                 const res = await continueAudit(args.repo, args.sha, args.jobId);
                 if (res?.completed) {
                     return {
@@ -270,20 +277,20 @@ async function handleToolCall(name, args = {}) {
                     };
                 }
                 if (res?.ok) {
-                    return { text: `Resumed QA Watchdog audit for commit \`${res.shortSha || "HEAD"}\` in worktree.` };
+                    return { text: `Resumed Watchdog audit for commit \`${res.shortSha || "HEAD"}\` in worktree.` };
                 }
                 return { text: `Could not continue audit: ${res?.error || "No active or interrupted audit found."}`, isError: true };
             }
-            case "qa_watchdog_cancel_synthesis": {
+            case "watchdog_cancel_synthesis": {
                 const res = await cancelSynthesis(args.repo);
                 return { text: `Next steps synthesis cancelled.${res?.notifiedChat ? " Active turn notified." : ""}` };
             }
             default:
-                return { text: `Unknown tool: ${name}`, isError: true };
+                return { text: `Unknown tool: ${rawName}`, isError: true };
         }
     }
     catch (err) {
-        return { text: `QA Watchdog error: ${err.message}`, isError: true };
+        return { text: `Watchdog error: ${err.message}`, isError: true };
     }
 }
 export function startMcpServer() {
@@ -331,7 +338,7 @@ export function startMcpServer() {
                                 prompts: {},
                             },
                             serverInfo: {
-                                name: "qa-watchdog",
+                                name: "watchdog",
                                 version: "1.1.0",
                             },
                         },
@@ -347,7 +354,7 @@ export function startMcpServer() {
                         jsonrpc: "2.0",
                         id,
                         result: {
-                            tools: TOOLS,
+                            tools: ALL_TOOLS,
                         },
                     });
                     break;
@@ -383,19 +390,19 @@ export function startMcpServer() {
                 }
                 case "prompts/get": {
                     const promptName = params?.name;
-                    if (promptName === "qa_audit") {
+                    if (promptName === "watchdog_audit" || promptName === "qa_audit") {
                         const notes = params?.arguments?.notes;
-                        const text = "You are acting as or interacting with QA Watchdog. Follow these rules:\n" +
-                            "1. Autonomous QA audits run in isolated Git worktrees, never modifying the user's active tree.\n" +
+                        const text = "You are acting as or interacting with Watchdog. Follow these rules:\n" +
+                            "1. Autonomous audits run in isolated Git worktrees, never modifying the user's active tree.\n" +
                             "2. Confirmed bugs and fixes are committed to fix/qa-<sha>.\n" +
-                            "3. Apply fixes via tool qa_watchdog_apply_fix.\n" +
-                            "4. To prevent double audits, check qa_watchdog_status before queuing.\n" +
+                            "3. Apply fixes via tool watchdog_apply_fix.\n" +
+                            "4. To prevent double audits, check watchdog_status before queuing.\n" +
                             (notes ? `Auditor focus notes: ${notes}\n` : "");
                         send({
                             jsonrpc: "2.0",
                             id,
                             result: {
-                                description: "QA Watchdog Audit Guidelines",
+                                description: "Watchdog Audit Guidelines",
                                 messages: [
                                     {
                                         role: "user",
@@ -405,16 +412,16 @@ export function startMcpServer() {
                             },
                         });
                     }
-                    else if (promptName === "qa_next_steps") {
+                    else if (promptName === "watchdog_next_steps" || promptName === "qa_next_steps") {
                         const focus = params?.arguments?.focus;
                         const text = "Synthesize or inspect the 4 next-step implementation proposals adhering to the official /plan standard.\n" +
-                            "Review the proposal list via qa_watchdog_next_steps and execute an approved plan via qa_watchdog_execute_plan.\n" +
+                            "Review the proposal list via watchdog_next_steps and execute an approved plan via watchdog_execute_plan.\n" +
                             (focus ? `Focus area: ${focus}\n` : "");
                         send({
                             jsonrpc: "2.0",
                             id,
                             result: {
-                                description: "QA Watchdog Next Steps Guidelines",
+                                description: "Watchdog Next Steps Guidelines",
                                 messages: [
                                     {
                                         role: "user",

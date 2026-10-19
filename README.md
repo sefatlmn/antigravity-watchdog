@@ -1,8 +1,8 @@
-# QA Watchdog & Next Steps
+# Watchdog & Next Steps
 
-Autonomous post-commit QA auditing, visual verification, and sequential next-step synthesis across agentic code editors.
+Autonomous post-commit auditing, visual verification, and sequential next-step synthesis across agentic code editors.
 
-QA Watchdog operates non-intrusively in isolated Git worktrees. It verifies code correctness, executes headless Playwright passes, commits reproducible fixes to isolated `fix/qa-<sha>` branches, and synthesizes 4 project-grounded `/plan`-compliant implementation plans.
+Watchdog operates non-intrusively in isolated Git worktrees. It verifies code correctness, executes headless Playwright passes, commits reproducible fixes to isolated `fix/qa-<sha>` branches, and synthesizes 4 project-grounded `/plan`-compliant implementation plans.
 
 Supported environments:
 - **Google Antigravity**: Native plugin with visual companion panel, lifecycle hooks, and skills.
@@ -65,10 +65,10 @@ node /path/to/qa-watchdog/packages/universal/bin/watchdog.js setup [claude|curso
 
 #### 1. Claude Code
 
-Add the QA Watchdog MCP server to Claude Code:
+Add the Watchdog MCP server to Claude Code:
 
 ```bash
-claude mcp add qa-watchdog node /path/to/qa-watchdog/packages/universal/dist/mcp.js
+claude mcp add watchdog node /path/to/qa-watchdog/packages/universal/dist/mcp.js
 ```
 
 Or configure `.mcp.json` in your project:
@@ -76,7 +76,7 @@ Or configure `.mcp.json` in your project:
 ```json
 {
   "mcpServers": {
-    "qa-watchdog": {
+    "watchdog": {
       "command": "node",
       "args": [
         "/path/to/qa-watchdog/packages/universal/dist/mcp.js"
@@ -104,7 +104,7 @@ Add the server to `.cursor/mcp.json` or your Windsurf MCP configuration:
 ```json
 {
   "mcpServers": {
-    "qa-watchdog": {
+    "watchdog": {
       "command": "node",
       "args": [
         "/path/to/qa-watchdog/packages/universal/dist/mcp.js"
@@ -140,25 +140,27 @@ When connected via MCP, the following tools are available to agents:
 
 | Tool | Description |
 | :--- | :--- |
-| `qa_watchdog_status` | Inspect repository QA status, recent audit verdicts, active jobs, and fix branches |
-| `qa_watchdog_audit` | Queue an autonomous QA code & visual review in an isolated Git worktree |
-| `qa_watchdog_apply_fix` | Apply verified fixes from an isolated `fix/qa-<sha>` branch onto the working branch |
-| `qa_watchdog_next_steps` | Synthesize 4 project-grounded next-step implementation plans adhering to `/plan` |
-| `qa_watchdog_execute_plan` | Retrieve the full specification prompt for an approved next-step implementation plan |
-| `qa_watchdog_goal` | Inspect, set, or clear the repository milestone goal |
-| `qa_watchdog_comment` | Send guidance or focus notes to an in-progress QA Watchdog audit |
-| `qa_watchdog_continue` | Resume an interrupted audit or check completed audit report |
-| `qa_watchdog_cancel_synthesis` | Cancel an ongoing next-steps synthesis turn |
+| `watchdog_status` | Inspect repository status, recent audit verdicts, active jobs, and fix branches |
+| `watchdog_audit` | Queue an autonomous code & visual review in an isolated Git worktree |
+| `watchdog_apply_fix` | Apply verified fixes from an isolated `fix/qa-<sha>` branch onto the working branch |
+| `watchdog_next_steps` | Synthesize 4 project-grounded next-step implementation plans adhering to `/plan` |
+| `watchdog_execute_plan` | Retrieve the full specification prompt for an approved next-step implementation plan |
+| `watchdog_goal` | Inspect, set, or clear the repository milestone goal |
+| `watchdog_comment` | Send guidance or focus notes to an in-progress Watchdog audit |
+| `watchdog_continue` | Resume an interrupted audit or check completed audit report |
+| `watchdog_cancel_synthesis` | Cancel an ongoing next-steps synthesis turn |
+
+*(All tools also respond to `qa_watchdog_*` aliases for backwards compatibility.)*
 
 MCP Prompts exposed:
-- `qa_audit`: Instructions and testing guidelines for reviewing commits.
-- `qa_next_steps`: Instructions for evaluating and executing proposed implementation plans.
+- `watchdog_audit`: Instructions and testing guidelines for reviewing commits.
+- `watchdog_next_steps`: Instructions for evaluating and executing proposed implementation plans.
 
 ---
 
 ## Universal CLI Usage
 
-You can execute QA Watchdog directly from the command line or scripts:
+You can execute Watchdog directly from the command line or scripts:
 
 ```bash
 # Check status and latest verdicts
@@ -198,7 +200,7 @@ You can execute QA Watchdog directly from the command line or scripts:
 
 ## Preventing Auto-Audits
 
-Include any of these tags in your commit message to skip background QA watchdog execution:
+Include any of these tags in your commit message to skip background Watchdog execution:
 
 - `[skip-qa]`
 - `[auto-review]`

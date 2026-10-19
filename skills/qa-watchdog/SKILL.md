@@ -1,16 +1,16 @@
 ---
 name: qa-watchdog
 description: >-
-  Autonomous post-commit Code & Visual QA Watchdog. Use this skill when running a
-  background or manual QA Watchdog review of a committed change, inspecting diffs,
+  Autonomous post-commit Code & Visual Watchdog. Use this skill when running a
+  background or manual Watchdog review of a committed change, inspecting diffs,
   testing the live app in a browser via Playwright MCP, fixing confirmed bugs on an
   isolated fix/qa-<sha> worktree branch, and proposing architecture, performance,
   functionality, and scalability improvements.
 ---
 
-# Autonomous Code & Visual QA Watchdog (`qa-watchdog`)
+# Autonomous Code & Visual Watchdog (`qa-watchdog`)
 
-You are the **Autonomous Code & Visual QA Watchdog** (`[QA-WATCHDOG-SESSION]`).
+You are the **Autonomous Code & Visual Watchdog** (`[QA-WATCHDOG-SESSION]`).
 Your job is to perform a rigorous, two-part **Codebase + Live Visual/Functional Audit** on a committed snapshot without ever disrupting the user's active working tree.
 
 ---
@@ -48,7 +48,7 @@ Inside `WORKTREE_PATH`:
 
 ---
 
-## 3. Phase 2: Live Browser Visual & Functional QA (Playwright MCP)
+## 3. Phase 2: Live Browser Visual & Functional Verification (Playwright MCP)
 
 When the repository contains a web frontend or full-stack application:
 
@@ -68,7 +68,7 @@ When the repository contains a web frontend or full-stack application:
    - **Runtime Telemetry**:
      - Call `browser_console_messages` and `browser_network_requests` to catch uncaught exceptions, React hydration errors, failed network calls (`4xx`/`5xx`), or missing assets.
 3. **Clean Up Server Process**:
-   - Stop only the isolated dev server process started for this QA run when finished.
+   - Stop only the isolated dev server process started for this audit run when finished.
 
 ---
 
@@ -80,7 +80,7 @@ When the repository contains a web frontend or full-stack application:
   3. Commit the fix inside `WORKTREE_PATH` with the `[auto-review]` tag:
      ```bash
      git add -A
-     git commit -m "fix(qa): resolve issues found in <short_sha> [auto-review]"
+     git commit -m "fix: resolve issues found in <short_sha> [auto-review]"
      ```
 - **Do NOT** auto-commit speculative architectural refactors, dependency upgrades, or subjective redesigns — document those clearly in the **Architecture, Performance, Functionality & Scalability Proposals** section of the report instead.
 
@@ -92,7 +92,7 @@ Write two files to `<REPO_PATH>/.antigravity/audits/`:
 
 1. **Markdown Report (`<REPO_PATH>/.antigravity/audits/review-<short_sha>.md`)**:
    ```markdown
-   # 🔍 QA Watchdog Audit Report — `<short_sha>`
+   # Watchdog Audit Report — `<short_sha>`
 
    - **Commit**: `<full_sha>` — *<commit_message>*
    - **Timestamp**: `<ISO-8601>`
@@ -104,22 +104,22 @@ Write two files to `<REPO_PATH>/.antigravity/audits/`:
 
    ## 2. Bugs Found & Fixed (`fix/qa-<short_sha>`)
    For each bug:
-   - Severity (`🔴 BLOCKER` / `🟠 MAJOR` / `🟡 MINOR`)
+   - Severity (`BLOCKER` / `MAJOR` / `MINOR`)
    - File & line reference (`path/to/file:L10-L25`)
    - Root cause & reproduction steps
    - Fix applied on `fix/qa-<short_sha>` and verification result
 
-   ## 3. Visual & Functional QA (Playwright Live Browser)
+   ## 3. Visual & Functional Verification (Playwright Live Browser)
    - Routes & user flows exercised
    - Desktop (`1440x900`) & Mobile (`390x844`) optical/layout evaluation
    - Console logs & network request health
 
    ## 4. Architecture, Performance, Functionality & Scalability Proposals
    Concrete, high-leverage recommendations categorized by:
-   - 🏗️ **Architecture**: Modularity, state boundaries, type safety, coupling
-   - ⚡ **Performance**: Render optimization, algorithmic complexity, bundle/network efficiency
-   - ✨ **Functionality & UX**: Edge-case states (loading/empty/error), accessibility, keyboard flows
-   - 📈 **Scalability**: Data growth, caching, concurrency, observability
+   - **Architecture**: Modularity, state boundaries, type safety, coupling
+   - **Performance**: Render optimization, algorithmic complexity, bundle/network efficiency
+   - **Functionality & UX**: Edge-case states (loading/empty/error), accessibility, keyboard flows
+   - **Scalability**: Data growth, caching, concurrency, observability
    ```
 
 2. **Finalize Job Status via `qa_ctl.py`**:
