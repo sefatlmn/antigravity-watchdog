@@ -1302,15 +1302,6 @@ body {
   font-weight: var(--weight-semibold);
 }
 
-.tab-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 0;
-  flex-shrink: 0;
-  transform: translateY(1.5px);
-}
-
 .tab-title {
   display: inline-flex;
   align-items: center;
@@ -1366,16 +1357,6 @@ body {
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-}
-
-.goal-title-group .icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  line-height: 0;
-  flex-shrink: 0;
-  color: var(--accent);
-  transform: translateY(1.5px);
 }
 
 .goal-title-group h2 {

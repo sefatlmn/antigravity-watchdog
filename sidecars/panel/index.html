@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Watchdog &amp; Next Steps</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/styles.css?v=15">
+  <link rel="stylesheet" href="/styles.css?v=16">
   <script src="/preload.js"></script>
 </head>
 <body>
@@ -45,12 +45,10 @@
     <!-- Dual Tab Switcher -->
     <nav class="tab-switcher" role="tablist" aria-label="Views">
       <button id="tab-btn-audits" type="button" role="tab" class="tab-btn active" aria-selected="true" aria-controls="tab-pane-audits" onclick="switchTab('audits')">
-        <span class="tab-icon"><svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
         <span class="tab-title">Audits</span>
         <span id="tab-badge-audits" class="tab-badge" hidden>0</span>
       </button>
       <button id="tab-btn-next-steps" type="button" role="tab" class="tab-btn" aria-selected="false" aria-controls="tab-pane-next-steps" onclick="switchTab('next-steps')">
-        <span class="tab-icon"><svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span>
         <span class="tab-title">Next Steps</span>
         <span id="tab-badge-proposals" class="tab-badge">4</span>
       </button>
@@ -125,7 +123,6 @@
       <section class="card goal-card">
         <div class="goal-header">
           <div class="goal-title-group">
-            <span class="icon"><svg class="icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg></span>
             <h2>Project Goal &amp; Direction</h2>
             <span id="ns-goal-source" class="source-tag">README.md</span>
           </div>
@@ -191,6 +188,6 @@
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   </main>
 
-  <script src="/app.js?v=15"></script>
+  <script src="/app.js?v=16"></script>
 </body>
 </html>
