@@ -533,7 +533,7 @@ body {
   min-width: var(--card-action-height, 26px);
   min-height: var(--card-action-height, 26px);
   padding: 0;
-  font-size: 12px;
+  font-size: var(--font-size-xs);
   color: var(--text-muted, var(--muted-foreground, #94a3b8));
   background: transparent;
   border: 1px solid var(--border-subtle);
@@ -596,7 +596,7 @@ body {
 
 /* Current Project Section */
 .current-project {
-  gap: 10px;
+  gap: 8px;
 }
 
 .project-header {
@@ -604,6 +604,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: var(--card-action-height, 26px);
 }
 
 .project-title-group {
@@ -711,7 +712,11 @@ body {
 
 .audit-comment-input {
   width: 100%;
-  padding: 6px 9px;
+  height: 34px;
+  min-height: 34px;
+  line-height: 32px;
+  padding: 0 10px;
+  box-sizing: border-box;
   font-family: var(--font-sans);
   font-size: var(--font-size-sm);
   color: var(--text-main, var(--foreground, #f8fafc));
@@ -901,14 +906,27 @@ body {
 .audits-section {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .section-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-height: var(--card-action-height, 26px);
   padding: 2px 2px;
+}
+
+.section-header-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.section-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--card-action-gap, 6px);
 }
 
 .section-header h2 {
@@ -923,7 +941,7 @@ body {
 .jobs-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .empty-state {
@@ -988,15 +1006,15 @@ body {
 }
 
 .empty-state .btn {
-  margin-top: 6px;
+  margin-top: 8px;
 }
 
 /* Job Item */
 .job-item {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 9px 11px;
+  gap: 8px;
+  padding: 10px 12px;
   background: var(--surface-card, var(--card, #131b2e));
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
@@ -1184,7 +1202,7 @@ body {
 .archive-details {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   margin-top: 4px;
 }
 
@@ -1192,7 +1210,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 2px;
+  min-height: var(--card-action-height, 26px);
+  padding: 2px 2px;
   cursor: pointer;
   user-select: none;
   list-style: none;
@@ -1279,6 +1298,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-height: var(--card-action-height, 26px);
 }
 
 .report-title-group {
@@ -1310,7 +1330,7 @@ body {
 .report-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--card-action-gap, 6px);
 }
 
 .close-btn {
@@ -1527,7 +1547,7 @@ body {
 .audit-action-card {
   display: flex;
   flex-direction: column;
-  gap: var(--gap);
+  gap: 8px;
 }
 
 /* Goal Card */
@@ -1542,12 +1562,13 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  min-height: var(--card-action-height, 26px);
 }
 
 .goal-header-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--card-action-gap, 6px);
 }
 
 .goal-title-group {
@@ -1623,13 +1644,13 @@ body {
 .proposals-section {
   display: flex;
   flex-direction: column;
-  gap: var(--gap);
+  gap: 8px;
 }
 
 .proposals-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .proposals-loading-state {
@@ -1673,14 +1694,14 @@ body {
 }
 
 .loading-label-title {
-  font-size: var(--font-size-sm, 12px);
-  font-weight: var(--weight-medium, 500);
+  font-size: var(--font-size-sm);
+  font-weight: var(--weight-medium);
   color: var(--text-main, var(--foreground, #f8fafc));
 }
 
 .loading-label-sub {
   color: var(--text-muted, var(--muted-foreground, #94a3b8));
-  font-size: var(--font-size-xs, 11px);
+  font-size: var(--font-size-xs);
 }
 
 .proposals-loading-actions {
@@ -1762,7 +1783,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
+  padding: 10px 12px;
   background: var(--surface-card, var(--card, #131b2e));
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius);
@@ -1792,6 +1813,7 @@ body {
   margin: 0;
   font-size: var(--font-size-base);
   font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
   line-height: var(--leading-snug);
   text-wrap: balance;
 }
@@ -1810,6 +1832,7 @@ body {
   gap: 3px;
   padding: 6px 8px;
   background: var(--surface-well);
+  border: 1px solid var(--border-subtle-translucent);
   border-radius: 6px;
 }
 
@@ -1855,7 +1878,7 @@ body {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--card-action-gap, 6px);
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .proposal-actions .proposal-plan-btn {
@@ -1884,10 +1907,10 @@ body {
   flex: 1;
   height: var(--card-action-height, 26px);
   min-height: var(--card-action-height, 26px);
-  padding: 0 12px;
+  padding: 0 10px;
   border-radius: var(--card-action-radius, 5px);
   font-size: var(--font-size-xs);
-  font-weight: var(--weight-semibold);
+  font-weight: var(--weight-medium);
   line-height: 1;
   box-sizing: border-box;
   display: inline-flex;
