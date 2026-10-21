@@ -639,6 +639,7 @@ function renderNextSteps(activeRepo) {
   const proposalsList = $('proposals-list');
   const cancelHeaderBtn = $('btn-cancel-synthesis-header');
   const btnEditGoal = $('btn-edit-goal');
+  const btnRefreshGoal = $('btn-refresh-goal');
   const btnRefreshProposals = $('btn-refresh-proposals');
 
   if (!activeRepo) {
@@ -650,6 +651,7 @@ function renderNextSteps(activeRepo) {
       goalTextEl.textContent = 'Open a Git repository to set project goals';
     }
     if (btnEditGoal) btnEditGoal.disabled = true;
+    if (btnRefreshGoal) btnRefreshGoal.disabled = true;
     if (btnRefreshProposals) btnRefreshProposals.disabled = true;
     if (cancelHeaderBtn) cancelHeaderBtn.hidden = true;
     if (proposalsList) {
@@ -664,6 +666,7 @@ function renderNextSteps(activeRepo) {
   }
 
   if (btnEditGoal) btnEditGoal.disabled = false;
+  if (btnRefreshGoal) btnRefreshGoal.disabled = false;
   if (btnRefreshProposals) btnRefreshProposals.disabled = false;
 
   try {
@@ -809,9 +812,6 @@ window.cancelNextStepsRefresh = async function() {
       if (Array.isArray(res.proposals)) {
         activeRepo.proposals = res.proposals;
       }
-      if (res.goal) {
-        activeRepo.goal = res.goal;
-      }
       activeRepo.synthesizing = false;
       const msg = res.notifiedChat ? 'Synthesis cancelled (chat notified)' : 'Synthesis cancelled';
       toast(msg);
@@ -892,7 +892,6 @@ async function refreshProposals(skipDispatch = false) {
         if (progressSub) progressSub.textContent = 'Proposals ready!';
         await new Promise((r) => setTimeout(r, 200));
         activeRepo.proposals = res.proposals;
-        if (res.goal) activeRepo.goal = res.goal;
         activeRepo.synthesizing = false;
         toast('Synthesized 4 next steps');
         return;
@@ -947,7 +946,6 @@ async function refreshProposals(skipDispatch = false) {
               if (progressSub) progressSub.textContent = 'Proposals ready!';
               await new Promise((r) => setTimeout(r, 250));
               activeRepo.proposals = check.proposals;
-              if (check.goal) activeRepo.goal = check.goal;
               activeRepo.synthesizing = false;
               finished = true;
               toast('Synthesized 4 next steps');
@@ -990,6 +988,53 @@ async function refreshProposals(skipDispatch = false) {
       refreshBtn.classList.remove('spinning');
     }
     renderNextSteps(activeRepo);
+  }
+}
+
+let isRefreshingGoal = false;
+async function refreshProjectGoal() {
+  if (isRefreshingGoal) return;
+  const activeRepo = getActiveRepo();
+  if (!activeRepo) {
+    toast('No Git repository detected.', true);
+    return;
+  }
+  const refreshBtn = $('btn-refresh-goal');
+  isRefreshingGoal = true;
+  try {
+    if (refreshBtn) {
+      refreshBtn.disabled = true;
+      refreshBtn.classList.add('spinning');
+    }
+    toast('Reviewing codebase & updating project goal…');
+    const res = await callApi('/api/next-steps/goal', {
+      body: { repo: activeRepo.repoPath, refresh: true },
+    });
+    if (res && res.ok && res.goal) {
+      activeRepo.goal = res.goal;
+      const goalTextEl = $('ns-goal-text');
+      if (goalTextEl) {
+        const text =
+          (typeof res.goal === 'object' ? res.goal.goal : res.goal) ||
+          `Develop and maintain ${activeRepo.repoName}`;
+        goalTextEl.textContent = text;
+      }
+      const gInput = $('input-goal');
+      if (gInput) {
+        gInput.value = (typeof res.goal === 'object' ? res.goal.goal : res.goal) || '';
+      }
+      toast('Project goal updated from codebase');
+    } else {
+      toast(res?.error || 'Could not refresh project goal.', true);
+    }
+  } catch (err) {
+    toast(`Failed to refresh goal: ${err.message}`, true);
+  } finally {
+    isRefreshingGoal = false;
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+      refreshBtn.classList.remove('spinning');
+    }
   }
 }
 
@@ -1429,6 +1474,12 @@ async function init() {
         toast(`Reset failed: ${err.message}`, true);
       }
     });
+  }
+
+  // Goal refresh
+  const btnRefreshGoal = $('btn-refresh-goal');
+  if (btnRefreshGoal) {
+    btnRefreshGoal.addEventListener('click', refreshProjectGoal);
   }
 
   // Next Steps refresh

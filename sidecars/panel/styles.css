@@ -1544,6 +1544,12 @@ body {
   gap: 6px;
 }
 
+.goal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .goal-title-group {
   display: flex;
   align-items: center;

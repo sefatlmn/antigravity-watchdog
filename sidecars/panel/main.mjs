@@ -930,7 +930,7 @@ app.api('/api/next-steps/cancel', (data) => {
   return runPythonCtl(['cancel-synthesis', '--repo', repo]);
 });
 
-// POST /api/next-steps/goal { repo, goal?, clear? }
+// POST /api/next-steps/goal { repo, goal?, clear?, refresh? }
 app.api('/api/next-steps/goal', (data) => {
   const repo = String(data?.repo || '').trim();
   if (!repo) {
@@ -942,6 +942,8 @@ app.api('/api/next-steps/goal', (data) => {
   const args = ['goal', '--repo', repo];
   if (data?.clear) {
     args.push('--clear');
+  } else if (data?.refresh) {
+    args.push('--refresh');
   } else if (data?.goal) {
     args.push('--set', String(data.goal).trim());
   }

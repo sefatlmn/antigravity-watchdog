@@ -1134,6 +1134,14 @@ def save_goal_override(repo_root: Path, goal_text: str) -> Dict[str, Any]:
         "updatedAt": now_iso(),
     }
     goal_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    proposals_file = ns_dir / "proposals.json"
+    if proposals_file.exists():
+        try:
+            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
+            p_data["goal"] = data
+            proposals_file.write_text(json.dumps(p_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     return data
 
 
@@ -1141,7 +1149,212 @@ def clear_goal_override(repo_root: Path) -> Dict[str, Any]:
     goal_file = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME / "goal.json"
     if goal_file.exists():
         goal_file.unlink()
-    return load_goal(repo_root)
+    data = load_goal(repo_root)
+    proposals_file = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME / "proposals.json"
+    if proposals_file.exists():
+        try:
+            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
+            p_data["goal"] = data
+            proposals_file.write_text(json.dumps(p_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+    return data
+
+
+def refresh_project_goal(repo_root: Path) -> Dict[str, Any]:
+    """
+    Review codebase, especially .md and text files (README, handoff, specs, roadmap, todo),
+    package manifests, and the latest commits to formulate and update the project goal.
+    Saves the updated goal to .antigravity/next_steps/goal.json and synchronizes proposals.json.
+    DOES NOT trigger next-steps proposals synthesis.
+    """
+    repo_root = Path(repo_root).resolve()
+
+    # 1. Inspect handoff, walkthrough, specs, roadmap, and other markdown documentation
+    handoff = discover_project_handoff_and_specs(repo_root)
+
+    # 2. Inspect README.md and text overviews
+    readme = parse_full_readme(repo_root)
+
+    # 3. Inspect package manifests & tech stack
+    manifest = discover_project_manifests(repo_root)
+
+    # 4. Inspect latest commits for active direction
+    _, recent_commits = get_youngest_commit(repo_root, limit=10)
+    skip_tags = ["[skip-qa]", "[qa-watchdog]", "[auto-review]"]
+    recent_subjects = []
+    for c in (recent_commits or []):
+        subj = c.get("subject", "").strip()
+        if not subj:
+            continue
+        for tag in skip_tags:
+            subj = subj.replace(tag, "").strip()
+        if subj and len(subj) > 5 and subj not in recent_subjects:
+            recent_subjects.append(subj)
+        if len(recent_subjects) >= 3:
+            break
+
+    recent_focus = recent_subjects[0] if recent_subjects else ""
+
+    # 5. Additional scan for any .md or .txt files in root or docs/ with explicit goals/objectives
+    extra_docs_goal = ""
+    extra_docs_source = ""
+    candidate_doc_dirs = [repo_root, repo_root / "docs", repo_root / ".antigravity"]
+    for cdir in candidate_doc_dirs:
+        if not cdir.exists() or not cdir.is_dir():
+            continue
+        try:
+            for p in cdir.iterdir():
+                if not p.is_file() or p.suffix.lower() not in (".md", ".txt", ".markdown"):
+                    continue
+                if p.name.lower() in ("readme.md", "handoff.md", "product.md", "walkthrough.md"):
+                    continue
+                content = p.read_text(encoding="utf-8", errors="ignore").strip()
+                if not content or len(content) < 40:
+                    continue
+                lines = content.splitlines()
+                for i, l in enumerate(lines):
+                    ls = l.strip().lower()
+                    if any(
+                        ls.startswith(pref)
+                        for pref in (
+                            "# goal",
+                            "# purpose",
+                            "# mission",
+                            "# project goal",
+                            "## goal",
+                            "## purpose",
+                            "## mission",
+                            "## project goal",
+                        )
+                    ):
+                        subsequent = [
+                            lines[j].strip()
+                            for j in range(i + 1, min(i + 4, len(lines)))
+                            if lines[j].strip() and not lines[j].strip().startswith("#")
+                        ]
+                        if subsequent:
+                            extra_docs_goal = " ".join(subsequent[:2])
+                            extra_docs_source = p.relative_to(repo_root).as_posix()
+                            break
+                if extra_docs_goal:
+                    break
+        except Exception:
+            pass
+        if extra_docs_goal:
+            break
+
+    # Synthesize project goal and source
+    final_goal = ""
+    source_label = ""
+
+    # Priority 1: Handoff / Product document
+    if handoff.get("found"):
+        title = handoff.get("title", "")
+        summary = handoff.get("summary", "")
+        uncompleted = handoff.get("uncompleted_tasks", [])
+        next_items = handoff.get("next_steps_items", [])
+        doc_type_label = (
+            "Product Spec"
+            if handoff.get("doc_type") == "product"
+            else ("Walkthrough" if handoff.get("doc_type") == "walkthrough" else "Handoff")
+        )
+        source_label = f"{doc_type_label} ({handoff['rel_path']})"
+
+        clean_sum = re.sub(r"<!--.*?-->", "", summary).strip()
+        active_task = uncompleted[0] if uncompleted else (next_items[0] if next_items else "")
+        if active_task:
+            active_task = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", active_task).strip()
+
+        if clean_sum and len(clean_sum) > 15:
+            if active_task:
+                final_goal = f"{clean_sum} - Active milestone: {active_task}"
+            elif recent_focus:
+                final_goal = f"{clean_sum} (Recent focus: {recent_focus})"
+            else:
+                final_goal = clean_sum
+        elif active_task:
+            final_goal = f"{title} - Next: {active_task}"
+        elif title:
+            final_goal = title
+
+    # Priority 2: Extra documents with explicit goal section
+    if not final_goal and extra_docs_goal:
+        clean_extra = re.sub(r"<!--.*?-->", "", extra_docs_goal).strip()
+        if len(clean_extra) > 15:
+            final_goal = clean_extra
+            source_label = extra_docs_source
+
+    # Priority 3: README.md
+    if not final_goal and readme.get("found"):
+        tagline = readme.get("tagline") or readme.get("overview")
+        title_str = readme.get("title") or repo_root.name
+        roadmap_items = readme.get("roadmap_items", [])
+        roadmap_item = roadmap_items[0] if roadmap_items else None
+        if tagline:
+            if title_str.lower() in tagline.lower()[: len(title_str) + 10]:
+                base_desc = tagline
+            else:
+                base_desc = f"{title_str} - {tagline}"
+
+            if roadmap_item:
+                final_goal = f"{base_desc} (Active roadmap: {roadmap_item})"
+            elif recent_focus:
+                final_goal = f"{base_desc} (Recent focus: {recent_focus})"
+            else:
+                final_goal = base_desc
+            source_label = "README.md"
+            if recent_focus:
+                source_label += " + Git History"
+
+    # Priority 4: Package manifest
+    if not final_goal and manifest.get("description"):
+        manifest_name = manifest.get("name") or repo_root.name
+        manifest_desc = manifest["description"]
+        if recent_focus:
+            final_goal = f"{manifest_name}: {manifest_desc} (Recent focus: {recent_focus})"
+            source_label = f"{manifest.get('manifest_type') or 'package'}.json + Git History"
+        else:
+            final_goal = f"{manifest_name}: {manifest_desc}"
+            source_label = f"{manifest.get('manifest_type') or 'package'}.json"
+
+    # Priority 5: Recent commits
+    if not final_goal and recent_focus:
+        final_goal = f"Develop {repo_root.name} - Recent focus: {recent_focus}"
+        source_label = "Git Commit History"
+
+    # Fallback
+    if not final_goal:
+        final_goal = f"Develop and maintain {repo_root.name}"
+        source_label = "Repository Structure"
+
+    # Ensure single line, clean spacing, no emojis
+    final_goal = " ".join(final_goal.split())
+    final_goal = re.sub(r"[\U00010000-\U0010ffff]", "", final_goal).strip()
+
+    goal_data = {
+        "goal": final_goal,
+        "source": source_label,
+        "updatedAt": now_iso(),
+    }
+
+    # Save to goal.json
+    ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+    ns_dir.mkdir(parents=True, exist_ok=True)
+    goal_file = ns_dir / "goal.json"
+    goal_file.write_text(json.dumps(goal_data, indent=2), encoding="utf-8")
+
+    # Update proposals.json goal field if present, leaving proposals unchanged
+    proposals_file = ns_dir / "proposals.json"
+    if proposals_file.exists():
+        try:
+            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
+            p_data["goal"] = goal_data
+            proposals_file.write_text(json.dumps(p_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    return goal_data
 
 
 def analyze_codebase_delta(repo_root: Path, sha: str = "HEAD") -> Dict[str, Any]:
@@ -3382,6 +3595,7 @@ def main() -> int:
     p_goal.add_argument("--repo", required=True)
     p_goal.add_argument("--set", dest="set_goal", default="")
     p_goal.add_argument("--clear", action="store_true")
+    p_goal.add_argument("--refresh", action="store_true", help="Review codebase & update project goal")
 
     p_conv = sub.add_parser("conversations", help="List Antigravity conversations associated with repository", parents=[p_common])
     p_conv.add_argument("--repo", required=True)
@@ -3625,7 +3839,9 @@ def main() -> int:
 
     if args.cmd == "goal":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve()
-        if args.clear:
+        if args.refresh:
+            res = refresh_project_goal(root)
+        elif args.clear:
             res = clear_goal_override(root)
         elif args.set_goal:
             res = save_goal_override(root, args.set_goal)
