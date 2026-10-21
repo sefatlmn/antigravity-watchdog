@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -43,6 +43,7 @@ const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
 
 app.page('/', () => readLocal('index.html'));
 app.page('/app.js', () => readLocal('app.js'));
+app.api('/preload.js', () => new Response('// preload stub\n', { contentType: 'application/javascript' }), 'GET');
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
 
 let resolvedPythonBin = null;
@@ -194,7 +195,17 @@ function reconcileJobs(state) {
               const stat = statSync(tFile);
               const age = (Date.now() - stat.mtimeMs) / 1000;
               if (age > 45) {
-                const chunk = readFileSync(tFile, 'utf8').trim().split('\n');
+                let chunkText = '';
+                if (stat.size > 65536) {
+                  const fd = openSync(tFile, 'r');
+                  const buffer = Buffer.alloc(65536);
+                  readSync(fd, buffer, 0, 65536, stat.size - 65536);
+                  closeSync(fd);
+                  chunkText = buffer.toString('utf8');
+                } else {
+                  chunkText = readFileSync(tFile, 'utf8');
+                }
+                const chunk = chunkText.trim().split('\n');
                 for (let i = chunk.length - 1; i >= 0; i--) {
                   const line = chunk[i].trim();
                   if (line.startsWith('{')) {
@@ -242,7 +253,7 @@ function reconcileJobs(state) {
 }
 
 function saveStatePatch(patch) {
-  const current = loadState();
+  const current = loadState(true);
   const next = { ...current, ...patch };
   mkdirSync(WATCHDOG_DIR, { recursive: true });
   const tmpFile = `${STATE_FILE}.tmp.${process.pid}`;
@@ -311,6 +322,15 @@ function discoverCandidateGitRoots(uriOrPath) {
     }
   }
   if (!existsSync(fsPath)) return [];
+
+  try {
+    const st = statSync(fsPath);
+    if (!st.isDirectory()) {
+      fsPath = dirname(fsPath);
+    }
+  } catch {
+    return [];
+  }
 
   const candidates = [];
   const seen = new Set();
@@ -398,113 +418,135 @@ function isDocsOnlyCommit(repoPath, sha, subject = '') {
 }
 
 function inspectSingleRepo(topLevel) {
-  const recentCommits = getRepoRecentCommits(topLevel, 12);
-  if (recentCommits.length === 0) return null;
+  try {
+    const isGit = runGit(topLevel, ['rev-parse', '--is-inside-work-tree']) === 'true';
+    if (!isGit) return null;
 
-  const youngest = recentCommits[0];
-  const isDocsOnly = isDocsOnlyCommit(topLevel, youngest.sha, youngest.subject);
-  youngest.isDocsOnly = isDocsOnly;
+    const recentCommits = getRepoRecentCommits(topLevel, 12);
+    const branch = runGit(topLevel, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'HEAD';
+    const fixBranchesRaw = runGit(topLevel, ['branch', '--list', 'fix/qa-*', '--format=%(refname:short)']);
+    const fixBranches = fixBranchesRaw ? fixBranchesRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [];
 
-  const branch = runGit(topLevel, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'HEAD';
-  const fixBranchesRaw = runGit(topLevel, ['branch', '--list', 'fix/qa-*', '--format=%(refname:short)']);
-  const fixBranches = fixBranchesRaw ? fixBranchesRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [];
-
-  const auditsDir = join(topLevel, '.antigravity', 'audits');
-  const reports = [];
-  if (existsSync(auditsDir)) {
-    try {
-      const files = readdirSync(auditsDir)
-        .filter((f) => f.startsWith('review-') && f.endsWith('.md'))
-        .map((f) => {
-          const full = join(auditsDir, f);
-          const st = statSync(full);
-          return {
-            name: f,
-            shortSha: f.replace(/^review-/, '').replace(/\.md$/, ''),
-            path: full,
-            updatedAt: st.mtime.toISOString(),
-            mtimeMs: st.mtimeMs,
-          };
-        })
-        .sort((a, b) => b.mtimeMs - a.mtimeMs);
-      reports.push(...files.slice(0, 15));
-    } catch {
-      // ignore
+    const auditsDir = join(topLevel, '.antigravity', 'audits');
+    const reports = [];
+    if (existsSync(auditsDir)) {
+      try {
+        const files = readdirSync(auditsDir)
+          .filter((f) => f.startsWith('review-') && f.endsWith('.md'))
+          .map((f) => {
+            const full = join(auditsDir, f);
+            const st = statSync(full);
+            return {
+              name: f,
+              shortSha: f.replace(/^review-/, '').replace(/\.md$/, ''),
+              path: full,
+              updatedAt: st.mtime.toISOString(),
+              mtimeMs: st.mtimeMs,
+            };
+          })
+          .sort((a, b) => b.mtimeMs - a.mtimeMs);
+        reports.push(...files.slice(0, 15));
+      } catch {
+        // ignore
+      }
     }
-  }
 
-  const nextStepsDir = join(topLevel, '.antigravity', 'next_steps');
-  const proposalsFile = join(nextStepsDir, 'proposals.json');
-  let proposals = [];
-  let goal = null;
-  if (existsSync(proposalsFile)) {
-    try {
-      const pData = JSON.parse(readFileSync(proposalsFile, 'utf8'));
-      proposals = Array.isArray(pData.proposals) ? pData.proposals : [];
-      if (pData.goal) goal = pData.goal;
-    } catch {
-      // ignore
+    const nextStepsDir = join(topLevel, '.antigravity', 'next_steps');
+    const proposalsFile = join(nextStepsDir, 'proposals.json');
+    let proposals = [];
+    let goal = null;
+    if (existsSync(proposalsFile)) {
+      try {
+        const pData = JSON.parse(readFileSync(proposalsFile, 'utf8'));
+        proposals = Array.isArray(pData.proposals) ? pData.proposals : [];
+        if (pData.goal) goal = pData.goal;
+      } catch {
+        // ignore
+      }
     }
-  }
-  const goalFile = join(nextStepsDir, 'goal.json');
-  if (!goal && existsSync(goalFile)) {
-    try {
-      goal = JSON.parse(readFileSync(goalFile, 'utf8'));
-    } catch {
-      // ignore
+    const goalFile = join(nextStepsDir, 'goal.json');
+    if (!goal && existsSync(goalFile)) {
+      try {
+        goal = JSON.parse(readFileSync(goalFile, 'utf8'));
+      } catch {
+        // ignore
+      }
     }
-  }
-  let synthesizing = false;
-  const synthStateFile = join(nextStepsDir, 'synthesis_state.json');
-  if (existsSync(synthStateFile)) {
-    try {
-      const sData = JSON.parse(readFileSync(synthStateFile, 'utf8'));
-      if (sData.status === 'synthesizing') {
-        const startedTs = sData.startedAt ? new Date(sData.startedAt).getTime() : 0;
-        const elapsed = startedTs ? Date.now() - startedTs : 0;
-        const propFile = join(nextStepsDir, 'proposals.json');
-        let proposalsFresh = false;
-        if (existsSync(propFile) && startedTs) {
-          const mtime = statSync(propFile).mtimeMs;
-          if (mtime >= startedTs - 2000) {
-            proposalsFresh = true;
+    let synthesizing = false;
+    const synthStateFile = join(nextStepsDir, 'synthesis_state.json');
+    if (existsSync(synthStateFile)) {
+      try {
+        const sData = JSON.parse(readFileSync(synthStateFile, 'utf8'));
+        if (sData.status === 'synthesizing') {
+          const startedTs = sData.startedAt ? new Date(sData.startedAt).getTime() : 0;
+          const elapsed = startedTs ? Date.now() - startedTs : 0;
+          const propFile = join(nextStepsDir, 'proposals.json');
+          let proposalsFresh = false;
+          if (existsSync(propFile) && startedTs) {
+            const mtime = statSync(propFile).mtimeMs;
+            if (mtime >= startedTs - 2000) {
+              proposalsFresh = true;
+            }
+          }
+          if (proposalsFresh || elapsed > 15 * 60 * 1000) {
+            synthesizing = false;
+          } else {
+            synthesizing = true;
           }
         }
-        if (proposalsFresh || elapsed > 15 * 60 * 1000) {
-          synthesizing = false;
-        } else {
-          synthesizing = true;
-        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
-  }
 
-  return {
-    repoPath: topLevel,
-    repoName: topLevel.split(/[\\/]/).pop() || topLevel,
-    branch,
-    head: {
-      sha: youngest.sha,
-      shortSha: youngest.shortSha,
-      subject: youngest.subject,
-      relativeTime: youngest.relativeTime,
-      committedAt: youngest.committedAt,
-      timestamp: youngest.timestamp,
-      author: youngest.author,
-      isEmptyTree: youngest.isEmptyTree,
-      isAutoReview: Boolean(youngest.isAutoReview),
-      isDocsOnly: Boolean(isDocsOnly),
-    },
-    youngestCommit: youngest,
-    recentCommits,
-    fixBranches,
-    reports,
-    goal,
-    proposals,
-    synthesizing,
-  };
+    if (recentCommits.length === 0) {
+      return {
+        repoPath: topLevel,
+        repoName: topLevel.split(/[\\/]/).pop() || topLevel,
+        branch,
+        head: null,
+        youngestCommit: null,
+        recentCommits: [],
+        fixBranches,
+        reports,
+        goal,
+        proposals,
+        synthesizing,
+      };
+    }
+
+    const youngest = recentCommits[0];
+    const isDocsOnly = isDocsOnlyCommit(topLevel, youngest.sha, youngest.subject);
+    youngest.isDocsOnly = isDocsOnly;
+
+    return {
+      repoPath: topLevel,
+      repoName: topLevel.split(/[\\/]/).pop() || topLevel,
+      branch,
+      head: {
+        sha: youngest.sha,
+        shortSha: youngest.shortSha,
+        subject: youngest.subject,
+        relativeTime: youngest.relativeTime,
+        committedAt: youngest.committedAt,
+        timestamp: youngest.timestamp,
+        author: youngest.author,
+        isEmptyTree: youngest.isEmptyTree,
+        isAutoReview: Boolean(youngest.isAutoReview),
+        isDocsOnly: Boolean(isDocsOnly),
+      },
+      youngestCommit: youngest,
+      recentCommits,
+      fixBranches,
+      reports,
+      goal,
+      proposals,
+      synthesizing,
+    };
+  } catch (err) {
+    console.error(`Error inspecting repo at ${topLevel}:`, err);
+    return null;
+  }
 }
 
 function collectActiveRepos(uris, state) {
@@ -531,10 +573,42 @@ function collectActiveRepos(uris, state) {
     }
   }
 
+  // Fallback 1: inspect repo_path recorded on previous jobs
+  if (roots.length === 0 && Array.isArray(state.jobs)) {
+    for (const j of state.jobs) {
+      if (j.repo_path) {
+        for (const root of discoverCandidateGitRoots(j.repo_path)) {
+          if (!seen.has(root)) {
+            seen.add(root);
+            roots.push(root);
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback 2: inspect process environment and current working directory
+  if (roots.length === 0) {
+    const envCandidates = [
+      process.env.WORKSPACE_ROOT,
+      process.env.PROJECT_DIR,
+      process.env.PWD,
+      process.cwd(),
+    ].filter(Boolean);
+    for (const ec of envCandidates) {
+      for (const root of discoverCandidateGitRoots(ec)) {
+        if (!seen.has(root)) {
+          seen.add(root);
+          roots.push(root);
+        }
+      }
+    }
+  }
+
   let repos = roots.map((r) => inspectSingleRepo(r)).filter(Boolean);
 
   // Drop empty-tree outer wrapper repos if any non-empty repo exists
-  const hasNonEmpty = repos.some((r) => !r.head?.isEmptyTree);
+  const hasNonEmpty = repos.some((r) => r.head && !r.head.isEmptyTree);
   if (hasNonEmpty) {
     repos = repos.filter((r) => !r.head?.isEmptyTree);
   }
@@ -556,55 +630,86 @@ function collectActiveRepos(uris, state) {
 
 // POST /api/dashboard { workspaceUris }
 app.api('/api/dashboard', (data) => {
-  const state = loadState();
-  const uris = Array.isArray(data?.workspaceUris) ? data.workspaceUris : [];
-  const activeRepos = collectActiveRepos(uris, state);
+  try {
+    const state = loadState();
+    const uris = Array.isArray(data?.workspaceUris) ? data.workspaceUris : [];
+    const activeRepos = collectActiveRepos(uris, state);
 
-  return {
-    auto_dispatch: state.auto_dispatch !== false,
-    skip_docs_only: state.skip_docs_only !== false,
-    activeRepos,
-    jobs: Array.isArray(state.jobs) ? state.jobs : [],
-  };
+    return {
+      auto_dispatch: state.auto_dispatch !== false,
+      skip_docs_only: state.skip_docs_only !== false,
+      activeRepos,
+      jobs: Array.isArray(state.jobs) ? state.jobs : [],
+    };
+  } catch (err) {
+    console.error('Error in /api/dashboard:', err);
+    return {
+      auto_dispatch: true,
+      skip_docs_only: true,
+      activeRepos: [],
+      jobs: [],
+      error: String(err?.message || err),
+    };
+  }
 });
 
 // POST /api/sync { repoPath?, workspaceUris? }
 app.api('/api/sync', (data) => {
-  const uris = [];
-  if (data?.repoPath) uris.push(String(data.repoPath).trim());
-  if (Array.isArray(data?.workspaceUris)) {
-    for (const u of data.workspaceUris) {
-      if (! u) continue;
-      let p = String(u);
-      if (p.startsWith('file://')) {
-        try {
-          p = fileURLToPath(p);
-        } catch {
-          continue;
+  try {
+    const uris = [];
+    if (data?.repoPath) uris.push(String(data.repoPath).trim());
+    if (Array.isArray(data?.workspaceUris)) {
+      for (const u of data.workspaceUris) {
+        if (!u) continue;
+        let p = String(u);
+        if (p.startsWith('file://')) {
+          try {
+            p = fileURLToPath(p);
+          } catch {
+            continue;
+          }
         }
+        if (!uris.includes(p)) uris.push(p);
       }
-      if (!uris.includes(p)) uris.push(p);
     }
-  }
 
-  const ctlArgs = ['sync'];
-  for (const u of uris) {
-    ctlArgs.push('--repo', u);
-  }
-  const syncRes = runPythonCtl(ctlArgs);
-  const state = loadState();
-  const activeRepos = collectActiveRepos(uris, state);
+    const ctlArgs = ['sync'];
+    for (const u of uris) {
+      ctlArgs.push('--repo', u);
+    }
+    let syncRes = {};
+    try {
+      syncRes = runPythonCtl(ctlArgs);
+    } catch (pythonErr) {
+      console.warn('Python ctl sync warning:', pythonErr.message);
+    }
+    const state = loadState();
+    const activeRepos = collectActiveRepos(uris, state);
 
-  return {
-    ok: true,
-    syncedAt: syncRes.syncedAt || new Date().toISOString(),
-    bestRepo: activeRepos[0] || syncRes.bestRepo || null,
-    youngestCommit: activeRepos[0]?.youngestCommit || syncRes.youngestCommit || null,
-    recentCommits: activeRepos[0]?.recentCommits || syncRes.recentCommits || [],
-    activeRepos,
-    prunedWrapperRepos: syncRes.prunedWrapperRepos || [],
-    jobs: Array.isArray(state.jobs) ? state.jobs : [],
-  };
+    return {
+      ok: true,
+      syncedAt: syncRes.syncedAt || new Date().toISOString(),
+      bestRepo: activeRepos[0] || syncRes.bestRepo || null,
+      youngestCommit: activeRepos[0]?.youngestCommit || syncRes.youngestCommit || null,
+      recentCommits: activeRepos[0]?.recentCommits || syncRes.recentCommits || [],
+      activeRepos,
+      prunedWrapperRepos: syncRes.prunedWrapperRepos || [],
+      jobs: Array.isArray(state.jobs) ? state.jobs : [],
+    };
+  } catch (err) {
+    console.error('Error in /api/sync:', err);
+    let state = { auto_dispatch: true, skip_docs_only: true, jobs: [] };
+    try {
+      state = loadState(true);
+    } catch {}
+    return {
+      ok: false,
+      error: String(err?.message || err),
+      syncedAt: new Date().toISOString(),
+      activeRepos: [],
+      jobs: Array.isArray(state.jobs) ? state.jobs : [],
+    };
+  }
 });
 
 // POST /api/settings { auto_dispatch?, skip_docs_only? }

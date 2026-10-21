@@ -109,29 +109,50 @@ const ICONS = {
   doc: `<svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
 };
 
-async function callApi(path, { method = 'POST', body = {} } = {}) {
-  let res;
-  if (sidecar?.fetch) {
-    res = await sidecar.fetch(path, {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: method === 'GET' ? undefined : JSON.stringify(body),
-    });
-  } else {
-    const token = new URLSearchParams(window.location.search).get('token');
-    const headers = { 'Content-Type': 'application/json' };
-    if (token) headers['x-sidecar-token'] = token;
-    res = await window.fetch(path, {
-      method,
-      headers,
-      body: method === 'GET' ? undefined : JSON.stringify(body),
-    });
+async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000 } = {}) {
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    let res;
+    const bodyStr = method === 'GET' ? undefined : JSON.stringify(body);
+    if (sidecar?.fetch) {
+      const fetchPromise = sidecar.fetch(path, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: bodyStr,
+        signal: controller?.signal,
+      });
+      res = await Promise.race([
+        fetchPromise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Request timeout (${timeoutMs}ms)`)), timeoutMs)
+        ),
+      ]);
+    } else {
+      const token = new URLSearchParams(window.location.search).get('token');
+      const headers = { 'Content-Type': 'application/json' };
+      if (token) headers['x-sidecar-token'] = token;
+      const fetchPromise = window.fetch(path, {
+        method,
+        headers,
+        body: bodyStr,
+        signal: controller?.signal,
+      });
+      res = await Promise.race([
+        fetchPromise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Request timeout (${timeoutMs}ms)`)), timeoutMs)
+        ),
+      ]);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `${res.status} ${res.statusText}`);
+    }
+    return data;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
   }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.error || `${res.status} ${res.statusText}`);
-  }
-  return data;
 }
 
 let toastTimer;
@@ -299,9 +320,7 @@ function switchTab(tab) {
 
     try {
       const activeRepo = getActiveRepo();
-      if (activeRepo) {
-        renderNextSteps(activeRepo);
-      }
+      renderNextSteps(activeRepo || null);
     } catch (err) {
       console.error('Error switching to Next Steps tab:', err);
     }
@@ -508,7 +527,7 @@ function renderDashboard(data) {
     if (repoNameEl) repoNameEl.textContent = 'No repository detected';
     if (repoBranchEl) repoBranchEl.textContent = '–';
     if (commitShaEl) commitShaEl.textContent = '–';
-    if (commitSubjectEl) commitSubjectEl.textContent = 'Open a Git workspace to begin';
+    if (commitSubjectEl) commitSubjectEl.textContent = data.error ? 'Unable to scan repository (click sync to retry)' : 'Open a Git workspace to begin';
     if (commitTimeEl) commitTimeEl.textContent = '';
   }
 
@@ -607,16 +626,48 @@ function renderDashboard(data) {
   // Render Next Steps
   if (activeRepo) {
     renderNextSteps(activeRepo);
+  } else {
+    renderNextSteps(null);
   }
 }
 
 function renderNextSteps(activeRepo) {
-  if (!activeRepo) return;
   if (isRefreshingProposals) return;
+
+  const tabBadge = $('tab-badge-proposals');
+  const goalTextEl = $('ns-goal-text');
+  const proposalsList = $('proposals-list');
+  const cancelHeaderBtn = $('btn-cancel-synthesis-header');
+  const btnEditGoal = $('btn-edit-goal');
+  const btnRefreshProposals = $('btn-refresh-proposals');
+
+  if (!activeRepo) {
+    if (tabBadge) {
+      tabBadge.textContent = '0';
+      tabBadge.hidden = true;
+    }
+    if (goalTextEl) {
+      goalTextEl.textContent = 'Open a Git repository to set project goals';
+    }
+    if (btnEditGoal) btnEditGoal.disabled = true;
+    if (btnRefreshProposals) btnRefreshProposals.disabled = true;
+    if (cancelHeaderBtn) cancelHeaderBtn.hidden = true;
+    if (proposalsList) {
+      proposalsList.innerHTML = `
+        <div class="empty-state">
+          <p class="muted">No repository detected.</p>
+          <span class="small muted">Open a Git workspace in your editor to view and synthesize next steps.</span>
+        </div>
+      `;
+    }
+    return;
+  }
+
+  if (btnEditGoal) btnEditGoal.disabled = false;
+  if (btnRefreshProposals) btnRefreshProposals.disabled = false;
 
   try {
     // 1. Goal Banner
-    const goalTextEl = $('ns-goal-text');
     const goalData = activeRepo.goal;
 
     if (goalTextEl) {
@@ -631,9 +682,9 @@ function renderNextSteps(activeRepo) {
 
     // 2. Proposal count badge on tab
     const proposals = Array.isArray(activeRepo.proposals) ? activeRepo.proposals : [];
-    const tabBadge = $('tab-badge-proposals');
     if (tabBadge) {
-      tabBadge.textContent = proposals.length || 4;
+      tabBadge.textContent = String(proposals.length);
+      tabBadge.hidden = proposals.length === 0;
     }
 
     // 3. Proposals List
@@ -1049,9 +1100,23 @@ async function syncGit({ silent = false } = {}) {
         data = await callApi('/api/sync', { body });
       }
     } catch {
-      data = await callApi('/api/dashboard', { body });
+      try {
+        data = await callApi('/api/dashboard', { body });
+      } catch (innerErr) {
+        if (!currentDashboard) {
+          data = {
+            activeRepos: [],
+            jobs: [],
+            error: innerErr.message,
+          };
+        } else {
+          data = currentDashboard;
+        }
+      }
     }
-    renderDashboard(data);
+    if (data) {
+      renderDashboard(data);
+    }
     if (!silent) {
       const repo = getActiveRepo(data);
       const latest = repo?.youngestCommit || repo?.head;
@@ -1063,6 +1128,9 @@ async function syncGit({ silent = false } = {}) {
     }
   } catch (err) {
     if (!silent) toast(`Sync failed: ${err.message}`, true);
+    if (!currentDashboard) {
+      renderDashboard({ activeRepos: [], jobs: [], error: err.message });
+    }
   } finally {
     isSyncing = false;
     if (syncBtn && !silent) {
@@ -1503,7 +1571,11 @@ async function init() {
 
   if (sidecar?.getWorkspaceUris) {
     try {
-      const uris = await sidecar.getWorkspaceUris();
+      const urisPromise = sidecar.getWorkspaceUris();
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('getWorkspaceUris timeout')), 2000)
+      );
+      const uris = await Promise.race([urisPromise, timeoutPromise]);
       if (uris && uris.length > 0) {
         workspaceUris = uris;
       }
@@ -1527,15 +1599,23 @@ async function init() {
     );
     const delay = hasRunningJob ? 2500 : 8000;
     pollTimeout = setTimeout(async () => {
-      if (!document.hidden) {
-        await syncGit({ silent: true });
+      try {
+        if (!document.hidden) {
+          await syncGit({ silent: true });
+        }
+      } finally {
+        scheduleNextPoll();
       }
-      scheduleNextPoll();
     }, delay);
   }
 
-  await syncGit({ silent: true });
-  scheduleNextPoll();
+  try {
+    await syncGit({ silent: true });
+  } catch (err) {
+    console.error('Initial syncGit error:', err);
+  } finally {
+    scheduleNextPoll();
+  }
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
