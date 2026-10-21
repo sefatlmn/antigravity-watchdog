@@ -764,11 +764,22 @@ function renderNextSteps(activeRepo) {
           const planFile = p.planFile || p.plan_file || '';
           const planId = p.id || 'plan-1';
 
+          const execution = p.execution || (activeRepo.executions && activeRepo.executions[planId]) || null;
+          const execStatus = (execution?.status || '').toLowerCase();
+          const isExecRunning = execStatus === 'running' || execStatus === 'queued';
+          const isExecCompleted = execStatus === 'completed';
+          const isExecInterrupted = execStatus === 'interrupted';
+          const execSummary = execution?.summary || '';
+          const startedTime = execution?.startedAt ? timeAgo(execution.startedAt) : '';
+
           return `
             <div class="proposal-card" data-proposal-id="${escapeHtml(planId)}">
               <div class="proposal-meta-row">
-                <span class="muted small">${escapeHtml(badge)}</span>
-                <span class="muted small">${escapeHtml(difficulty)}</span>
+                <div class="proposal-meta-left">
+                  <span class="muted small">${escapeHtml(badge)}</span>
+                  <span class="muted small">${escapeHtml(difficulty)}</span>
+                </div>
+                ${startedTime ? `<span class="muted small">${escapeHtml(startedTime)}</span>` : ''}
               </div>
 
               <h3>${escapeHtml(title)}</h3>
@@ -776,10 +787,32 @@ function renderNextSteps(activeRepo) {
 
               ${goalsHtml ? `<div class="proposal-goals">${goalsHtml}</div>` : ''}
 
+              ${execSummary ? `<p class="job-summary proposal-execution-summary">${escapeHtml(execSummary)}</p>` : ''}
+
               <div class="proposal-actions">
-                <button type="button" class="btn small-btn primary-btn" data-action="execute-plan" data-plan-id="${escapeHtml(planId)}" data-title="${escapeHtml(title)}">
-                  Execute in Agent
-                </button>
+                ${isExecRunning ? `<span class="applied-badge running"><span class="dot"></span>Executing…</span>` : ''}
+                ${isExecCompleted ? `<span class="applied-badge">${ICONS.check} Executed</span>` : ''}
+                ${isExecInterrupted ? `<span class="applied-badge warn"><span class="dot"></span>Interrupted</span>` : ''}
+
+                ${isExecRunning ? `
+                  <button type="button" class="btn-cancel-mini" data-action="cancel-execution" data-plan-id="${escapeHtml(planId)}" title="Stop ongoing execution">
+                    <svg class="icon-svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                    <span>Stop</span>
+                  </button>
+                ` : isExecInterrupted ? `
+                  <button type="button" class="btn small-btn accent-btn" data-action="execute-plan" data-plan-id="${escapeHtml(planId)}" data-title="${escapeHtml(title)}">
+                    ${ICONS.play} Continue Execution
+                  </button>
+                ` : isExecCompleted ? `
+                  <button type="button" class="btn small-btn secondary" data-action="execute-plan" data-plan-id="${escapeHtml(planId)}" data-title="${escapeHtml(title)}">
+                    Execute Again
+                  </button>
+                ` : `
+                  <button type="button" class="btn small-btn primary-btn" data-action="execute-plan" data-plan-id="${escapeHtml(planId)}" data-title="${escapeHtml(title)}">
+                    Execute in Agent
+                  </button>
+                `}
+
                 <button type="button" class="icon-btn proposal-plan-btn" data-action="view-plan" data-plan-path="${escapeHtml(planPath)}" data-plan-file="${escapeHtml(planFile)}" data-plan-id="${escapeHtml(planId)}" data-title="${escapeHtml(title)}" data-badge="${escapeHtml(badge)}" title="Review Plan" aria-label="Review Plan">
                   ${ICONS.doc}
                 </button>
@@ -1063,6 +1096,31 @@ async function openPlanModal(planPath, planFile, planId, title, badge) {
     $('modal-plan-title').textContent = title || 'Implementation Plan';
     $('modal-category-badge').textContent = stripEmojis(badge) || 'Feature';
     $('modal-plan-content').innerHTML = renderMarkdown(stripEmojis(res.content));
+
+    const proposal = (activeRepo.proposals || []).find((p) => p.id === planId);
+    const execution = proposal?.execution || (activeRepo.executions && activeRepo.executions[planId]) || null;
+    const execStatus = (execution?.status || '').toLowerCase();
+    const modalExecBtn = $('modal-btn-execute');
+    if (modalExecBtn) {
+      if (execStatus === 'running' || execStatus === 'queued') {
+        modalExecBtn.disabled = true;
+        modalExecBtn.textContent = 'Executing in Agent…';
+        modalExecBtn.className = 'btn small-btn secondary';
+      } else if (execStatus === 'completed') {
+        modalExecBtn.disabled = false;
+        modalExecBtn.textContent = 'Execute Again';
+        modalExecBtn.className = 'btn small-btn secondary';
+      } else if (execStatus === 'interrupted') {
+        modalExecBtn.disabled = false;
+        modalExecBtn.innerHTML = `${ICONS.play} Continue Execution`;
+        modalExecBtn.className = 'btn small-btn accent-btn';
+      } else {
+        modalExecBtn.disabled = false;
+        modalExecBtn.textContent = 'Execute in Agent';
+        modalExecBtn.className = 'btn small-btn primary-btn';
+      }
+    }
+
     $('plan-modal').hidden = false;
   } catch (err) {
     toast(`Error loading plan: ${err.message}`, true);
@@ -1095,10 +1153,18 @@ async function executePlan(planId) {
 
     closePlanModal();
 
+    let conversationId = res.conversationId || null;
+
     if (res.dispatched) {
       toast(`Agent conversation started for "${stripEmojis(res.title)}"`);
     } else if (sidecar?.agent?.startConversation && res.prompt) {
-      await sidecar.agent.startConversation(res.prompt);
+      const convRes = await sidecar.agent.startConversation(res.prompt);
+      conversationId = convRes?.conversationId || convRes?.response?.conversationId || conversationId;
+      if (conversationId) {
+        await callApi('/api/next-steps/mark-running', {
+          body: { repo: activeRepo.repoPath, planId, conversationId },
+        });
+      }
       toast(`Launched agent conversation for "${stripEmojis(res.title)}"`);
     } else if (navigator?.clipboard?.writeText && res.prompt) {
       await navigator.clipboard.writeText(res.prompt);
@@ -1106,8 +1172,28 @@ async function executePlan(planId) {
     } else {
       toast(`Ready to execute "${stripEmojis(res.title)}"`);
     }
+
+    await syncGit({ silent: true });
   } catch (err) {
     toast(`Execution error: ${err.message}`, true);
+  }
+}
+
+async function cancelPlanExecution(planId) {
+  const activeRepo = getActiveRepo();
+  if (!activeRepo) return;
+
+  try {
+    toast('Stopping agent execution…');
+    const res = await callApi('/api/next-steps/cancel-execution', {
+      body: { repo: activeRepo.repoPath, planId },
+    });
+    if (res.ok) {
+      toast('Execution stopped.');
+    }
+    await syncGit({ silent: true });
+  } catch (err) {
+    toast(`Failed to stop execution: ${err.message}`, true);
   }
 }
 
@@ -1503,6 +1589,8 @@ async function init() {
         );
       } else if (action === 'execute-plan') {
         executePlan(btn.dataset.planId);
+      } else if (action === 'cancel-execution') {
+        cancelPlanExecution(btn.dataset.planId);
       }
     });
   }
@@ -1648,7 +1736,12 @@ async function init() {
     const hasRunningJob = Boolean(
       currentDashboard?.jobs?.some((j) => j.status === 'running' || j.status === 'queued')
     );
-    const delay = hasRunningJob ? 2500 : 8000;
+    const hasRunningExecution = Boolean(
+      currentDashboard?.activeRepos?.some((r) =>
+        Object.values(r.executions || {}).some((e) => e && (e.status === 'running' || e.status === 'queued'))
+      )
+    );
+    const delay = (hasRunningJob || hasRunningExecution) ? 2500 : 8000;
     pollTimeout = setTimeout(async () => {
       try {
         if (!document.hidden) {

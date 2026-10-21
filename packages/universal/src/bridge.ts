@@ -190,6 +190,12 @@ export async function executePlan(repo?: string, planId?: string): Promise<any> 
   return runCtlJson(["execute-plan", "--repo", targetRepo, "--plan-id", id]);
 }
 
+export async function cancelPlanExecution(repo?: string, planId?: string): Promise<any> {
+  const targetRepo = resolveRepo(repo);
+  const id = planId || "1";
+  return runCtlJson(["cancel-execution", "--repo", targetRepo, "--plan-id", id]);
+}
+
 export async function triggerStopHook(payload: {
   fullyIdle: boolean;
   terminationReason: string;

@@ -472,6 +472,81 @@ function inspectSingleRepo(topLevel) {
         // ignore
       }
     }
+
+    const execFile = join(nextStepsDir, 'execution_state.json');
+    let executions = {};
+    if (existsSync(execFile)) {
+      try {
+        const eData = JSON.parse(readFileSync(execFile, 'utf8'));
+        executions = eData.executions || eData || {};
+      } catch {
+        // ignore
+      }
+    }
+
+    // Reconcile executions: check running items against git commits or transcript
+    let execsModified = false;
+    const brainDir = join(homedir(), '.gemini', 'antigravity', 'brain');
+    const latestSha = recentCommits.length > 0 ? recentCommits[0].sha : '';
+
+    for (const [id, item] of Object.entries(executions)) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.status === 'running') {
+        const initSha = item.initialHeadSha;
+        if (latestSha && initSha && latestSha !== initSha) {
+          item.status = 'completed';
+          item.completedAt = new Date().toISOString();
+          item.summary = 'Plan execution completed (changes committed to repository).';
+          item.completedSha = latestSha.slice(0, 7);
+          execsModified = true;
+          continue;
+        }
+
+        const convId = item.conversationId;
+        if (convId) {
+          const transcriptPath = join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
+          if (existsSync(transcriptPath)) {
+            try {
+              const stat = statSync(transcriptPath);
+              const ageSec = (Date.now() - stat.mtimeMs) / 1000;
+              if (ageSec > 120) {
+                const content = readFileSync(transcriptPath, 'utf8').trim();
+                const lastLine = content.slice(content.lastIndexOf('\n') + 1);
+                if (lastLine.startsWith('{')) {
+                  const parsed = JSON.parse(lastLine);
+                  if (parsed.status === 'ERROR' || parsed.status === 'CANCELLED') {
+                    item.status = 'interrupted';
+                    item.completedAt = new Date().toISOString();
+                    item.summary = 'Agent execution was interrupted or cancelled. Click Continue Execution to resume.';
+                    execsModified = true;
+                  } else if (parsed.type === 'PLANNER_RESPONSE' && (!parsed.tool_calls || parsed.tool_calls.length === 0)) {
+                    item.status = 'completed';
+                    item.completedAt = new Date().toISOString();
+                    item.summary = 'Plan execution completed by agent.';
+                    execsModified = true;
+                  }
+                }
+              }
+            } catch {
+              // ignore
+            }
+          }
+        }
+      }
+    }
+    if (execsModified) {
+      try {
+        writeFileSync(execFile, JSON.stringify({ executions }, null, 2), 'utf8');
+      } catch {
+        // ignore
+      }
+    }
+
+    for (const p of proposals) {
+      if (p.id && executions[p.id]) {
+        p.execution = executions[p.id];
+      }
+    }
     let synthesizing = false;
     const synthStateFile = join(nextStepsDir, 'synthesis_state.json');
     if (existsSync(synthStateFile)) {
@@ -511,6 +586,7 @@ function inspectSingleRepo(topLevel) {
         reports,
         goal,
         proposals,
+        executions,
         synthesizing,
       };
     }
@@ -541,6 +617,7 @@ function inspectSingleRepo(topLevel) {
       reports,
       goal,
       proposals,
+      executions,
       synthesizing,
     };
   } catch (err) {
@@ -1011,6 +1088,35 @@ app.api('/api/next-steps/execute', (data) => {
     });
   }
   return runPythonCtl(['execute-plan', '--repo', repo, '--plan-id', planId]);
+});
+
+// POST /api/next-steps/cancel-execution { repo, planId }
+app.api('/api/next-steps/cancel-execution', (data) => {
+  const repo = String(data?.repo || '').trim();
+  const planId = String(data?.planId || '').trim();
+  if (!repo || !planId) {
+    return new Response(JSON.stringify({ error: 'Missing repo or planId' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  return runPythonCtl(['cancel-execution', '--repo', repo, '--plan-id', planId]);
+});
+
+// POST /api/next-steps/mark-running { repo, planId, conversationId }
+app.api('/api/next-steps/mark-running', (data) => {
+  const repo = String(data?.repo || '').trim();
+  const planId = String(data?.planId || '').trim();
+  const convId = String(data?.conversationId || '').trim();
+  if (!repo || !planId) {
+    return new Response(JSON.stringify({ error: 'Missing repo or planId' }), {
+      status: 400,
+      contentType: 'application/json',
+    });
+  }
+  const args = ['mark-execution-running', '--repo', repo, '--plan-id', planId];
+  if (convId) args.push('--conversation-id', convId);
+  return runPythonCtl(args);
 });
 
 app.run();

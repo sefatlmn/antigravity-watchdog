@@ -1766,6 +1766,7 @@ flowchart TD
         "shortSha": short_sha,
         "goal": goal_data,
         "proposals": proposals,
+        "executions": executions,
         "conversationsCount": len(convs),
         "intelligence": cache_data["intelligence"],
     }
@@ -2273,9 +2274,222 @@ Execute this plan step by step, adhering to the plan specifications, writing nec
     return None
 
 
+def get_execution_state_file(repo_root: Path) -> Path:
+    ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+    ns_dir.mkdir(parents=True, exist_ok=True)
+    return ns_dir / "execution_state.json"
+
+
+def load_execution_state(repo_root: Path) -> Dict[str, Any]:
+    f = get_execution_state_file(repo_root)
+    if not f.exists():
+        return {"executions": {}}
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            if "executions" not in data:
+                return {"executions": data}
+            return data
+        return {"executions": {}}
+    except Exception:
+        return {"executions": {}}
+
+
+def save_execution_state(repo_root: Path, state: Dict[str, Any]) -> None:
+    f = get_execution_state_file(repo_root)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp.replace(f)
+
+
+def find_conversation_for_plan(plan_id: str, plan_title: str) -> Optional[str]:
+    if not BRAIN_DIR.exists():
+        return None
+    try:
+        dirs = sorted([d for d in BRAIN_DIR.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
+        for d in dirs[:30]:
+            t_file = d / ".system_generated" / "logs" / "transcript.jsonl"
+            if not t_file.exists():
+                continue
+            try:
+                with open(t_file, "r", encoding="utf-8", errors="ignore") as fp:
+                    header = fp.readline()
+                    if "[NEXT-STEPS-SESSION]" in header and (plan_id in header or (plan_title and plan_title in header)):
+                        return d.name
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def mark_execution_running(
+    repo_root: Path,
+    plan_id: str,
+    conversation_id: Optional[str] = None,
+    title: str = "",
+) -> Dict[str, Any]:
+    clean_id = str(plan_id).strip()
+    state = load_execution_state(repo_root)
+    executions = state.setdefault("executions", {})
+
+    info, _ = get_youngest_commit(repo_root, limit=1)
+    head_sha = info["sha"] if info else ""
+
+    existing = executions.get(clean_id, {})
+    conv_id = conversation_id or existing.get("conversationId")
+    if not conv_id:
+        conv_id = find_conversation_for_plan(clean_id, title)
+
+    exec_record = {
+        "planId": clean_id,
+        "title": title or existing.get("title") or "Next Step Plan",
+        "status": "running",
+        "startedAt": now_iso(),
+        "completedAt": None,
+        "conversationId": conv_id,
+        "summary": "Executing implementation plan in agent…",
+        "initialHeadSha": head_sha,
+    }
+    executions[clean_id] = exec_record
+    save_execution_state(repo_root, state)
+
+    if conv_id:
+        with StateLock():
+            st = load_state()
+            active = st.setdefault("active_qa_conversations", [])
+            if conv_id not in active:
+                active.append(conv_id)
+            save_state(st)
+
+    return exec_record
+
+
+def cancel_execution(repo_root: Path, plan_id: str) -> Dict[str, Any]:
+    clean_id = str(plan_id).strip()
+    state = load_execution_state(repo_root)
+    executions = state.setdefault("executions", {})
+
+    matched = executions.get(clean_id)
+    if not matched:
+        for k, v in executions.items():
+            if k == clean_id or k.endswith(f"-{clean_id}") or k.startswith(f"prop-{clean_id}"):
+                matched = v
+                clean_id = k
+                break
+
+    if matched:
+        matched["status"] = "interrupted"
+        matched["completedAt"] = now_iso()
+        matched["summary"] = "Execution was stopped by user. Click Continue Execution to resume."
+        conv_id = matched.get("conversationId")
+        if conv_id:
+            remove_active_conversation(conv_id)
+        save_execution_state(repo_root, state)
+        return {"ok": True, "planId": clean_id, "status": "interrupted"}
+    return {"ok": False, "error": f"Execution for '{plan_id}' not found."}
+
+
+def reconcile_executions(repo_root: Path) -> Dict[str, Any]:
+    state = load_execution_state(repo_root)
+    executions = state.setdefault("executions", {})
+    modified = False
+
+    rc, head_out, _ = run_git(repo_root, ["rev-parse", "HEAD"])
+    current_head = head_out.strip() if rc == 0 else ""
+
+    for plan_id, item in executions.items():
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") != "running":
+            continue
+
+        conv_id = item.get("conversationId")
+        init_sha = item.get("initialHeadSha", "")
+
+        # 1. Check if git commits were created since execution started
+        if current_head and init_sha and current_head != init_sha:
+            item["status"] = "completed"
+            item["completedAt"] = now_iso()
+            item["summary"] = "Plan execution completed (changes committed to repository)."
+            item["completedSha"] = current_head[:7]
+            modified = True
+            if conv_id:
+                remove_active_conversation(conv_id)
+            continue
+
+        # 2. Check conversation activity if conversationId exists
+        if not conv_id:
+            conv_id = find_conversation_for_plan(plan_id, item.get("title", ""))
+            if conv_id:
+                item["conversationId"] = conv_id
+                modified = True
+
+        if conv_id:
+            if not is_conversation_active(conv_id, max_age_seconds=120):
+                t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+                if t_file.exists():
+                    try:
+                        last_line = ""
+                        with open(t_file, "r", encoding="utf-8", errors="ignore") as fp:
+                            for line in fp:
+                                line = line.strip()
+                                if line.startswith("{"):
+                                    last_line = line
+                        if last_line:
+                            parsed = json.loads(last_line)
+                            step_status = parsed.get("status")
+                            step_type = parsed.get("type")
+                            if step_status in ("ERROR", "CANCELLED", "CANCELED"):
+                                item["status"] = "interrupted"
+                                item["completedAt"] = now_iso()
+                                item["summary"] = "Agent execution was interrupted or cancelled before completion. Click Continue Execution to resume."
+                                modified = True
+                            elif step_type == "PLANNER_RESPONSE" and not parsed.get("tool_calls"):
+                                item["status"] = "completed"
+                                item["completedAt"] = now_iso()
+                                item["summary"] = "Plan execution completed by agent."
+                                modified = True
+                            else:
+                                item["status"] = "interrupted"
+                                item["completedAt"] = now_iso()
+                                item["summary"] = "Execution was interrupted before completion. Click Continue Execution to resume."
+                                modified = True
+                    except Exception:
+                        item["status"] = "interrupted"
+                        item["completedAt"] = now_iso()
+                        item["summary"] = "Execution was interrupted before completion. Click Continue Execution to resume."
+                        modified = True
+                else:
+                    item["status"] = "interrupted"
+                    item["completedAt"] = now_iso()
+                    item["summary"] = "Agent conversation transcript not found. Click Continue Execution to resume."
+                    modified = True
+                remove_active_conversation(conv_id)
+        else:
+            started = item.get("startedAt")
+            if started:
+                try:
+                    s_dt = datetime.datetime.fromisoformat(started)
+                    elapsed = (datetime.datetime.now(datetime.timezone.utc) - s_dt).total_seconds()
+                    if elapsed > 900:
+                        item["status"] = "interrupted"
+                        item["completedAt"] = now_iso()
+                        item["summary"] = "Execution timed out. Click Continue Execution to resume."
+                        modified = True
+                except Exception:
+                    pass
+
+    if modified:
+        save_execution_state(repo_root, state)
+
+    return {"ok": True, "executions": executions}
+
+
 def execute_plan_in_agent(repo_root: Path, plan_id: str) -> Dict[str, Any]:
     """
     Prepare prompt or launch detached agent conversation for an approved next step plan.
+    Tracks execution status and progress in execution_state.json.
     """
     repo_root = Path(repo_root).resolve()
     ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
@@ -2297,6 +2511,7 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str) -> Dict[str, Any]:
                 or str(idx + 1) == clean_id
             ):
                 matched = p
+                clean_id = p_id
                 break
         if not matched:
             return {"ok": False, "error": f"Proposal '{plan_id}' not found."}
@@ -2313,13 +2528,16 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str) -> Dict[str, Any]:
         conv_id = spawn_plan_agent(repo_root, title, plan_content)
         prompt_text = f"[NEXT-STEPS-SESSION]\nImplement the approved plan '{title}':\n\n{plan_content}"
 
+        exec_record = mark_execution_running(repo_root, clean_id, conv_id, title)
+
         return {
             "ok": True,
-            "planId": plan_id,
+            "planId": clean_id,
             "title": title,
             "dispatched": bool(conv_id),
             "conversationId": conv_id,
             "prompt": prompt_text,
+            "execution": exec_record,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
@@ -2361,6 +2579,14 @@ def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
+    reconcile_executions(repo_root)
+    exec_data = load_execution_state(repo_root)
+    executions = exec_data.get("executions", {})
+    for p in proposals:
+        p_id = p.get("id")
+        if p_id and p_id in executions:
+            p["execution"] = executions[p_id]
+
     goal_data = load_goal(repo_root)
     convs = get_project_conversations(repo_root)
 
@@ -2383,6 +2609,7 @@ def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
         "reports": reports,
         "goal": goal_data,
         "proposals": proposals,
+        "executions": executions,
         "conversationsCount": len(convs),
     }
 
@@ -3608,6 +3835,18 @@ def main() -> int:
     p_exec.add_argument("--repo", required=True)
     p_exec.add_argument("--plan-id", required=True)
 
+    p_cancel_exec = sub.add_parser("cancel-execution", help="Cancel / stop an ongoing next step plan execution", parents=[p_common])
+    p_cancel_exec.add_argument("--repo", required=True)
+    p_cancel_exec.add_argument("--plan-id", required=True)
+
+    p_mark_exec = sub.add_parser("mark-execution-running", help="Mark a next step plan execution as running", parents=[p_common])
+    p_mark_exec.add_argument("--repo", required=True)
+    p_mark_exec.add_argument("--plan-id", required=True)
+    p_mark_exec.add_argument("--conversation-id", default="")
+
+    p_rec_exec = sub.add_parser("reconcile-executions", help="Reconcile plan executions against active conversations and commits", parents=[p_common])
+    p_rec_exec.add_argument("--repo", required=True)
+
     p_continue = sub.add_parser("continue-job", help="Resume an interrupted audit job or complete if report exists", parents=[p_common])
     p_continue.add_argument("--job-id", default="")
     p_continue.add_argument("--repo", default="")
@@ -3864,6 +4103,25 @@ def main() -> int:
     if args.cmd == "execute-plan":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve()
         res = execute_plan_in_agent(root, args.plan_id)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "cancel-execution":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        res = cancel_execution(root, args.plan_id)
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "mark-execution-running":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        conv_id = getattr(args, "conversation_id", "") or None
+        res = mark_execution_running(root, args.plan_id, conv_id)
+        print(json.dumps({"ok": True, "execution": res}, indent=2))
+        return 0
+
+    if args.cmd == "reconcile-executions":
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        res = reconcile_executions(root)
         print(json.dumps(res, indent=2))
         return 0
 

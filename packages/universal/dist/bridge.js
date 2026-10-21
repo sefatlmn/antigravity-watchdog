@@ -179,6 +179,11 @@ export async function executePlan(repo, planId) {
     const id = planId || "1";
     return runCtlJson(["execute-plan", "--repo", targetRepo, "--plan-id", id]);
 }
+export async function cancelPlanExecution(repo, planId) {
+    const targetRepo = resolveRepo(repo);
+    const id = planId || "1";
+    return runCtlJson(["cancel-execution", "--repo", targetRepo, "--plan-id", id]);
+}
 export async function triggerStopHook(payload) {
     const py = getPythonBin();
     const jsonStr = JSON.stringify(payload);

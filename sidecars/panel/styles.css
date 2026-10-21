@@ -1803,6 +1803,12 @@ body {
   line-height: var(--leading-normal);
 }
 
+.proposal-meta-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 #modal-category-badge {
   transform: none !important;
   cursor: default !important;
@@ -1903,7 +1909,9 @@ body {
   border-color: var(--border-strong-translucent);
 }
 
-.proposal-actions .primary-btn {
+.proposal-actions .primary-btn,
+.proposal-actions .secondary,
+.proposal-actions .accent-btn {
   flex: 1;
   height: var(--card-action-height, 26px);
   min-height: var(--card-action-height, 26px);
@@ -1916,6 +1924,15 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.proposal-actions .applied-badge {
+  flex: 1;
+  justify-content: center;
+}
+
+.proposal-actions .btn-cancel-mini {
+  flex: 0 0 auto;
 }
 
 /* Modal Dialog */
