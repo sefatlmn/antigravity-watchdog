@@ -4,12 +4,12 @@ The **Watchdog** plugin monitors completed coding tasks, dispatches independent 
 
 ## Guidelines for Coding Conversations
 - **Never manually trigger recursive reviews or plans**:
-  - Commits containing `[auto-review]`, `[qa-watchdog]`, or `[skip-qa]` in the commit message are ignored by the Watchdog hook.
-  - Conversations containing `[NEXT-STEPS-SESSION]`, `[NEXT-STEPS-SYNTHESIZER-SESSION]`, or `[QA-WATCHDOG-SESSION]` do not trigger recursive cycles.
+  - Commits containing `[auto-review]`, `[watchdog]`, `[skip-watchdog]`, `[skip-qa]`, or `[qa-watchdog]` in the commit message are ignored by the Watchdog hook.
+  - Conversations containing `[NEXT-STEPS-SESSION]`, `[NEXT-STEPS-SYNTHESIZER-SESSION]`, `[WATCHDOG-SESSION]`, or `[QA-WATCHDOG-SESSION]` do not trigger recursive cycles.
 - **Audit Reports & Fix Branches**:
   - Completed audit reports are saved to `.antigravity/audits/review-<short_sha>.md` (and `.json`).
-  - When Watchdog fixes reproducible bugs, it commits them to an isolated branch named `fix/qa-<short_sha>` without modifying your active working tree or current branch.
-  - If the user asks to inspect or apply the latest Watchdog findings, check `.antigravity/audits/` and `git branch --list 'fix/qa-*'`.
+  - When Watchdog fixes reproducible bugs, it commits them to an isolated branch named `fix/watchdog-<short_sha>` (or `fix/qa-<short_sha>`) without modifying your active working tree or current branch.
+  - If the user asks to inspect or apply the latest Watchdog findings, check `.antigravity/audits/` and `git branch --list 'fix/watchdog-*' 'fix/qa-*'`.
 - **Next Steps Implementation Plans**:
   - Implementation plans are saved to `.antigravity/next_steps/plan-<id>-<slug>.md` and referenced in `.antigravity/next_steps/proposals.json`.
   - When executing an approved next step, follow the generated plan file and verify all criteria.

@@ -373,9 +373,9 @@ function renderDashboard(data) {
   const commitSubjectEl = $('commit-subject');
   const commitTimeEl = $('commit-time');
   const commitTagBadge = $('commit-tag-badge');
-  const runBtn = $('btn-run-qa');
-  const runBtnText = $('btn-run-qa-text');
-  const runBtnIcon = $('btn-run-qa-icon');
+  const runBtn = $('btn-run-audit') || $('btn-run-qa');
+  const runBtnText = $('btn-run-audit-text') || $('btn-run-qa-text');
+  const runBtnIcon = $('btn-run-audit-icon') || $('btn-run-qa-icon');
 
   if (activeRepo) {
     if (repoNameEl) repoNameEl.textContent = activeRepo.repoName;
@@ -554,7 +554,7 @@ function renderDashboard(data) {
     const isQueued = status === 'queued';
     const isInterrupted = status === 'interrupted';
     const isFixedOnBranch = (job.verdict || '').toUpperCase() === 'FIXED_ON_BRANCH';
-    const fixBranch = job.fix_branch || (isFixedOnBranch ? `fix/qa-${job.short_sha}` : null);
+    const fixBranch = job.fix_branch || (isFixedOnBranch ? `fix/watchdog-${job.short_sha}` : null);
     const hasFixToApply = Boolean((job.fixes_committed || isFixedOnBranch) && fixBranch && !job.fixes_applied);
     const isApplied = Boolean(job.fixes_applied);
     const isPassed = (job.verdict || '').toUpperCase() === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued && !isInterrupted;
@@ -1272,7 +1272,7 @@ async function syncGit({ silent = false } = {}) {
 }
 
 async function runAudit() {
-  const runBtn = $('btn-run-qa');
+  const runBtn = $('btn-run-audit') || $('btn-run-qa');
   if (runBtn && runBtn.dataset.action === 'continue-audit') {
     const jobId = runBtn.dataset.jobId;
     const repo = runBtn.dataset.repo;
@@ -1482,8 +1482,8 @@ async function init() {
   // Header actions
   const btnSync = $('btn-sync');
   if (btnSync) btnSync.addEventListener('click', () => syncGit({ silent: false }));
-  const btnRunQa = $('btn-run-qa');
-  if (btnRunQa) btnRunQa.addEventListener('click', runAudit);
+  const btnRunAudit = $('btn-run-audit') || $('btn-run-qa');
+  if (btnRunAudit) btnRunAudit.addEventListener('click', runAudit);
 
   // Goal actions
   const btnEditGoal = $('btn-edit-goal');

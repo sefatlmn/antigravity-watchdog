@@ -34,7 +34,7 @@ git clone git@github.com:sefatlmn/antigravity-watchdog.git ~/.gemini/config/plug
 
 To enable:
 1. Open Antigravity Settings -> Plugins.
-2. Ensure `qa-watchdog` is enabled.
+2. Ensure Watchdog is enabled.
 3. The companion panel opens from the side pane or runs as a sidecar dashboard.
 
 The repository root is a native Antigravity plugin containing lifecycle hooks (`hooks.json`), agent rules (`rules/AGENTS.md`), agent skills (`skills/`), and the webview panel (`sidecars/panel/`).
@@ -202,9 +202,10 @@ You can execute Watchdog directly from the command line or scripts:
 
 Include any of these tags in your commit message to skip background Watchdog execution:
 
+- `[skip-watchdog]`
 - `[skip-qa]`
 - `[auto-review]`
-- `[qa-watchdog]`
+- `[watchdog]`
 
 ---
 

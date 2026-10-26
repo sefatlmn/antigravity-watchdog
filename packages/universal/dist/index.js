@@ -2,7 +2,7 @@ import { Plugin } from "@opencode/plugin";
 import { Schema } from "effect";
 import { getStatus, prepareWorktree, queueAudit, continueAudit, sendAuditComment, applyFix, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, triggerStopHook, syncRepo, } from "./bridge.js";
 export default Plugin.define({
-    id: "qa-watchdog",
+    id: "watchdog",
     async setup(ctx) {
         const abortController = new AbortController();
         // 1. Register slash commands (CLI/chat-only interface)
@@ -126,7 +126,7 @@ export default Plugin.define({
                                 const res = await applyFix(dir, sha);
                                 await ctx.session.synthetic({
                                     sessionID,
-                                    text: `Applied fixes from \`fix/qa-${sha.slice(0, 7)}\` to the working branch.\n${res.message || "Successfully applied fix."}`,
+                                    text: `Applied fixes for commit \`${sha.slice(0, 7)}\` to the working branch.\n${res.message || "Successfully applied fix."}`,
                                 });
                             }
                             catch (err) {
@@ -155,7 +155,7 @@ export default Plugin.define({
                                 output += `- **Summary**: ${latestJob.summary}\n`;
                             }
                             if (latestJob.fixSha || latestJob.fixBranch) {
-                                output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/qa-${shortSha}`}\` (Run \`/watchdog apply-fix ${shortSha}\`)\n`;
+                                output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/watchdog-${shortSha}`}\` (Run \`/watchdog apply-fix ${shortSha}\`)\n`;
                             }
                         }
                         else {
@@ -292,9 +292,6 @@ export default Plugin.define({
             await ctx.tool.transform((editor) => {
                 const registerTool = (name, description, input, execute) => {
                     editor.add({ name, description, input, execute });
-                    if (!name.startsWith("qa_")) {
-                        editor.add({ name: `qa_${name}`, description, input, execute });
-                    }
                 };
                 registerTool("watchdog_status", "Inspect Watchdog status, active audits, worktrees, and proposals", Schema.Struct({ repo: Schema.optional(Schema.String) }), async (input) => {
                     const targetRepo = input.repo || ctx.location.directory;
@@ -317,7 +314,7 @@ export default Plugin.define({
                         content: `Prepared isolated worktree and queued audit for commit ${input.sha}`,
                     };
                 });
-                registerTool("watchdog_apply_fix", "Apply confirmed bug fixes from an isolated fix/qa-<sha> branch onto the active branch", Schema.Struct({
+                registerTool("watchdog_apply_fix", "Apply confirmed bug fixes from an isolated fix branch onto the active branch", Schema.Struct({
                     repo: Schema.String,
                     sha: Schema.String,
                 }), async (input) => {

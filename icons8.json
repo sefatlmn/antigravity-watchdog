@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "icons": {
+    "pack": "m_outlined",
+    "sizes": [16, 24, 64],
+    "color": "currentColor",
+    "items": {
+      "shield": {
+        "id": "87367",
+        "commonName": "shield",
+        "category": "Gaming,Military",
+        "platform": "m_outlined"
+      }
+    }
+  },
+  "tokens": {
+    "iconColor": "currentColor",
+    "accent": "#38bdf8"
+  }
+}

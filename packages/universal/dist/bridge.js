@@ -231,7 +231,7 @@ export function formatStatusReport(status, syncInfo) {
             output += `- **Summary**: ${latestJob.summary}\n`;
         }
         if (latestJob.fixSha || latestJob.fixBranch) {
-            output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/qa-${shortSha}`}\`\n`;
+            output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/watchdog-${shortSha}`}\`\n`;
         }
     }
     else {

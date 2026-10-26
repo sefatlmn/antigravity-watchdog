@@ -13,7 +13,7 @@ Usage:
 Commands:
   status                   Show repository status, latest audit verdict, and fix branches
   audit [notes...]         Queue audit in isolated worktree for HEAD or --sha
-  apply-fix [sha]          Apply confirmed fixes from fix/qa-<sha> to active branch
+  apply-fix [sha]          Apply confirmed fixes from fix branch to active branch
   continue [sha]           Resume an interrupted audit or check completed audit report
   comment <notes...>       Send guidance note to an in-progress audit
   next-steps               Synthesize and display 4 project-grounded implementation plans
@@ -135,8 +135,8 @@ To execute a proposal, call \`watchdog_execute_plan\` with the plan ID.
         const snippet = `
 ## Watchdog Rules
 - Audits run asynchronously in isolated Git worktrees without touching active working branches.
-- Tag commits with [skip-qa] when intermediate or reviewing code.
-- Reproducible fixes are committed to fix/qa-<sha>. Apply fixes via \`watchdog apply-fix\`.
+- Tag commits with [skip-watchdog] or [skip-qa] when intermediate or reviewing code.
+- Reproducible fixes are committed to fix branches. Apply fixes via \`watchdog apply-fix\`.
 - View milestone-aligned next steps via \`watchdog next-steps\`.
 `;
         if (!existsSync(agentsPath)) {

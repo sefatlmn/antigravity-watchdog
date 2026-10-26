@@ -1,8 +1,8 @@
 {
-  "name": "qa-watchdog",
+  "name": "watchdog",
   "displayName": "Watchdog",
-  "version": "1.0.0",
-  "description": "Autonomous post-commit code and visual watchdog. Automatically audits new commits in an isolated Git worktree using Playwright MCP, proposes architecture/performance/scalability improvements, and prepares isolated fix/qa-<sha> branches.",
+  "version": "1.1.0",
+  "description": "Autonomous post-commit code and visual watchdog. Automatically audits new commits in an isolated Git worktree using Playwright MCP, proposes architecture/performance/scalability improvements, and prepares isolated fix branches.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
     "Run a full Watchdog code and visual review on the latest commit",

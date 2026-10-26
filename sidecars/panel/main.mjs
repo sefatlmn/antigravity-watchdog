@@ -142,7 +142,7 @@ function reconcileJobs(state) {
           j.bugs_count = typeof rData.bugs_count === 'number' ? rData.bugs_count : (j.bugs_count || 0);
           const hasFixes = Boolean(rData.fixes_committed || j.verdict === 'FIXED_ON_BRANCH');
           j.fixes_committed = hasFixes;
-          j.fix_branch = rData.fix_branch || (hasFixes ? `fix/qa-${shortSha}` : null);
+          j.fix_branch = rData.fix_branch || (hasFixes ? `fix/watchdog-${shortSha}` : null);
           j.completed_at = rData.completed_at || j.completed_at || new Date().toISOString();
           j.report_path = existsSync(mdReport) ? mdReport : jsonReport;
           modified = true;
@@ -166,11 +166,11 @@ function reconcileJobs(state) {
               if (sMatch && sMatch[1]) {
                 summary = sMatch[1].trim();
               } else {
-                summary = 'QA review completed.';
+                summary = 'Audit completed.';
               }
             }
-            const fixBranch = `fix/qa-${shortSha}`;
-            const hasFixes = verdict === 'FIXED_ON_BRANCH' || content.includes(fixBranch);
+            const fixBranch = content.includes(`fix/qa-${shortSha}`) ? `fix/qa-${shortSha}` : `fix/watchdog-${shortSha}`;
+            const hasFixes = verdict === 'FIXED_ON_BRANCH' || content.includes(fixBranch) || content.includes(`fix/qa-${shortSha}`);
 
             j.status = 'completed';
             j.verdict = verdict;
@@ -266,6 +266,7 @@ function getRepoRecentCommits(repoPath, limit = 12) {
   const fmt = '%H\x1f%h\x1f%ct\x1f%cr\x1f%an\x1f%T\x1f%s';
   const raw = runGit(repoPath, [
     'log',
+    '--exclude=fix/watchdog-*',
     '--exclude=fix/qa-*',
     '--branches',
     '--tags',
@@ -424,7 +425,7 @@ function inspectSingleRepo(topLevel) {
 
     const recentCommits = getRepoRecentCommits(topLevel, 12);
     const branch = runGit(topLevel, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'HEAD';
-    const fixBranchesRaw = runGit(topLevel, ['branch', '--list', 'fix/qa-*', '--format=%(refname:short)']);
+    const fixBranchesRaw = runGit(topLevel, ['branch', '--list', 'fix/watchdog-*', 'fix/qa-*', '--format=%(refname:short)']);
     const fixBranches = fixBranchesRaw ? fixBranchesRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [];
 
     const auditsDir = join(topLevel, '.antigravity', 'audits');

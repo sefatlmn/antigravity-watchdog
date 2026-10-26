@@ -252,7 +252,7 @@ export function formatStatusReport(status: any, syncInfo?: any): string {
       output += `- **Summary**: ${latestJob.summary}\n`;
     }
     if (latestJob.fixSha || latestJob.fixBranch) {
-      output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/qa-${shortSha}`}\`\n`;
+      output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/watchdog-${shortSha}`}\`\n`;
     }
   } else {
     output += `\nNo recent audits recorded.\n`;

@@ -44,7 +44,7 @@ Zero-friction assurance and intelligent momentum. Unlike static linters, detache
 
 - **Core Plugin Codebase:** `plugin.json`, `hooks.json`, `scripts/qa_ctl.py`, `scripts/qa_stop_hook.py`.
 - **Sidecar Web Panel:** `sidecars/panel/main.mjs`, `index.html`, `app.js`, `styles.css`.
-- **Skills & Rules:** `skills/qa-watchdog/SKILL.md`, `skills/next-steps/SKILL.md`, `rules/AGENTS.md`.
+- **Skills & Rules:** `skills/watchdog/SKILL.md`, `skills/next-steps/SKILL.md`, `rules/AGENTS.md`.
 - **Active Repositories & Audits:** Validated in live environments including `elegant-bose` and `halftone` with verified Playwright test suites and audit records in `.antigravity/audits/`.
 
 ## Product Principles

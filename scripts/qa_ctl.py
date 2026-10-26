@@ -36,10 +36,10 @@ PROJECTS_DIR = HOME / ".gemini" / "config" / "projects"
 NEXT_STEPS_DIR_NAME = "next_steps"
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-SKILL_PATH = PLUGIN_DIR / "skills" / "qa-watchdog" / "SKILL.md"
+SKILL_PATH = PLUGIN_DIR / "skills" / "watchdog" / "SKILL.md"
 AGENTAPI_DEFAULT = HOME / ".gemini" / "antigravity" / "bin" / "agentapi"
 
-SKIP_TAGS = ("[auto-review]", "[qa-watchdog]", "[skip-qa]")
+SKIP_TAGS = ("[auto-review]", "[skip-watchdog]", "[watchdog]", "[skip-qa]", "[qa-watchdog]")
 EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 SKIP_SCAN_DIRS = {
     ".git",
@@ -209,6 +209,7 @@ def get_youngest_commit(
         repo_root,
         [
             "log",
+            "--exclude=fix/watchdog-*",
             "--exclude=fix/qa-*",
             "--branches",
             "--tags",
@@ -484,6 +485,7 @@ def get_conversation_user_requests(
                         if (
                             req_text
                             and not req_text.startswith("Comments on artifact URI:")
+                            and not req_text.startswith("[WATCHDOG")
                             and not req_text.startswith("[QA-WATCHDOG")
                             and not req_text.startswith("[NEXT-STEPS")
                             and not req_text.startswith("[Notice]")
@@ -1181,7 +1183,7 @@ def refresh_project_goal(repo_root: Path) -> Dict[str, Any]:
 
     # 4. Inspect latest commits for active direction
     _, recent_commits = get_youngest_commit(repo_root, limit=10)
-    skip_tags = ["[skip-qa]", "[qa-watchdog]", "[auto-review]"]
+    skip_tags = ["[skip-watchdog]", "[watchdog]", "[skip-qa]", "[qa-watchdog]", "[auto-review]"]
     recent_subjects = []
     for c in (recent_commits or []):
         subj = c.get("subject", "").strip()
@@ -2548,7 +2550,7 @@ def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
     if not youngest:
         return None
     rc_b, branch, _ = run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
-    rc_fb, fb_out, _ = run_git(repo_root, ["branch", "--list", "fix/qa-*", "--format=%(refname:short)"])
+    rc_fb, fb_out, _ = run_git(repo_root, ["branch", "--list", "fix/watchdog-*", "fix/qa-*", "--format=%(refname:short)"])
     fix_branches = [b.strip() for b in fb_out.splitlines() if b.strip()] if rc_fb == 0 and fb_out else []
 
     audits_dir = repo_root / ".antigravity" / "audits"
@@ -2835,7 +2837,7 @@ def prepare_worktree(repo_root: Path, sha: str) -> Tuple[Path, str, Path]:
     short_sha = info["short_sha"]
     slug = repo_slug(repo_root)
     worktree_path = WORKTREES_DIR / f"{slug}-{short_sha}"
-    fix_branch = f"fix/qa-{short_sha}"
+    fix_branch = f"fix/watchdog-{short_sha}"
 
     audits_dir = repo_root / ".antigravity" / "audits"
     audits_dir.mkdir(parents=True, exist_ok=True)
@@ -2907,7 +2909,7 @@ def build_qa_prompt(job: Dict[str, Any]) -> str:
 """
 
     ctl_script_path = str(Path(__file__).resolve())
-    return f"""[QA-WATCHDOG-SESSION]
+    return f"""[WATCHDOG-SESSION]
 You are the **Autonomous Code & Visual Watchdog** reviewing a newly committed change.
 
 First, read your operating skill instructions using `view_file`:
@@ -3166,7 +3168,7 @@ def complete_job(
     job_id = f"{slug}-{short_sha}"
 
     worktree_path = WORKTREES_DIR / f"{slug}-{short_sha}"
-    fix_branch = f"fix/qa-{short_sha}"
+    fix_branch = f"fix/watchdog-{short_sha}"
     audits_dir = repo_root / ".antigravity" / "audits"
     audits_dir.mkdir(parents=True, exist_ok=True)
     report_md = audits_dir / f"review-{short_sha}.md"
@@ -3265,7 +3267,7 @@ def find_qa_conversation_for_job(job: Dict[str, Any]) -> Optional[str]:
             try:
                 with open(t_file, "r", encoding="utf-8", errors="ignore") as fp:
                     header = fp.readline()
-                    if "[QA-WATCHDOG-SESSION]" in header and short_sha in header:
+                    if ("[WATCHDOG-SESSION]" in header or "[QA-WATCHDOG-SESSION]" in header) and short_sha in header:
                         return d.name
             except Exception:
                 pass
@@ -3308,11 +3310,11 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
             r_data = json.loads(report_json.read_text(encoding="utf-8"))
             j["status"] = "completed"
             j["verdict"] = r_data.get("verdict") or "PASS"
-            j["summary"] = r_data.get("summary") or j.get("summary") or "QA review completed."
+            j["summary"] = r_data.get("summary") or j.get("summary") or "Audit completed."
             j["bugs_count"] = r_data.get("bugs_count", 0)
             has_fixes = bool(r_data.get("fixes_committed", False)) or j["verdict"] == "FIXED_ON_BRANCH"
             j["fixes_committed"] = has_fixes
-            j["fix_branch"] = r_data.get("fix_branch") or (f"fix/qa-{short_sha}" if has_fixes else None)
+            j["fix_branch"] = r_data.get("fix_branch") or (f"fix/watchdog-{short_sha}" if has_fixes else None)
             j["completed_at"] = r_data.get("completed_at") or now_iso()
             j["report_path"] = str(report_md) if report_md.exists() else str(report_json)
             conv_id = j.get("conversation_id")
@@ -3332,12 +3334,18 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
                 if v_match and v_match.group(1):
                     verdict = v_match.group(1).upper()
 
-                summary = j.get("summary") or "QA review completed."
+                summary = j.get("summary") or "Audit completed."
                 s_match = re.search(r"##\s*1\.\s*Executive Summary\s*\n+([^\n#]+)", content, re.IGNORECASE)
                 if s_match and s_match.group(1).strip():
                     summary = s_match.group(1).strip()
 
-                fix_branch = f"fix/qa-{short_sha}"
+                fix_branch = f"fix/watchdog-{short_sha}"
+                rc_chk, _, _ = run_git(repo_root, ["rev-parse", "--verify", f"refs/heads/{fix_branch}"])
+                if rc_chk != 0:
+                    legacy_branch = f"fix/qa-{short_sha}"
+                    rc_lb, _, _ = run_git(repo_root, ["rev-parse", "--verify", f"refs/heads/{legacy_branch}"])
+                    if rc_lb == 0:
+                        fix_branch = legacy_branch
                 rc, ahead_out, _ = run_git(repo_root, ["rev-list", "--count", f"{full_sha}..{fix_branch}"])
                 has_commits = rc == 0 and ahead_out.isdigit() and int(ahead_out) > 0
                 if has_commits and verdict == "PASS":
@@ -3470,7 +3478,7 @@ def send_comment_to_job(job: Dict[str, Any], comment: str) -> Dict[str, Any]:
         env = get_cached_ls_env()
         agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
         if Path(agentapi_bin).exists():
-            msg = f"""[QA-WATCHDOG-USER-COMMENT]
+            msg = f"""[WATCHDOG-USER-COMMENT]
 The user added a comment/instruction for your in-progress audit of commit `{short_sha}`:
 "{clean_comment}"
 
@@ -3572,7 +3580,7 @@ def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = 
         ctl_script_path = str(Path(__file__).resolve())
         r_path = target_job.get("report_path") or f"{target_job['repo_path']}/.antigravity/audits/review-{target_job['short_sha']}.md"
 
-        continue_msg = f"""[QA-WATCHDOG-CONTINUE]
+        continue_msg = f"""[WATCHDOG-CONTINUE]
 Please continue and complete the autonomous Watchdog audit for commit `{target_job['short_sha']}` in worktree `{target_job['worktree_path']}`.
 
 When your checks and visual verification testing are finished:
@@ -3621,7 +3629,13 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
     info = get_commit_info(repo_root, sha)
     short_sha = info["short_sha"] if info else sha[:7]
     full_sha = info["sha"] if info else sha
-    fix_branch = f"fix/qa-{short_sha}"
+    fix_branch = f"fix/watchdog-{short_sha}"
+    rc_chk, _, _ = run_git(repo_root, ["rev-parse", "--verify", f"refs/heads/{fix_branch}"])
+    if rc_chk != 0:
+        legacy_branch = f"fix/qa-{short_sha}"
+        rc_lb, _, _ = run_git(repo_root, ["rev-parse", "--verify", f"refs/heads/{legacy_branch}"])
+        if rc_lb == 0:
+            fix_branch = legacy_branch
 
     # 1. Check if the active working tree has uncommitted modifications
     rc_st, st_out, _ = run_git(repo_root, ["status", "--porcelain"])
@@ -3790,7 +3804,7 @@ def main() -> int:
     p_comp.add_argument("--bugs-count", type=int, default=0)
     p_comp.add_argument("--fixes-committed", default="false")
 
-    p_apply = sub.add_parser("apply-fix", help="Cherry-pick or merge a fix/qa-<sha> branch into current branch", parents=[p_common])
+    p_apply = sub.add_parser("apply-fix", help="Cherry-pick or merge a fix branch into current branch", parents=[p_common])
     p_apply.add_argument("--repo", required=True)
     p_apply.add_argument("--sha", required=True)
     p_apply.add_argument("--mode", choices=["cherry-pick", "merge"], default="cherry-pick")

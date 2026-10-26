@@ -5,10 +5,10 @@ Antigravity Stop Lifecycle Hook for Watchdog (qa_stop_hook.py)
 Fires when an agent conversation execution loop terminates.
 Checks:
 1. `fullyIdle == true`, `terminationReason == "model_stop"`, no `error`.
-2. Conversation is NOT itself a `[QA-WATCHDOG-SESSION]` (prevents infinite recursion).
+2. Conversation is NOT itself a `[WATCHDOG-SESSION]` or `[QA-WATCHDOG-SESSION]` (prevents infinite recursion).
 3. Inspects `workspacePaths` for Git repositories (including nested project repos,
    ignoring empty-tree workspace wrapper repos) and resolves the youngest commit.
-4. Prepares an isolated Git worktree (`fix/qa-<short_sha>`) and dispatches an
+4. Prepares an isolated Git worktree (`fix/watchdog-<short_sha>`) and dispatches an
    independent background Watchdog review without blocking the coding chat.
 """
 
@@ -36,7 +36,7 @@ def is_qa_watchdog_conversation(payload: Dict[str, Any], state: Dict[str, Any]) 
             try:
                 with open(tp, "r", encoding="utf-8", errors="ignore") as fp:
                     head = fp.read(16384)
-                if "[QA-WATCHDOG-SESSION]" in head or "[NEXT-STEPS-SESSION]" in head or "[NEXT-STEPS-SYNTHESIZER-SESSION]" in head:
+                if "[WATCHDOG-SESSION]" in head or "[QA-WATCHDOG-SESSION]" in head or "[NEXT-STEPS-SESSION]" in head or "[NEXT-STEPS-SYNTHESIZER-SESSION]" in head:
                     return True
             except Exception:
                 pass

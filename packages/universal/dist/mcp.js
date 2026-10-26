@@ -37,7 +37,7 @@ const PRIMARY_TOOLS = [
     },
     {
         name: "watchdog_apply_fix",
-        description: "Apply verified fixes from an isolated fix/qa-<sha> branch onto the active branch.",
+        description: "Apply verified fixes from an isolated fix branch onto the active branch.",
         inputSchema: {
             type: "object",
             properties: {
@@ -47,7 +47,7 @@ const PRIMARY_TOOLS = [
                 },
                 sha: {
                     type: "string",
-                    description: "Target commit SHA whose fix branch (fix/qa-<sha>) should be merged.",
+                    description: "Target commit SHA whose fix branch should be merged.",
                 },
             },
         },
@@ -165,12 +165,7 @@ const PRIMARY_TOOLS = [
         },
     },
 ];
-// Add backwards-compatible qa_watchdog_* tool aliases
-const ALIAS_TOOLS = PRIMARY_TOOLS.map((t) => ({
-    ...t,
-    name: `qa_${t.name}`,
-}));
-const ALL_TOOLS = [...PRIMARY_TOOLS, ...ALIAS_TOOLS];
+const ALL_TOOLS = PRIMARY_TOOLS;
 const PROMPTS = [
     {
         name: "watchdog_audit",
@@ -220,7 +215,7 @@ async function handleToolCall(rawName, args = {}) {
                 }
                 return {
                     text: `Queued Watchdog audit for commit \`${shortSha}\` in an isolated Git worktree.\n` +
-                        `Reviewers will test code correctness, run Playwright browser passes, and commit reproducible fixes to \`fix/qa-${shortSha}\`.`,
+                        `Auditors will test code correctness, run Playwright browser passes, and commit reproducible fixes to \`fix/watchdog-${shortSha}\`.`,
                 };
             }
             case "watchdog_apply_fix": {
@@ -394,7 +389,7 @@ export function startMcpServer() {
                         const notes = params?.arguments?.notes;
                         const text = "You are acting as or interacting with Watchdog. Follow these rules:\n" +
                             "1. Autonomous audits run in isolated Git worktrees, never modifying the user's active tree.\n" +
-                            "2. Confirmed bugs and fixes are committed to fix/qa-<sha>.\n" +
+                            "2. Confirmed bugs and fixes are committed to isolated fix branches.\n" +
                             "3. Apply fixes via tool watchdog_apply_fix.\n" +
                             "4. To prevent double audits, check watchdog_status before queuing.\n" +
                             (notes ? `Auditor focus notes: ${notes}\n` : "");

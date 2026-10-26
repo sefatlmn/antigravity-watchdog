@@ -16,7 +16,7 @@ import {
 } from "./bridge.js";
 
 export default Plugin.define({
-  id: "qa-watchdog",
+  id: "watchdog",
 
   async setup(ctx) {
     const abortController = new AbortController();
@@ -142,7 +142,7 @@ export default Plugin.define({
                 const res = await applyFix(dir, sha);
                 await ctx.session.synthetic({
                   sessionID,
-                  text: `Applied fixes from \`fix/qa-${sha.slice(0, 7)}\` to the working branch.\n${res.message || "Successfully applied fix."}`,
+                  text: `Applied fixes for commit \`${sha.slice(0, 7)}\` to the working branch.\n${res.message || "Successfully applied fix."}`,
                 });
               } catch (err: any) {
                 await ctx.session.synthetic({
@@ -173,7 +173,7 @@ export default Plugin.define({
                 output += `- **Summary**: ${latestJob.summary}\n`;
               }
               if (latestJob.fixSha || latestJob.fixBranch) {
-                output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/qa-${shortSha}`}\` (Run \`/watchdog apply-fix ${shortSha}\`)\n`;
+                output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/watchdog-${shortSha}`}\` (Run \`/watchdog apply-fix ${shortSha}\`)\n`;
               }
             } else {
               output += `\nNo recent audits recorded.\n`;
@@ -319,9 +319,6 @@ export default Plugin.define({
       await ctx.tool.transform((editor) => {
         const registerTool = (name: string, description: string, input: any, execute: (i: any) => Promise<any>) => {
           editor.add({ name, description, input, execute });
-          if (!name.startsWith("qa_")) {
-            editor.add({ name: `qa_${name}`, description, input, execute });
-          }
         };
 
         registerTool(
@@ -359,7 +356,7 @@ export default Plugin.define({
 
         registerTool(
           "watchdog_apply_fix",
-          "Apply confirmed bug fixes from an isolated fix/qa-<sha> branch onto the active branch",
+          "Apply confirmed bug fixes from an isolated fix branch onto the active branch",
           Schema.Struct({
             repo: Schema.String,
             sha: Schema.String,
