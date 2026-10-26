@@ -865,9 +865,13 @@ app.api('/api/mark-running', (data) => {
   }
   const patch = { jobs: state.jobs };
   if (convId) {
-    const active = Array.isArray(state.active_qa_conversations) ? state.active_qa_conversations : [];
-    if (!active.includes(convId)) {
-      patch.active_qa_conversations = [...active, convId];
+    const activeWatchdog = Array.isArray(state.active_watchdog_conversations) ? state.active_watchdog_conversations : [];
+    const activeQa = Array.isArray(state.active_qa_conversations) ? state.active_qa_conversations : [];
+    if (!activeWatchdog.includes(convId)) {
+      patch.active_watchdog_conversations = [...activeWatchdog, convId];
+    }
+    if (!activeQa.includes(convId)) {
+      patch.active_qa_conversations = [...activeQa, convId];
     }
   }
   saveStatePatch(patch);

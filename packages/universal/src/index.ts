@@ -35,35 +35,42 @@ export default Plugin.define({
             const sub = (args[0] || "").toLowerCase();
 
             if (sub === "audit") {
-              const comment = args.slice(1).join(" ");
-              const status = await getStatus(dir);
-              const runningJob = (status.jobs || []).find((j: any) => j.status === "running" || j.status === "queued");
+              try {
+                const comment = args.slice(1).join(" ");
+                const status = await getStatus(dir);
+                const runningJob = (status.jobs || []).find((j: any) => j.status === "running" || j.status === "queued");
 
-              if (runningJob) {
-                const targetSha = runningJob.shortSha || runningJob.sha?.slice(0, 7) || "current";
-                if (comment) {
-                  await sendAuditComment(dir, comment, runningJob.id);
-                  await ctx.session.synthetic({
-                    sessionID,
-                    text: `An audit for commit \`${targetSha}\` is already in progress. Your comment was forwarded to the active auditor:\n> "${comment}"`,
-                  });
-                } else {
-                  await ctx.session.synthetic({
-                    sessionID,
-                    text: `An audit for commit \`${targetSha}\` is already in progress. Double auditing prevented.\nTo send guidance to the auditor, run \`/watchdog comment <notes>\`.`,
-                  });
+                if (runningJob) {
+                  const targetSha = runningJob.shortSha || runningJob.sha?.slice(0, 7) || "current";
+                  if (comment) {
+                    await sendAuditComment(dir, comment, runningJob.id);
+                    await ctx.session.synthetic({
+                      sessionID,
+                      text: `An audit for commit \`${targetSha}\` is already in progress. Your comment was forwarded to the active auditor:\n> "${comment}"`,
+                    });
+                  } else {
+                    await ctx.session.synthetic({
+                      sessionID,
+                      text: `An audit for commit \`${targetSha}\` is already in progress. Double auditing prevented.\nTo send guidance to the auditor, run \`/watchdog comment <notes>\`.`,
+                    });
+                  }
+                  return;
                 }
-                return;
-              }
 
-              const sync = await syncRepo(dir);
-              const sha = sync.bestRepo?.headSha || "HEAD";
-              await prepareWorktree(dir, sha);
-              await queueAudit(dir, sha, comment || undefined);
-              await ctx.session.synthetic({
-                sessionID,
-                text: `Queued Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
-              });
+                const sync = await syncRepo(dir);
+                const sha = sync.bestRepo?.headSha || "HEAD";
+                await prepareWorktree(dir, sha);
+                await queueAudit(dir, sha, comment || undefined);
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: `Queued Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
+                });
+              } catch (err: any) {
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: `Failed to queue Watchdog audit: ${err.message}`,
+                });
+              }
               return;
             }
 

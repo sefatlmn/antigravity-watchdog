@@ -26,7 +26,8 @@ import qa_ctl  # noqa: E402
 
 def is_qa_watchdog_conversation(payload: Dict[str, Any], state: Dict[str, Any]) -> bool:
     conv_id = payload.get("conversationId", "")
-    if conv_id and conv_id in state.get("active_qa_conversations", []):
+    active_convs = state.get("active_watchdog_conversations", []) or state.get("active_qa_conversations", [])
+    if conv_id and conv_id in active_convs:
         return True
 
     transcript_path = payload.get("transcriptPath", "")

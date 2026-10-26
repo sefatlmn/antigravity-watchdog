@@ -71,6 +71,7 @@ def default_state() -> Dict[str, Any]:
         "skip_docs_only": True,
         "repos": {},
         "jobs": [],
+        "active_watchdog_conversations": [],
         "active_qa_conversations": [],
     }
 
@@ -2411,14 +2412,16 @@ def reconcile_executions(repo_root: Path) -> Dict[str, Any]:
 
         # 1. Check if git commits were created since execution started
         if current_head and init_sha and current_head != init_sha:
-            item["status"] = "completed"
-            item["completedAt"] = now_iso()
-            item["summary"] = "Plan execution completed (changes committed to repository)."
-            item["completedSha"] = current_head[:7]
-            modified = True
-            if conv_id:
-                remove_active_conversation(conv_id)
-            continue
+            rc_anc, _, _ = run_git(repo_root, ["merge-base", "--is-ancestor", init_sha, current_head])
+            if rc_anc == 0:
+                item["status"] = "completed"
+                item["completedAt"] = now_iso()
+                item["summary"] = "Plan execution completed (changes committed to repository)."
+                item["completedSha"] = current_head[:7]
+                modified = True
+                if conv_id:
+                    remove_active_conversation(conv_id)
+                continue
 
         # 2. Check conversation activity if conversationId exists
         if not conv_id:
@@ -3240,13 +3243,32 @@ def complete_job(
     return result_payload
 
 
+def track_active_conversation(conv_id: str) -> None:
+    if not conv_id:
+        return
+    with StateLock():
+        st = load_state()
+        modified = False
+        for k in ("active_watchdog_conversations", "active_qa_conversations"):
+            active = st.setdefault(k, [])
+            if conv_id not in active:
+                active.append(conv_id)
+                modified = True
+        if modified:
+            save_state(st)
+
+
 def remove_active_conversation(conv_id: str) -> None:
     if not conv_id:
         return
     with StateLock():
         st = load_state()
-        if "active_qa_conversations" in st and conv_id in st["active_qa_conversations"]:
-            st["active_qa_conversations"] = [c for c in st["active_qa_conversations"] if c != conv_id]
+        modified = False
+        for k in ("active_watchdog_conversations", "active_qa_conversations"):
+            if k in st and conv_id in st[k]:
+                st[k] = [c for c in st[k] if c != conv_id]
+                modified = True
+        if modified:
             save_state(st)
 
 
