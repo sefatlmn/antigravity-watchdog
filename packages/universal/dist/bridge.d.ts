@@ -1,6 +1,6 @@
 export declare const PLUGIN_ROOT: string;
-export declare const QA_CTL_SCRIPT: string;
-export declare const QA_STOP_HOOK_SCRIPT: string;
+export declare const WATCHDOG_CTL_SCRIPT: string;
+export declare const WATCHDOG_STOP_HOOK_SCRIPT: string;
 export declare function getPythonBin(): string;
 export declare function resolveRepo(repo?: string): string;
 export declare function runCtlJson<T = any>(args: string[]): Promise<T>;

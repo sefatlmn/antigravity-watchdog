@@ -207,8 +207,7 @@ const PROMPTS = [
         ],
     },
 ];
-async function handleToolCall(rawName, args = {}) {
-    const name = rawName.replace(/^qa_/, "");
+async function handleToolCall(name, args = {}) {
     try {
         switch (name) {
             case "watchdog_status": {
@@ -304,7 +303,7 @@ async function handleToolCall(rawName, args = {}) {
                 };
             }
             default:
-                return { text: `Unknown tool: ${rawName}`, isError: true };
+                return { text: `Unknown tool: ${name}`, isError: true };
         }
     }
     catch (err) {
@@ -408,7 +407,7 @@ export function startMcpServer() {
                 }
                 case "prompts/get": {
                     const promptName = params?.name;
-                    if (promptName === "watchdog_audit" || promptName === "qa_audit") {
+                    if (promptName === "watchdog_audit") {
                         const notes = params?.arguments?.notes;
                         const text = "You are acting as or interacting with Watchdog. Follow these rules:\n" +
                             "1. Autonomous audits run in isolated Git worktrees, never modifying the user's active tree.\n" +
@@ -430,7 +429,7 @@ export function startMcpServer() {
                             },
                         });
                     }
-                    else if (promptName === "watchdog_next_steps" || promptName === "qa_next_steps") {
+                    else if (promptName === "watchdog_next_steps") {
                         const focus = params?.arguments?.focus;
                         const text = "Synthesize or inspect the 4 next-step implementation proposals adhering to the official /plan standard.\n" +
                             "Review the proposal list via watchdog_next_steps and execute an approved plan via watchdog_execute_plan.\n" +

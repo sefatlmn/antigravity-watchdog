@@ -373,9 +373,9 @@ function renderDashboard(data) {
   const commitSubjectEl = $('commit-subject');
   const commitTimeEl = $('commit-time');
   const commitTagBadge = $('commit-tag-badge');
-  const runBtn = $('btn-run-audit') || $('btn-run-qa');
-  const runBtnText = $('btn-run-audit-text') || $('btn-run-qa-text');
-  const runBtnIcon = $('btn-run-audit-icon') || $('btn-run-qa-icon');
+  const runBtn = $('btn-run-audit');
+  const runBtnText = $('btn-run-audit-text');
+  const runBtnIcon = $('btn-run-audit-icon');
 
   if (activeRepo) {
     if (repoNameEl) repoNameEl.textContent = activeRepo.repoName;
@@ -399,7 +399,7 @@ function renderDashboard(data) {
         return repoMatches && shaMatches;
       });
 
-      const SKIP_TAGS = ['[auto-review]', '[qa-watchdog]', '[skip-qa]'];
+      const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
       const hasSkipTag = latest.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag));
       const isAppliedFix = hasSkipTag || (data.jobs || []).some((j) => {
         const jRepo = (j.repo_path || '').trim();
@@ -1272,7 +1272,7 @@ async function syncGit({ silent = false } = {}) {
 }
 
 async function runAudit() {
-  const runBtn = $('btn-run-audit') || $('btn-run-qa');
+  const runBtn = $('btn-run-audit');
   if (runBtn && runBtn.dataset.action === 'continue-audit') {
     const jobId = runBtn.dataset.jobId;
     const repo = runBtn.dataset.repo;
@@ -1306,7 +1306,7 @@ async function runAudit() {
   }
 
   const latest = activeRepo.youngestCommit || activeRepo.head;
-  const SKIP_TAGS = ['[auto-review]', '[qa-watchdog]', '[skip-qa]'];
+  const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
   const subject = latest?.subject || '';
   if (latest?.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag))) {
     toast('The latest commit is an applied fix and cannot be re-audited. Make a new commit first.', true);
@@ -1485,7 +1485,7 @@ async function init() {
   // Header actions
   const btnSync = $('btn-sync');
   if (btnSync) btnSync.addEventListener('click', () => syncGit({ silent: false }));
-  const btnRunAudit = $('btn-run-audit') || $('btn-run-qa');
+  const btnRunAudit = $('btn-run-audit');
   if (btnRunAudit) btnRunAudit.addEventListener('click', runAudit);
 
   // Goal actions

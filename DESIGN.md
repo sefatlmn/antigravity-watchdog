@@ -142,7 +142,7 @@ A calibrated dark and light adaptive palette balancing deep obsidian tones with 
 
 ### Secondary
 - **Telemetry Cyan** (`#38bdf8`): Monospace commit SHAs, active process telemetry, and conversation tags.
-- **Radar Emerald** (`#10b981`): Verified QA test passes, applied fixes, and active watchdog status beacons.
+- **Radar Emerald** (`#10b981`): Verified test passes, applied fixes, and active watchdog status beacons.
 
 ### Tertiary
 - **Signal Amber** (`#f59e0b`): Warning states and documentation-only commit notices.

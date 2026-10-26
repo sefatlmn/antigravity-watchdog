@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(HERE, '..', '..');
-const QA_CTL_SCRIPT = join(PLUGIN_ROOT, 'scripts', 'qa_ctl.py');
-const WATCHDOG_DIR = join(homedir(), '.gemini', 'antigravity', 'qa_watchdog');
+const WATCHDOG_CTL_SCRIPT = join(PLUGIN_ROOT, 'scripts', 'watchdog_ctl.py');
+const WATCHDOG_DIR = join(homedir(), '.gemini', 'antigravity', 'watchdog');
 const STATE_FILE = join(WATCHDOG_DIR, 'state.json');
 const PANEL_SERVER_FILE = join(WATCHDOG_DIR, 'panel_server.json');
 
@@ -207,7 +207,7 @@ const SKIP_SCAN_DIRS = new Set([
   '.output',
   '.svelte-kit',
 ]);
-const SKIP_TAGS = ['[auto-review]', '[qa-watchdog]', '[skip-qa]'];
+const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
 
 const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
 
@@ -291,7 +291,7 @@ function runPythonCtl(args) {
   let lastErr = null;
   for (const bin of candidates) {
     try {
-      const out = execFileSync(bin, [QA_CTL_SCRIPT, ...args], {
+      const out = execFileSync(bin, [WATCHDOG_CTL_SCRIPT, ...args], {
         encoding: 'utf8',
         timeout: 25000,
       });
@@ -405,8 +405,8 @@ function reconcileJobs(state) {
                 summary = 'Audit completed.';
               }
             }
-            const fixBranch = content.includes(`fix/qa-${shortSha}`) ? `fix/qa-${shortSha}` : `fix/watchdog-${shortSha}`;
-            const hasFixes = verdict === 'FIXED_ON_BRANCH' || content.includes(fixBranch) || content.includes(`fix/qa-${shortSha}`);
+            const fixBranch = `fix/watchdog-${shortSha}`;
+            const hasFixes = verdict === 'FIXED_ON_BRANCH' || content.includes(fixBranch);
 
             j.status = 'completed';
             j.verdict = verdict;
@@ -503,7 +503,6 @@ function getRepoRecentCommits(repoPath, limit = 12) {
   const raw = runGit(repoPath, [
     'log',
     '--exclude=fix/watchdog-*',
-    '--exclude=fix/qa-*',
     '--branches',
     '--tags',
     'HEAD',
@@ -575,7 +574,7 @@ function discoverCandidateGitRoots(uriOrPath) {
   const directRoot = runGit(fsPath, ['rev-parse', '--show-toplevel']);
   if (directRoot) {
     const resolved = resolve(directRoot);
-    if (!resolved.includes('qa_watchdog/worktrees') && !resolved.includes('.antigravity/worktrees')) {
+    if (!resolved.includes('watchdog/worktrees') && !resolved.includes('.antigravity/worktrees')) {
       candidates.push(resolved);
       seen.add(resolved);
     }
@@ -591,7 +590,7 @@ function discoverCandidateGitRoots(uriOrPath) {
         const childPath = join(dirPath, entry.name);
         if (existsSync(join(childPath, '.git'))) {
           const resolved = resolve(childPath);
-          if (!seen.has(resolved) && !resolved.includes('qa_watchdog/worktrees')) {
+          if (!seen.has(resolved) && !resolved.includes('watchdog/worktrees')) {
             seen.add(resolved);
             candidates.push(resolved);
           }
@@ -661,7 +660,7 @@ function inspectSingleRepo(topLevel) {
 
     const recentCommits = getRepoRecentCommits(topLevel, 12);
     const branch = runGit(topLevel, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'HEAD';
-    const fixBranchesRaw = runGit(topLevel, ['branch', '--list', 'fix/watchdog-*', 'fix/qa-*', '--format=%(refname:short)']);
+    const fixBranchesRaw = runGit(topLevel, ['branch', '--list', 'fix/watchdog-*', '--format=%(refname:short)']);
     const fixBranches = fixBranchesRaw ? fixBranchesRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [];
 
     const auditsDir = join(topLevel, '.antigravity', 'audits');
@@ -1102,12 +1101,8 @@ app.api('/api/mark-running', (data) => {
   const patch = { jobs: state.jobs };
   if (convId) {
     const activeWatchdog = Array.isArray(state.active_watchdog_conversations) ? state.active_watchdog_conversations : [];
-    const activeQa = Array.isArray(state.active_qa_conversations) ? state.active_qa_conversations : [];
     if (!activeWatchdog.includes(convId)) {
       patch.active_watchdog_conversations = [...activeWatchdog, convId];
-    }
-    if (!activeQa.includes(convId)) {
-      patch.active_qa_conversations = [...activeQa, convId];
     }
   }
   saveStatePatch(patch);

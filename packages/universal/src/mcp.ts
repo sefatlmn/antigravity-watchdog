@@ -244,8 +244,7 @@ const PROMPTS = [
   },
 ];
 
-async function handleToolCall(rawName: string, args: Record<string, any> = {}): Promise<{ text: string; isError?: boolean }> {
-  const name = rawName.replace(/^qa_/, "");
+async function handleToolCall(name: string, args: Record<string, any> = {}): Promise<{ text: string; isError?: boolean }> {
   try {
     switch (name) {
       case "watchdog_status": {
@@ -350,7 +349,7 @@ async function handleToolCall(rawName: string, args: Record<string, any> = {}): 
       }
 
       default:
-        return { text: `Unknown tool: ${rawName}`, isError: true };
+        return { text: `Unknown tool: ${name}`, isError: true };
     }
   } catch (err: any) {
     return { text: `Watchdog error: ${err.message}`, isError: true };
@@ -463,7 +462,7 @@ export function startMcpServer(): void {
 
         case "prompts/get": {
           const promptName = params?.name;
-          if (promptName === "watchdog_audit" || promptName === "qa_audit") {
+          if (promptName === "watchdog_audit") {
             const notes = params?.arguments?.notes;
             const text =
               "You are acting as or interacting with Watchdog. Follow these rules:\n" +
@@ -485,7 +484,7 @@ export function startMcpServer(): void {
                 ],
               },
             });
-          } else if (promptName === "watchdog_next_steps" || promptName === "qa_next_steps") {
+          } else if (promptName === "watchdog_next_steps") {
             const focus = params?.arguments?.focus;
             const text =
               "Synthesize or inspect the 4 next-step implementation proposals adhering to the official /plan standard.\n" +

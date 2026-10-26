@@ -46,7 +46,7 @@ When triggered:
 1. The Watchdog backend gathers the last 15 commits, recent user chat directives, active specifications (`PRODUCT.md`, `HANDOFF.md`, `README.md`), and AST structure.
 2. An autonomous background synthesizer agent is dispatched with an explicit **Anti-Repetition Mandate**: all recent commits and chat directives are flagged as `ALREADY COMPLETED WORK (DO NOT RE-PROPOSE)`.
 3. The agent crafts 4 pragmatic, high-value, forward-looking improvements (slightly feature-preferred) and writes `.antigravity/next_steps/proposals.json` and 4 `/plan` markdown files.
-4. When finished, the agent signals completion via `qa_ctl.py complete-synthesis --repo <repo>`.
+4. When finished, the agent signals completion via `watchdog_ctl.py complete-synthesis --repo <repo>`.
 5. The Watchdog aux pane polls the state and smoothly renders the updated proposals.
 
 ## Plan Formulation Standard

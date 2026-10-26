@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/qa_stop_hook.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/watchdog_stop_hook.py\"",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/qa_stop_hook.py\"",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/watchdog_stop_hook.py\"",
             "timeout": 15
           }
         ]

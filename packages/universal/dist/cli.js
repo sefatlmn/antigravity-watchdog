@@ -141,7 +141,7 @@ To execute a proposal, call \`watchdog_execute_plan\` with the plan ID.
         const snippet = `
 ## Watchdog Rules
 - Audits run asynchronously in isolated Git worktrees without touching active working branches.
-- Tag commits with [skip-watchdog] or [skip-qa] when intermediate or reviewing code.
+- Tag commits with [skip-watchdog] when intermediate or reviewing code.
 - Reproducible fixes are committed to fix branches. Apply fixes via \`watchdog apply-fix\`.
 - View milestone-aligned next steps via \`watchdog next-steps\`.
 `;

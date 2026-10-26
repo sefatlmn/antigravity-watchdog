@@ -24,7 +24,7 @@ pnpm-debug.log*
 
 # Antigravity & Watchdog Local Telemetry
 .antigravity/
-qa_watchdog/worktrees/
+watchdog/worktrees/
 *.log
 
 # Environment & Credentials

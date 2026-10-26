@@ -3,7 +3,7 @@
     "watchdog": {
       "command": "node",
       "args": [
-        "${workspaceFolder}/.gemini/config/plugins/qa-watchdog/packages/universal/dist/mcp.js"
+        "${workspaceFolder}/.gemini/config/plugins/watchdog/packages/universal/dist/mcp.js"
       ]
     }
   }

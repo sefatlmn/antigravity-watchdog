@@ -2,7 +2,7 @@
 
 Autonomous post-commit auditing, visual verification, and sequential next-step synthesis across agentic code editors.
 
-Watchdog operates non-intrusively in isolated Git worktrees. It verifies code correctness, executes headless Playwright passes, commits reproducible fixes to isolated `fix/qa-<sha>` branches, and synthesizes 4 project-grounded `/plan`-compliant implementation plans.
+Watchdog operates non-intrusively in isolated Git worktrees. It verifies code correctness, executes headless Playwright passes, commits reproducible fixes to isolated `fix/watchdog-<sha>` branches, and synthesizes 4 project-grounded `/plan`-compliant implementation plans.
 
 Supported environments:
 - **Google Antigravity**: Native plugin with visual companion panel, lifecycle hooks, and skills.
@@ -29,7 +29,7 @@ Supported environments:
 Clone the repository into your Antigravity plugins directory:
 
 ```bash
-git clone git@github.com:sefatlmn/antigravity-watchdog.git ~/.gemini/config/plugins/qa-watchdog
+git clone git@github.com:sefatlmn/antigravity-watchdog.git ~/.gemini/config/plugins/watchdog
 ```
 
 To enable:
@@ -56,7 +56,7 @@ npm run build
 Run the built-in setup wizard in your target repository:
 
 ```bash
-node /path/to/qa-watchdog/packages/universal/bin/watchdog.js setup [claude|cursor|opencode|codex|all]
+node ~/.gemini/config/plugins/watchdog/packages/universal/bin/watchdog.js setup [claude|cursor|opencode|codex|all]
 ```
 
 ---
@@ -70,7 +70,7 @@ The repository root is a native Claude Code plugin sharing the exact same codeba
 **Option A — Launch directly with `--plugin-dir`:**
 
 ```bash
-claude --plugin-dir /path/to/qa-watchdog
+claude --plugin-dir ~/.gemini/config/plugins/watchdog
 ```
 
 **Option B — Install via Claude Code Plugin Marketplace:**
@@ -78,7 +78,7 @@ claude --plugin-dir /path/to/qa-watchdog
 Inside Claude Code, run:
 
 ```text
-/plugin marketplace add /path/to/qa-watchdog
+/plugin marketplace add ~/.gemini/config/plugins/watchdog
 /plugin install watchdog@watchdog-local
 ```
 
@@ -94,7 +94,7 @@ Commands available in Claude Code:
 *(Optional Standalone MCP setup)*: If you prefer registering only the MCP server without the full plugin:
 
 ```bash
-claude mcp add watchdog node /path/to/qa-watchdog/packages/universal/dist/mcp.js
+claude mcp add watchdog node ~/.gemini/config/plugins/watchdog/packages/universal/dist/mcp.js
 ```
 
 #### 2. Cursor / Windsurf
@@ -107,7 +107,7 @@ Add the server to `.cursor/mcp.json` or your Windsurf MCP configuration:
     "watchdog": {
       "command": "node",
       "args": [
-        "/path/to/qa-watchdog/packages/universal/dist/mcp.js"
+        "/Users/sefa/.gemini/config/plugins/watchdog/packages/universal/dist/mcp.js"
       ]
     }
   }
@@ -121,12 +121,12 @@ Add the package path to `~/.config/opencode/opencode.json` (or project-level `op
 ```json
 {
   "plugins": [
-    "/path/to/qa-watchdog/packages/universal"
+    "/Users/sefa/.gemini/config/plugins/watchdog/packages/universal"
   ]
 }
 ```
 
-Existing configurations pointing to `/path/to/qa-watchdog/packages/opencode` continue to resolve through the backwards-compatible symlink.
+Existing configurations pointing to `/Users/sefa/.gemini/config/plugins/watchdog/packages/opencode` continue to resolve through the backwards-compatible symlink.
 
 #### 4. OpenAI Codex & Agent Rules
 
@@ -142,7 +142,7 @@ When connected via MCP, the following tools are available to agents:
 | :--- | :--- |
 | `watchdog_status` | Inspect repository status, recent audit verdicts, active jobs, and fix branches |
 | `watchdog_audit` | Queue an autonomous code & visual review in an isolated Git worktree |
-| `watchdog_apply_fix` | Apply verified fixes from an isolated `fix/qa-<sha>` branch onto the working branch |
+| `watchdog_apply_fix` | Apply verified fixes from an isolated `fix/watchdog-<sha>` branch onto the working branch |
 | `watchdog_next_steps` | Synthesize 4 project-grounded next-step implementation plans adhering to `/plan` |
 | `watchdog_execute_plan` | Retrieve the full specification prompt for an approved next-step implementation plan |
 | `watchdog_goal` | Inspect, set, or clear the repository milestone goal |
@@ -171,7 +171,7 @@ You can execute Watchdog directly from the command line or scripts:
 # Trigger an audit on HEAD in an isolated worktree
 ./packages/universal/bin/watchdog.js audit "Focus on state persistence and edge cases"
 
-# Apply confirmed fixes from fix/qa-<sha> to working branch
+# Apply confirmed fixes from fix/watchdog-<sha> to working branch
 ./packages/universal/bin/watchdog.js apply-fix <sha>
 
 # Synthesize and display 4 structured implementation proposals
@@ -194,8 +194,8 @@ You can execute Watchdog directly from the command line or scripts:
 
 ## How It Works
 
-- **Isolated Worktree**: Audits run in detached worktrees under `~/.gemini/antigravity/qa_watchdog/worktrees/`. The agent's working tree is never touched during reviews.
-- **Fix Branch**: Reproducible test or lint fixes are committed to `fix/qa-<short_sha>`. Apply them cleanly using `apply-fix` or the UI companion panel.
+- **Isolated Worktree**: Audits run in detached worktrees under `~/.gemini/antigravity/watchdog/worktrees/`. The agent's working tree is never touched during reviews.
+- **Fix Branch**: Reproducible test or lint fixes are committed to `fix/watchdog-<short_sha>`. Apply them cleanly using `apply-fix` or the UI companion panel.
 - **Next Steps**: Synthesizes 4 forward-looking implementation plans in `.antigravity/next_steps/` based on repo goals, commits, and handoffs, strictly following the `/plan` methodology.
 
 ---
@@ -205,7 +205,6 @@ You can execute Watchdog directly from the command line or scripts:
 Include any of these tags in your commit message to skip background Watchdog execution:
 
 - `[skip-watchdog]`
-- `[skip-qa]`
 - `[auto-review]`
 - `[watchdog]`
 

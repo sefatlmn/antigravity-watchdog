@@ -4,7 +4,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "python3 ./scripts/qa_stop_hook.py",
+        "command": "python3 ./scripts/watchdog_stop_hook.py",
         "timeout": 10
       }
     ]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Watchdog Controller (qa_ctl.py)
+Watchdog Controller (watchdog_ctl.py)
 
 Manages state, isolated Git worktrees, git history sync (automatic youngest-commit
 resolution across branches and nested repos), job queueing, background agent dispatch,
@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 HOME = Path.home()
 APP_DATA_DIR = Path(os.environ.get("ANTIGRAVITY_APP_DATA_DIR", str(HOME / ".gemini" / "antigravity")))
-WATCHDOG_DIR = APP_DATA_DIR / "qa_watchdog"
+WATCHDOG_DIR = APP_DATA_DIR / "watchdog"
 STATE_FILE = WATCHDOG_DIR / "state.json"
 LOCK_FILE = WATCHDOG_DIR / "state.lock"
 WORKTREES_DIR = WATCHDOG_DIR / "worktrees"
@@ -39,7 +39,7 @@ PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SKILL_PATH = PLUGIN_DIR / "skills" / "watchdog" / "SKILL.md"
 AGENTAPI_DEFAULT = HOME / ".gemini" / "antigravity" / "bin" / "agentapi"
 
-SKIP_TAGS = ("[auto-review]", "[skip-watchdog]", "[watchdog]", "[skip-qa]", "[qa-watchdog]")
+SKIP_TAGS = ("[auto-review]", "[skip-watchdog]", "[watchdog]")
 EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 SKIP_SCAN_DIRS = {
     ".git",
@@ -72,7 +72,6 @@ def default_state() -> Dict[str, Any]:
         "repos": {},
         "jobs": [],
         "active_watchdog_conversations": [],
-        "active_qa_conversations": [],
     }
 
 
@@ -202,7 +201,7 @@ def get_youngest_commit(
     repo_root: Path, limit: int = 12
 ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """
-    Scan git commit history across HEAD and all local branches/tags (excluding fix/qa-* branches)
+    Scan git commit history across HEAD and all local branches/tags (excluding fix/watchdog-* branches)
     and return (youngest_commit, recent_commits) sorted by (is_non_empty_tree, timestamp) DESC.
     """
     fmt = "%H%x1f%h%x1f%ct%x1f%cr%x1f%an%x1f%T%x1f%s"
@@ -211,7 +210,6 @@ def get_youngest_commit(
         [
             "log",
             "--exclude=fix/watchdog-*",
-            "--exclude=fix/qa-*",
             "--branches",
             "--tags",
             "HEAD",
@@ -291,7 +289,7 @@ def discover_git_roots(path_str: str) -> List[Path]:
         return []
     if p.is_file():
         p = p.parent
-    if "qa_watchdog/worktrees" in str(p) or ".antigravity/worktrees" in str(p):
+    if "watchdog/worktrees" in str(p) or ".antigravity/worktrees" in str(p):
         return []
 
     candidates: List[Path] = []
@@ -300,7 +298,7 @@ def discover_git_roots(path_str: str) -> List[Path]:
     rc, out, _ = run_git(p, ["rev-parse", "--show-toplevel"])
     if rc == 0 and out:
         root = Path(out).resolve()
-        if "qa_watchdog/worktrees" not in str(root) and ".antigravity/worktrees" not in str(root):
+        if "watchdog/worktrees" not in str(root) and ".antigravity/worktrees" not in str(root):
             candidates.append(root)
             seen.add(str(root))
 
@@ -313,7 +311,7 @@ def discover_git_roots(path_str: str) -> List[Path]:
                     continue
                 if (child / ".git").exists():
                     r = child.resolve()
-                    if str(r) not in seen and "qa_watchdog/worktrees" not in str(r):
+                    if str(r) not in seen and "watchdog/worktrees" not in str(r):
                         seen.add(str(r))
                         candidates.append(r)
                 else:
@@ -487,7 +485,6 @@ def get_conversation_user_requests(
                             req_text
                             and not req_text.startswith("Comments on artifact URI:")
                             and not req_text.startswith("[WATCHDOG")
-                            and not req_text.startswith("[QA-WATCHDOG")
                             and not req_text.startswith("[NEXT-STEPS")
                             and not req_text.startswith("[Notice]")
                             and req_text not in requests
@@ -697,7 +694,7 @@ def discover_project_handoff_and_specs(repo_root: Path) -> Dict[str, Any]:
                                     break
                     result["summary"] = " ".join(summary_lines[:2])
 
-                # Enrich generic document titles (e.g. # Product -> QA Watchdog Product Specification)
+                # Enrich generic document titles (e.g. # Product -> Watchdog Product Specification)
                 if result["title"].lower() in ("product", "handoff", "walkthrough", "roadmap", "specification", "spec", "todo"):
                     clean_repo_title = repo_root.name.replace("_", " ").replace("-", " ").title()
                     result["title"] = f"{clean_repo_title} {result['title']}"
@@ -930,7 +927,7 @@ def deep_analyze_codebase(repo_root: Path, head_sha: str = "HEAD") -> Dict[str, 
                 codebase["all_source_files"].append(rel_str)
 
                 # Classify into architectural layers
-                if fname in ("index.html", "main.mjs", "app.js", "main.py", "app.py", "server.js", "server.py", "cli.py", "index.ts", "main.ts", "main.tsx", "qa_ctl.py"):
+                if fname in ("index.html", "main.mjs", "app.js", "main.py", "app.py", "server.js", "server.py", "cli.py", "index.ts", "main.ts", "main.tsx", "watchdog_ctl.py"):
                     codebase["entry_points"].append(rel_str)
                 elif ext in (".tsx", ".jsx", ".vue", ".svelte", ".html", ".css", ".scss") or "sidecars/panel" in rel_str or "ui" in parts:
                     codebase["ui_files"].append(rel_str)
@@ -1184,7 +1181,7 @@ def refresh_project_goal(repo_root: Path) -> Dict[str, Any]:
 
     # 4. Inspect latest commits for active direction
     _, recent_commits = get_youngest_commit(repo_root, limit=10)
-    skip_tags = ["[skip-watchdog]", "[watchdog]", "[skip-qa]", "[qa-watchdog]", "[auto-review]"]
+    skip_tags = ["[skip-watchdog]", "[watchdog]", "[auto-review]"]
     recent_subjects = []
     for c in (recent_commits or []):
         subj = c.get("subject", "").strip()
@@ -1445,9 +1442,9 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
     elif codebase["has_tests"] and "Python" in codebase["languages"]:
         test_cmd = "pytest"
     elif "Python" in codebase["languages"] and ("JavaScript" in codebase["languages"] or "TypeScript" in codebase["languages"]):
-        test_cmd = "python3 -m py_compile scripts/qa_ctl.py && node -c sidecars/panel/main.mjs && node --check sidecars/panel/app.js"
+        test_cmd = "python3 -m py_compile scripts/watchdog_ctl.py && node -c sidecars/panel/main.mjs && node --check sidecars/panel/app.js"
     elif "Python" in codebase["languages"]:
-        main_py = codebase["entry_points"][0] if codebase["entry_points"] else "scripts/qa_ctl.py"
+        main_py = codebase["entry_points"][0] if codebase["entry_points"] else "scripts/watchdog_ctl.py"
         test_cmd = f"python3 -m py_compile {main_py}"
     elif "JavaScript" in codebase["languages"] or "TypeScript" in codebase["languages"]:
         test_cmd = manifest.get("test_command") or "node -c sidecars/panel/main.mjs"
@@ -1854,9 +1851,9 @@ def complete_synthesis(repo_root: Path) -> Dict[str, Any]:
     if conv_id:
         with StateLock():
             global_state = load_state()
-            if "active_qa_conversations" in global_state:
-                global_state["active_qa_conversations"] = [
-                    c for c in global_state["active_qa_conversations"] if c != conv_id
+            if "active_watchdog_conversations" in global_state:
+                global_state["active_watchdog_conversations"] = [
+                    c for c in global_state["active_watchdog_conversations"] if c != conv_id
                 ]
                 save_state(global_state)
 
@@ -1891,9 +1888,9 @@ def cancel_synthesis(repo_root: Path) -> Dict[str, Any]:
         # Remove from global active conversations
         with StateLock():
             global_state = load_state()
-            if "active_qa_conversations" in global_state:
-                global_state["active_qa_conversations"] = [
-                    c for c in global_state["active_qa_conversations"] if c != conv_id
+            if "active_watchdog_conversations" in global_state:
+                global_state["active_watchdog_conversations"] = [
+                    c for c in global_state["active_watchdog_conversations"] if c != conv_id
                 ]
                 save_state(global_state)
 
@@ -2085,7 +2082,7 @@ def dispatch_synthesis_agent(repo_root: Path) -> Dict[str, Any]:
         requests_lines.append(f"- User request: {r}")
     formatted_requests = "\n".join(requests_lines) if requests_lines else "None recorded."
 
-    test_cmd = manifest.get("test_command") or ("pytest" if "Python" in codebase["languages"] else ("npm test" if manifest.get("manifest_type") == "npm" else "python3 -m py_compile scripts/qa_ctl.py"))
+    test_cmd = manifest.get("test_command") or ("pytest" if "Python" in codebase["languages"] else ("npm test" if manifest.get("manifest_type") == "npm" else "python3 -m py_compile scripts/watchdog_ctl.py"))
     ctl_script_path = str(Path(__file__).resolve())
 
     prompt = f"""[NEXT-STEPS-SYNTHESIZER-SESSION]
@@ -2211,7 +2208,7 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
         state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
         with StateLock():
             st = load_state()
-            active = st.setdefault("active_qa_conversations", [])
+            active = st.setdefault("active_watchdog_conversations", [])
             if conv_id not in active:
                 active.append(conv_id)
                 save_state(st)
@@ -2423,7 +2420,7 @@ def mark_execution_running(
     if conv_id:
         with StateLock():
             st = load_state()
-            active = st.setdefault("active_qa_conversations", [])
+            active = st.setdefault("active_watchdog_conversations", [])
             if conv_id not in active:
                 active.append(conv_id)
             save_state(st)
@@ -2616,7 +2613,7 @@ def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
     if not youngest:
         return None
     rc_b, branch, _ = run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
-    rc_fb, fb_out, _ = run_git(repo_root, ["branch", "--list", "fix/watchdog-*", "fix/qa-*", "--format=%(refname:short)"])
+    rc_fb, fb_out, _ = run_git(repo_root, ["branch", "--list", "fix/watchdog-*", "--format=%(refname:short)"])
     fix_branches = [b.strip() for b in fb_out.splitlines() if b.strip()] if rc_fb == 0 and fb_out else []
 
     audits_dir = repo_root / ".antigravity" / "audits"
@@ -2880,14 +2877,14 @@ def ensure_git_exclude(repo_root: Path) -> None:
             with open(exclude_file, "a", encoding="utf-8") as fp:
                 if existing and not existing.endswith("\n"):
                     fp.write("\n")
-                fp.write("# Antigravity QA Watchdog local audit artifacts\n.antigravity/\n")
+                fp.write("# Antigravity Watchdog local audit artifacts\n.antigravity/\n")
     except Exception:
         pass
 
 
 def prepare_worktree(repo_root: Path, sha: str) -> Tuple[Path, str, Path]:
     """
-    Create or reset an isolated Git worktree for `sha` on branch `fix/qa-<short_sha>`.
+    Create or reset an isolated Git worktree for `sha` on branch `fix/watchdog-<short_sha>`.
     Returns (worktree_path, fix_branch, report_path).
     """
     ensure_dirs()
@@ -2956,7 +2953,7 @@ def prepare_worktree(repo_root: Path, sha: str) -> Tuple[Path, str, Path]:
     return worktree_path, fix_branch, report_path
 
 
-def build_qa_prompt(job: Dict[str, Any]) -> str:
+def build_watchdog_prompt(job: Dict[str, Any]) -> str:
     repo_path = job["repo_path"]
     sha = job["sha"]
     short_sha = job["short_sha"]
@@ -3025,7 +3022,7 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
     Launch a background review conversation via `agentapi new-conversation`
     (with automatic fallback to detached `claude -p` when running in Claude Code).
     """
-    prompt = build_qa_prompt(job)
+    prompt = build_watchdog_prompt(job)
     title = f"Watchdog: {job['repo_name']} @ {job['short_sha']}"
     log_file = LOGS_DIR / f"agent-{job['id']}.log"
     target_cwd = Path(job["worktree_path"]) if Path(job["worktree_path"]).exists() else Path(job["repo_path"])
@@ -3193,7 +3190,7 @@ def queue_commit(
             "completed_at": None,
             "status": "queued",
             "verdict": "PENDING",
-            "summary": "Queued for code & visual QA review.",
+            "summary": "Queued for code & visual Watchdog review.",
             "bugs_count": 0,
             "fixes_committed": False,
             "fix_branch": fix_branch,
@@ -3297,9 +3294,9 @@ def complete_job(
                 j["report_path"] = result_payload["report_path"]
                 matched = True
                 conv_id = j.get("conversation_id")
-                if conv_id and "active_qa_conversations" in state:
-                    state["active_qa_conversations"] = [
-                        c for c in state["active_qa_conversations"] if c != conv_id
+                if conv_id and "active_watchdog_conversations" in state:
+                    state["active_watchdog_conversations"] = [
+                        c for c in state["active_watchdog_conversations"] if c != conv_id
                     ]
                 break
         if not matched:
@@ -3322,13 +3319,9 @@ def track_active_conversation(conv_id: str) -> None:
         return
     with StateLock():
         st = load_state()
-        modified = False
-        for k in ("active_watchdog_conversations", "active_qa_conversations"):
-            active = st.setdefault(k, [])
-            if conv_id not in active:
-                active.append(conv_id)
-                modified = True
-        if modified:
+        active = st.setdefault("active_watchdog_conversations", [])
+        if conv_id not in active:
+            active.append(conv_id)
             save_state(st)
 
 
@@ -3337,16 +3330,14 @@ def remove_active_conversation(conv_id: str) -> None:
         return
     with StateLock():
         st = load_state()
-        modified = False
-        for k in ("active_watchdog_conversations", "active_qa_conversations"):
-            if k in st and conv_id in st[k]:
-                st[k] = [c for c in st[k] if c != conv_id]
-                modified = True
-        if modified:
+        if "active_watchdog_conversations" in st and conv_id in st["active_watchdog_conversations"]:
+            st["active_watchdog_conversations"] = [
+                c for c in st["active_watchdog_conversations"] if c != conv_id
+            ]
             save_state(st)
 
 
-def find_qa_conversation_for_job(job: Dict[str, Any]) -> Optional[str]:
+def find_watchdog_conversation_for_job(job: Dict[str, Any]) -> Optional[str]:
     """
     Search recent conversations in BRAIN_DIR for a Watchdog session for this job's commit.
     """
@@ -3363,7 +3354,7 @@ def find_qa_conversation_for_job(job: Dict[str, Any]) -> Optional[str]:
             try:
                 with open(t_file, "r", encoding="utf-8", errors="ignore") as fp:
                     header = fp.readline()
-                    if ("[WATCHDOG-SESSION]" in header or "[QA-WATCHDOG-SESSION]" in header) and short_sha in header:
+                    if "[WATCHDOG-SESSION]" in header and short_sha in header:
                         return d.name
             except Exception:
                 pass
@@ -3436,12 +3427,6 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
                     summary = s_match.group(1).strip()
 
                 fix_branch = f"fix/watchdog-{short_sha}"
-                rc_chk, _, _ = run_git(repo_root, ["rev-parse", "--verify", f"refs/heads/{fix_branch}"])
-                if rc_chk != 0:
-                    legacy_branch = f"fix/qa-{short_sha}"
-                    rc_lb, _, _ = run_git(repo_root, ["rev-parse", "--verify", f"refs/heads/{legacy_branch}"])
-                    if rc_lb == 0:
-                        fix_branch = legacy_branch
                 rc, ahead_out, _ = run_git(repo_root, ["rev-list", "--count", f"{full_sha}..{fix_branch}"])
                 has_commits = rc == 0 and ahead_out.isdigit() and int(ahead_out) > 0
                 if has_commits and verdict == "PASS":
@@ -3464,7 +3449,7 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
     # 3. No report exists. Check if conversation has stopped or been interrupted
     conv_id = j.get("conversation_id")
     if not conv_id:
-        found_id = find_qa_conversation_for_job(j)
+        found_id = find_watchdog_conversation_for_job(j)
         if found_id:
             j["conversation_id"] = found_id
             conv_id = found_id
@@ -3568,7 +3553,7 @@ def send_comment_to_job(job: Dict[str, Any], comment: str) -> Dict[str, Any]:
 
         save_state(st)
 
-    conv_id = target_j.get("conversation_id") or find_qa_conversation_for_job(target_j)
+    conv_id = target_j.get("conversation_id") or find_watchdog_conversation_for_job(target_j)
     notified = False
     if conv_id:
         env = get_cached_ls_env()
@@ -3666,7 +3651,7 @@ def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = 
                 "summary": target_job.get("summary"),
             }
 
-        conv_id = target_job.get("conversation_id") or find_qa_conversation_for_job(target_job)
+        conv_id = target_job.get("conversation_id") or find_watchdog_conversation_for_job(target_job)
         if conv_id:
             target_job["conversation_id"] = conv_id
 
@@ -3726,12 +3711,6 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
     short_sha = info["short_sha"] if info else sha[:7]
     full_sha = info["sha"] if info else sha
     fix_branch = f"fix/watchdog-{short_sha}"
-    rc_chk, _, _ = run_git(repo_root, ["rev-parse", "--verify", f"refs/heads/{fix_branch}"])
-    if rc_chk != 0:
-        legacy_branch = f"fix/qa-{short_sha}"
-        rc_lb, _, _ = run_git(repo_root, ["rev-parse", "--verify", f"refs/heads/{legacy_branch}"])
-        if rc_lb == 0:
-            fix_branch = legacy_branch
 
     # 1. Check if the active working tree has uncommitted modifications
     rc_st, st_out, _ = run_git(repo_root, ["status", "--porcelain"])
@@ -4086,7 +4065,7 @@ def main() -> int:
                 )
             )
             return 0
-        job["prompt"] = build_qa_prompt(job)
+        job["prompt"] = build_watchdog_prompt(job)
         print(json.dumps({"ok": True, "job": job}, indent=2))
         return 0
 

@@ -18,10 +18,10 @@ Your job is to perform a rigorous, two-part **Codebase + Live Visual/Functional 
 ## 1. Worktree & Branch Isolation Rule (CRITICAL)
 
 1. **Never modify files in the user's primary repository checkout (`REPO_PATH`)** except writing audit reports to `<REPO_PATH>/.antigravity/audits/`.
-2. Perform all code edits, test runs, builds, and bug fixes exclusively inside the isolated Git worktree (`WORKTREE_PATH`, located at `~/.gemini/antigravity/qa_watchdog/worktrees/<repo>-<short_sha>`) on branch `fix/qa-<short_sha>`.
+2. Perform all code edits, test runs, builds, and bug fixes exclusively inside the isolated Git worktree (`WORKTREE_PATH`, located at `~/.gemini/antigravity/watchdog/worktrees/<repo>-<short_sha>`) on branch `fix/watchdog-<short_sha>`.
 3. If the isolated worktree does not exist yet for the target commit `<SHA>`, create it using:
    ```bash
-   python3 ~/.gemini/config/plugins/qa-watchdog/scripts/qa_ctl.py prepare --repo "<REPO_PATH>" --sha "<SHA>"
+   python3 ~/.gemini/config/plugins/watchdog/scripts/watchdog_ctl.py prepare --repo "<REPO_PATH>" --sha "<SHA>"
    ```
 
 ---
@@ -72,10 +72,10 @@ When the repository contains a web frontend or full-stack application:
 
 ---
 
-## 4. Phase 3: Fix Confirmed Bugs on `fix/qa-<short_sha>`
+## 4. Phase 3: Fix Confirmed Bugs on `fix/watchdog-<short_sha>`
 
 - For every **confirmed, reproducible bug** (broken logic, runtime crash, type/build error, broken UI layout, unhandled exception):
-  1. Edit the files **inside `WORKTREE_PATH`** (on branch `fix/qa-<short_sha>`).
+  1. Edit the files **inside `WORKTREE_PATH`** (on branch `fix/watchdog-<short_sha>`).
   2. Re-run the relevant typecheck/tests and re-verify in Playwright MCP to prove the fix works.
   3. Commit the fix inside `WORKTREE_PATH` with the `[auto-review]` tag:
      ```bash
@@ -97,17 +97,17 @@ Write two files to `<REPO_PATH>/.antigravity/audits/`:
    - **Commit**: `<full_sha>` — *<commit_message>*
    - **Timestamp**: `<ISO-8601>`
    - **Verdict**: `PASS` | `FIXED_ON_BRANCH` | `NEEDS_ATTENTION`
-   - **Fix Branch**: `fix/qa-<short_sha>` (if fixes were committed)
+   - **Fix Branch**: `fix/watchdog-<short_sha>` (if fixes were committed)
 
    ## 1. Executive Summary
    Brief overview of what changed, checks executed (build/typecheck/tests/Playwright live browser), and overall quality.
 
-   ## 2. Bugs Found & Fixed (`fix/qa-<short_sha>`)
+   ## 2. Bugs Found & Fixed (`fix/watchdog-<short_sha>`)
    For each bug:
    - Severity (`BLOCKER` / `MAJOR` / `MINOR`)
    - File & line reference (`path/to/file:L10-L25`)
    - Root cause & reproduction steps
-   - Fix applied on `fix/qa-<short_sha>` and verification result
+   - Fix applied on `fix/watchdog-<short_sha>` and verification result
 
    ## 3. Visual & Functional Verification (Playwright Live Browser)
    - Routes & user flows exercised
@@ -122,9 +122,9 @@ Write two files to `<REPO_PATH>/.antigravity/audits/`:
    - **Scalability**: Data growth, caching, concurrency, observability
    ```
 
-2. **Finalize Job Status via `qa_ctl.py`**:
+2. **Finalize Job Status via `watchdog_ctl.py`**:
    ```bash
-   python3 ~/.gemini/config/plugins/qa-watchdog/scripts/qa_ctl.py complete \
+   python3 ~/.gemini/config/plugins/watchdog/scripts/watchdog_ctl.py complete \
      --repo "<REPO_PATH>" \
      --sha "<SHA>" \
      --verdict "<PASS|FIXED_ON_BRANCH|NEEDS_ATTENTION>" \
@@ -132,4 +132,4 @@ Write two files to `<REPO_PATH>/.antigravity/audits/`:
      --bugs-count <N> \
      --fixes-committed <true|false>
    ```
-   *(If no fixes were committed on `fix/qa-<short_sha>`, `qa_ctl.py complete` will automatically clean up the temporary worktree and unused branch so the repo stays spotless!)*
+   *(If no fixes were committed on `fix/watchdog-<short_sha>`, `watchdog_ctl.py complete` will automatically clean up the temporary worktree and unused branch so the repo stays spotless!)*

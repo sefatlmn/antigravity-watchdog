@@ -5,13 +5,13 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 function findPluginRoot(startDir) {
-    const envRoot = process.env.WATCHDOG_PLUGIN_ROOT || process.env.QA_WATCHDOG_PLUGIN_ROOT;
-    if (envRoot && existsSync(join(envRoot, "scripts", "qa_ctl.py"))) {
+    const envRoot = process.env.WATCHDOG_PLUGIN_ROOT;
+    if (envRoot && existsSync(join(envRoot, "scripts", "watchdog_ctl.py"))) {
         return envRoot;
     }
     let curr = startDir;
     for (let i = 0; i < 6; i++) {
-        if (existsSync(join(curr, "scripts", "qa_ctl.py"))) {
+        if (existsSync(join(curr, "scripts", "watchdog_ctl.py"))) {
             return curr;
         }
         const parent = dirname(curr);
@@ -23,8 +23,8 @@ function findPluginRoot(startDir) {
 }
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = findPluginRoot(HERE);
-export const QA_CTL_SCRIPT = join(PLUGIN_ROOT, "scripts", "qa_ctl.py");
-export const QA_STOP_HOOK_SCRIPT = join(PLUGIN_ROOT, "scripts", "qa_stop_hook.py");
+export const WATCHDOG_CTL_SCRIPT = join(PLUGIN_ROOT, "scripts", "watchdog_ctl.py");
+export const WATCHDOG_STOP_HOOK_SCRIPT = join(PLUGIN_ROOT, "scripts", "watchdog_stop_hook.py");
 let resolvedPythonBin = null;
 export function getPythonBin() {
     if (resolvedPythonBin)
@@ -57,7 +57,7 @@ export function resolveRepo(repo) {
 }
 export async function runCtlJson(args) {
     const py = getPythonBin();
-    const fullArgs = [QA_CTL_SCRIPT, ...args];
+    const fullArgs = [WATCHDOG_CTL_SCRIPT, ...args];
     if (!fullArgs.includes("--json")) {
         fullArgs.push("--json");
     }
@@ -196,7 +196,7 @@ export async function triggerStopHook(payload) {
     const py = getPythonBin();
     const jsonStr = JSON.stringify(payload);
     try {
-        const child = execFile(py, [QA_STOP_HOOK_SCRIPT], {
+        const child = execFile(py, [WATCHDOG_STOP_HOOK_SCRIPT], {
             cwd: PLUGIN_ROOT,
             timeout: 30000,
         });

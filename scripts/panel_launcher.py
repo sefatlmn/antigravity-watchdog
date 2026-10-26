@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 HOME = Path.home()
-WATCHDOG_DIR = HOME / ".gemini" / "antigravity" / "qa_watchdog"
+WATCHDOG_DIR = HOME / ".gemini" / "antigravity" / "watchdog"
 PANEL_SERVER_FILE = WATCHDOG_DIR / "panel_server.json"
 LOGS_DIR = WATCHDOG_DIR / "logs"
 
