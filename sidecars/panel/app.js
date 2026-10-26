@@ -1442,6 +1442,9 @@ async function sendReportToChat() {
     } else if (sidecar?.agent?.startConversation) {
       await sidecar.agent.startConversation(msg);
       toast('Started new conversation with report');
+    } else if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(msg);
+      toast('Copied report prompt to clipboard for Claude Code!');
     } else {
       toast('No active conversation bridge available.', true);
     }

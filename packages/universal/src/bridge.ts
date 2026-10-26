@@ -196,6 +196,15 @@ export async function cancelPlanExecution(repo?: string, planId?: string): Promi
   return runCtlJson(["cancel-execution", "--repo", targetRepo, "--plan-id", id]);
 }
 
+export async function openPanel(repo?: string, openWindow = true): Promise<any> {
+  const targetRepo = resolveRepo(repo);
+  const args = ["panel", "--repo", targetRepo];
+  if (openWindow) {
+    args.push("--open");
+  }
+  return runCtlJson(args);
+}
+
 export async function triggerStopHook(payload: {
   fullyIdle: boolean;
   terminationReason: string;

@@ -184,6 +184,14 @@ export async function cancelPlanExecution(repo, planId) {
     const id = planId || "1";
     return runCtlJson(["cancel-execution", "--repo", targetRepo, "--plan-id", id]);
 }
+export async function openPanel(repo, openWindow = true) {
+    const targetRepo = resolveRepo(repo);
+    const args = ["panel", "--repo", targetRepo];
+    if (openWindow) {
+        args.push("--open");
+    }
+    return runCtlJson(args);
+}
 export async function triggerStopHook(payload) {
     const py = getPythonBin();
     const jsonStr = JSON.stringify(payload);

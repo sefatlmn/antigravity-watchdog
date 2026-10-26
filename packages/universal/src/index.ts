@@ -11,6 +11,7 @@ import {
   cancelSynthesis,
   manageGoal,
   executePlan,
+  openPanel,
   triggerStopHook,
   syncRepo,
 } from "./bridge.js";
@@ -33,6 +34,22 @@ export default Plugin.define({
             const text = (prompt?.text || "").trim();
             const args = text.split(/\s+/).filter(Boolean);
             const sub = (args[0] || "").toLowerCase();
+
+            if (sub === "panel" || sub === "ui") {
+              try {
+                const res = await openPanel(dir, true);
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: `Opened Watchdog Sidepanel UI at \`${res.url || "http://127.0.0.1:4891"}\` for \`${dir}\`.`,
+                });
+              } catch (err: any) {
+                await ctx.session.synthetic({
+                  sessionID,
+                  text: `Failed to open Watchdog Sidepanel UI: ${err.message}`,
+                });
+              }
+              return;
+            }
 
             if (sub === "audit") {
               try {
@@ -191,6 +208,7 @@ export default Plugin.define({
             output += `- \`/watchdog comment <notes>\`: Send guidance/focus note to in-progress audit\n`;
             output += `- \`/watchdog continue [sha]\`: Resume an interrupted audit or auto-complete if report is ready\n`;
             output += `- \`/watchdog apply-fix [sha]\`: Apply fixes from isolated branch\n`;
+            output += `- \`/watchdog panel\`: Open the Watchdog Sidepanel UI\n`;
 
             await ctx.session.synthetic({
               sessionID,
@@ -481,6 +499,22 @@ export default Plugin.define({
           async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
             const result = await manageGoal(targetRepo, input.goal, Boolean(input.clear));
+            return {
+              output: result,
+              content: JSON.stringify(result, null, 2),
+            };
+          }
+        );
+
+        registerTool(
+          "watchdog_open_panel",
+          "Start and open the live Watchdog Sidepanel UI for the current repository",
+          Schema.Struct({
+            repo: Schema.optional(Schema.String),
+          }),
+          async (input) => {
+            const targetRepo = input.repo || ctx.location.directory;
+            const result = await openPanel(targetRepo, true);
             return {
               output: result,
               content: JSON.stringify(result, null, 2),

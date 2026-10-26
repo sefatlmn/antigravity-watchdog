@@ -1,0 +1,16 @@
+{
+  "name": "watchdog",
+  "version": "1.1.0",
+  "description": "Autonomous post-commit code and visual watchdog in isolated Git worktrees, live Sidepanel UI, and project-grounded Next Steps synthesis.",
+  "author": {
+    "name": "Sefa"
+  },
+  "keywords": [
+    "watchdog",
+    "code-review",
+    "playwright",
+    "git-worktree",
+    "next-steps",
+    "sidepanel"
+  ]
+}

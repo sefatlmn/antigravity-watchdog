@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { getStatus, syncRepo, prepareWorktree, queueAudit, applyFix, continueAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, } from "./bridge.js";
+import { getStatus, syncRepo, prepareWorktree, queueAudit, applyFix, continueAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, openPanel, formatStatusReport, formatNextStepsReport, } from "./bridge.js";
 const PRIMARY_TOOLS = [
     {
         name: "watchdog_status",
@@ -164,6 +164,23 @@ const PRIMARY_TOOLS = [
             },
         },
     },
+    {
+        name: "watchdog_open_panel",
+        description: "Start and open the live Watchdog & Next Steps Sidepanel UI window.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                repo: {
+                    type: "string",
+                    description: "Path to git repository (defaults to working directory).",
+                },
+                open: {
+                    type: "boolean",
+                    description: "Whether to open the sidepanel window (defaults to true).",
+                },
+            },
+        },
+    },
 ];
 const ALL_TOOLS = PRIMARY_TOOLS;
 const PROMPTS = [
@@ -279,6 +296,12 @@ async function handleToolCall(rawName, args = {}) {
             case "watchdog_cancel_synthesis": {
                 const res = await cancelSynthesis(args.repo);
                 return { text: `Next steps synthesis cancelled.${res?.notifiedChat ? " Active turn notified." : ""}` };
+            }
+            case "watchdog_open_panel": {
+                const res = await openPanel(args.repo, args.open !== false);
+                return {
+                    text: `Watchdog Sidepanel UI is active at: ${res.url}\n${res.opened ? "Opened dedicated sidepanel window." : "Server running in background."}`,
+                };
             }
             default:
                 return { text: `Unknown tool: ${rawName}`, isError: true };

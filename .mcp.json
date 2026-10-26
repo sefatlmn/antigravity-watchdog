@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "watchdog": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/packages/universal/dist/mcp.js"]
+    }
+  }
+}

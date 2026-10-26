@@ -1,0 +1,14 @@
+{
+  "name": "watchdog-marketplace",
+  "owner": {
+    "name": "Sefa"
+  },
+  "plugins": [
+    {
+      "name": "watchdog",
+      "description": "Autonomous post-commit code and visual watchdog in isolated Git worktrees, live Sidepanel UI, and Next Steps synthesis.",
+      "version": "1.1.0",
+      "source": "./"
+    }
+  ]
+}

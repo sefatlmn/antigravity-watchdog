@@ -13,6 +13,7 @@ Checks:
 """
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -22,15 +23,30 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import qa_ctl  # noqa: E402
+import panel_launcher  # noqa: E402
+
+
+def is_claude_payload(payload: Dict[str, Any]) -> bool:
+    return bool(
+        payload.get("hook_event_name")
+        or ("session_id" in payload and "cwd" in payload)
+    )
 
 
 def is_qa_watchdog_conversation(payload: Dict[str, Any], state: Dict[str, Any]) -> bool:
-    conv_id = payload.get("conversationId", "")
+    if os.environ.get("WATCHDOG_SESSION") == "1":
+        return True
+
+    conv_id = payload.get("conversationId", "") or payload.get("session_id", "")
     active_convs = state.get("active_watchdog_conversations", []) or state.get("active_qa_conversations", [])
     if conv_id and conv_id in active_convs:
         return True
 
-    transcript_path = payload.get("transcriptPath", "")
+    last_msg = payload.get("last_assistant_message", "")
+    if last_msg and ("[WATCHDOG-SESSION]" in last_msg or "[QA-WATCHDOG-SESSION]" in last_msg):
+        return True
+
+    transcript_path = payload.get("transcriptPath", "") or payload.get("transcript_path", "")
     if transcript_path:
         tp = Path(transcript_path)
         if tp.exists():
@@ -74,6 +90,36 @@ def get_new_commits_since_baseline(repo_root: Path, baseline_sha: str, target_sh
 
 def handle_stop_event(payload: Dict[str, Any]) -> None:
     qa_ctl.cache_ls_env()
+
+    if os.environ.get("WATCHDOG_SESSION") == "1":
+        return
+
+    hook_event = payload.get("hook_event_name", "")
+    if hook_event == "SessionStart":
+        cwd = payload.get("cwd") or os.getcwd()
+        auto_open = os.environ.get("WATCHDOG_AUTO_OPEN_PANEL", "1") != "0"
+        try:
+            panel_launcher.ensure_panel(repo_path=cwd, open_window=auto_open)
+        except Exception:
+            pass
+        return
+
+    if is_claude_payload(payload):
+        if payload.get("stop_hook_active"):
+            return
+        payload = dict(payload)
+        payload["fullyIdle"] = True
+        payload["terminationReason"] = "model_stop"
+        if not payload.get("conversationId") and payload.get("session_id"):
+            payload["conversationId"] = payload["session_id"]
+        if not payload.get("transcriptPath") and payload.get("transcript_path"):
+            payload["transcriptPath"] = payload["transcript_path"]
+        if not payload.get("workspacePaths") and payload.get("cwd"):
+            payload["workspacePaths"] = [payload["cwd"]]
+        try:
+            panel_launcher.start_panel_server(payload.get("cwd"))
+        except Exception:
+            pass
 
     if not payload.get("fullyIdle", False):
         return
@@ -191,6 +237,7 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
 
 
 def main() -> int:
+    payload: Dict[str, Any] = {}
     try:
         raw = sys.stdin.read()
         payload = json.loads(raw) if raw.strip() else {}
@@ -204,8 +251,9 @@ def main() -> int:
         except Exception:
             pass
 
-    sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
-    sys.stdout.flush()
+    if not is_claude_payload(payload):
+        sys.stdout.write(json.dumps({"decision": "allow"}) + "\n")
+        sys.stdout.flush()
     return 0
 
 

@@ -2217,7 +2217,16 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
                 save_state(st)
 
     if not dispatched:
-        # Fallback to local deterministic synthesis if AgentAPI is not running
+        claude_conv_id = spawn_claude_cli_agent(prompt, repo_root, LOGS_DIR / f"synthesis-{repo_slug(repo_root)}.log")
+        if claude_conv_id:
+            dispatched = True
+            conv_id = claude_conv_id
+            state_data["conversationId"] = conv_id
+            state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+            track_active_conversation(conv_id)
+
+    if not dispatched:
+        # Fallback to local deterministic synthesis if neither AgentAPI nor Claude CLI is available
         res = synthesize_next_steps(repo_root, force=True)
         complete_synthesis(repo_root)
         return {
@@ -2237,16 +2246,64 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
     }
 
 
+def find_claude_bin() -> Optional[str]:
+    if os.environ.get("WATCHDOG_CLAUDE_BACKGROUND") == "0":
+        return None
+    candidates = [
+        os.environ.get("CLAUDE_BIN", ""),
+        shutil.which("claude") or "",
+        str(HOME / ".claude" / "local" / "claude"),
+        str(HOME / ".local" / "bin" / "claude"),
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+    ]
+    for c in candidates:
+        if c and Path(c).exists():
+            return c
+    return None
+
+
+def spawn_claude_cli_agent(prompt: str, cwd: Path, log_file: Optional[Path] = None) -> Optional[str]:
+    """
+    Launch a detached background Claude Code CLI session (`claude -p`) when running
+    outside Antigravity so the shared Sidepanel UI and hooks dispatch autonomous workers natively.
+    """
+    claude_bin = find_claude_bin()
+    if not claude_bin:
+        return None
+
+    ensure_dirs()
+    session_tag = f"claude-{int(time.time())}-{os.getpid()}"
+    target_log = log_file or (LOGS_DIR / f"{session_tag}.log")
+    env = dict(os.environ)
+    env["WATCHDOG_SESSION"] = "1"
+
+    try:
+        with open(target_log, "a", encoding="utf-8") as lf:
+            lf.write(f"\n[{now_iso()}] Spawning detached Claude Code agent ({session_tag}) in {cwd}\n")
+            proc = subprocess.Popen(
+                [claude_bin, "-p", prompt, "--dangerously-skip-permissions"],
+                cwd=str(cwd),
+                env=env,
+                stdout=lf,
+                stderr=lf,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return f"claude-pid-{proc.pid}"
+    except Exception as exc:
+        try:
+            with open(target_log, "a", encoding="utf-8") as lf:
+                lf.write(f"[{now_iso()}] Failed to spawn Claude CLI agent: {exc}\n")
+        except Exception:
+            pass
+        return None
+
 
 def spawn_plan_agent(repo_root: Path, plan_title: str, plan_markdown: str) -> Optional[str]:
     """
-    Launch a background Antigravity agent conversation to execute a Next Steps plan.
+    Launch a background Antigravity or Claude Code agent conversation to execute a Next Steps plan.
     """
-    env = get_cached_ls_env()
-    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-    if not Path(agentapi_bin).exists():
-        return None
-
     prompt = f"""[NEXT-STEPS-SESSION]
 You are tasked with executing the following approved implementation plan:
 
@@ -2254,27 +2311,33 @@ You are tasked with executing the following approved implementation plan:
 
 Execute this plan step by step, adhering to the plan specifications, writing necessary tests, and verifying results.
 """
-    title = f"Next Step: {plan_title}"
-    if "language_server" in Path(agentapi_bin).name:
-        cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
-    else:
-        cmd = [agentapi_bin, "new-conversation", f"--title={title}", prompt]
+    env = get_cached_ls_env()
+    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+    if Path(agentapi_bin).exists():
+        title = f"Next Step: {plan_title}"
+        if "language_server" in Path(agentapi_bin).name:
+            cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
+        else:
+            cmd = [agentapi_bin, "new-conversation", f"--title={title}", prompt]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=str(repo_root),
-            env=env,
-            timeout=10,
-        )
-        if proc.returncode == 0:
-            data = json.loads(proc.stdout)
-            return data.get("conversationId") or data.get("response", {}).get("conversationId")
-    except Exception:
-        pass
-    return None
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(repo_root),
+                env=env,
+                timeout=10,
+            )
+            if proc.returncode == 0:
+                data = json.loads(proc.stdout)
+                conv_id = data.get("conversationId") or data.get("response", {}).get("conversationId")
+                if conv_id:
+                    return conv_id
+        except Exception:
+            pass
+
+    return spawn_claude_cli_agent(prompt, repo_root, LOGS_DIR / f"plan-{repo_slug(repo_root)}.log")
 
 
 def get_execution_state_file(repo_root: Path) -> Path:
@@ -2959,70 +3022,81 @@ First, read your operating skill instructions using `view_file`:
 
 def spawn_detached_agent(job: Dict[str, Any]) -> bool:
     """
-    Launch a background review conversation via `agentapi new-conversation`.
+    Launch a background review conversation via `agentapi new-conversation`
+    (with automatic fallback to detached `claude -p` when running in Claude Code).
     """
-    env = get_cached_ls_env()
-    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-    if not Path(agentapi_bin).exists():
-        return False
-
     prompt = build_qa_prompt(job)
     title = f"Watchdog: {job['repo_name']} @ {job['short_sha']}"
     log_file = LOGS_DIR / f"agent-{job['id']}.log"
+    target_cwd = Path(job["worktree_path"]) if Path(job["worktree_path"]).exists() else Path(job["repo_path"])
 
-    if "language_server" in Path(agentapi_bin).name:
-        cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
-    else:
-        cmd = [agentapi_bin, "new-conversation", f"--title={title}", prompt]
+    env = get_cached_ls_env()
+    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+    if Path(agentapi_bin).exists():
+        if "language_server" in Path(agentapi_bin).name:
+            cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
+        else:
+            cmd = [agentapi_bin, "new-conversation", f"--title={title}", prompt]
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=job["worktree_path"] if Path(job["worktree_path"]).exists() else job["repo_path"],
-            env=env,
-            timeout=10,
-        )
-        with open(log_file, "a", encoding="utf-8") as lf:
-            lf.write(f"\n[{now_iso()}] Dispatched Watchdog via {agentapi_bin} for {job['id']}\n")
-            if proc.stdout:
-                lf.write(f"STDOUT:\n{proc.stdout}\n")
-            if proc.stderr:
-                lf.write(f"STDERR:\n{proc.stderr}\n")
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(target_cwd),
+                env=env,
+                timeout=10,
+            )
+            with open(log_file, "a", encoding="utf-8") as lf:
+                lf.write(f"\n[{now_iso()}] Dispatched Watchdog via {agentapi_bin} for {job['id']}\n")
+                if proc.stdout:
+                    lf.write(f"STDOUT:\n{proc.stdout}\n")
+                if proc.stderr:
+                    lf.write(f"STDERR:\n{proc.stderr}\n")
 
-        if proc.returncode == 0:
-            conv_id = None
+            if proc.returncode == 0:
+                conv_id = None
+                try:
+                    data = json.loads(proc.stdout)
+                    conv_id = (
+                        data.get("conversationId")
+                        or data.get("response", {}).get("conversationId")
+                        or data.get("response", {}).get("newConversation", {}).get("conversationId")
+                    )
+                except Exception:
+                    pass
+                if conv_id:
+                    job["conversation_id"] = conv_id
+                    track_active_conversation(conv_id)
+                    with StateLock():
+                        st = load_state()
+                        for j in st.get("jobs", []):
+                            if j["id"] == job["id"]:
+                                j["conversation_id"] = conv_id
+                                break
+                        save_state(st)
+                return True
+        except Exception as exc:
             try:
-                data = json.loads(proc.stdout)
-                conv_id = (
-                    data.get("conversationId")
-                    or data.get("response", {}).get("conversationId")
-                    or data.get("response", {}).get("newConversation", {}).get("conversationId")
-                )
+                with open(log_file, "a", encoding="utf-8") as lf:
+                    lf.write(f"[{now_iso()}] Failed to spawn agentapi: {exc}\n")
             except Exception:
                 pass
-            if conv_id:
-                job["conversation_id"] = conv_id
-                with StateLock():
-                    st = load_state()
-                    active = st.setdefault("active_qa_conversations", [])
-                    if conv_id not in active:
-                        active.append(conv_id)
-                    for j in st.get("jobs", []):
-                        if j["id"] == job["id"]:
-                            j["conversation_id"] = conv_id
-                            break
-                    save_state(st)
-            return True
-        return False
-    except Exception as exc:
-        try:
-            with open(log_file, "a", encoding="utf-8") as lf:
-                lf.write(f"[{now_iso()}] Failed to spawn agentapi: {exc}\n")
-        except Exception:
-            pass
-        return False
+
+    claude_conv_id = spawn_claude_cli_agent(prompt, target_cwd, log_file)
+    if claude_conv_id:
+        job["conversation_id"] = claude_conv_id
+        track_active_conversation(claude_conv_id)
+        with StateLock():
+            st = load_state()
+            for j in st.get("jobs", []):
+                if j["id"] == job["id"]:
+                    j["conversation_id"] = claude_conv_id
+                    break
+            save_state(st)
+        return True
+
+    return False
 
 
 def queue_commit(
@@ -3896,7 +3970,19 @@ def main() -> int:
     p_sc.add_argument("--comment", required=True)
     p_sc.add_argument("--job-id", default="")
 
+    p_panel = sub.add_parser("panel", help="Start and optionally open the Watchdog Sidepanel UI", parents=[p_common])
+    p_panel.add_argument("--repo", default="")
+    p_panel.add_argument("--open", action="store_true", help="Open the sidepanel window")
+
     args, _ = parser.parse_known_args()
+
+    if args.cmd == "panel":
+        import panel_launcher
+        repo_arg = getattr(args, "repo", "").strip() or os.getcwd()
+        root = resolve_git_root(repo_arg) or Path(repo_arg).resolve()
+        res = panel_launcher.ensure_panel(repo_path=str(root), open_window=bool(getattr(args, "open", False)))
+        print(json.dumps(res, indent=2))
+        return 0
 
     if args.cmd == "send-comment":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve() if getattr(args, "repo", "") else None

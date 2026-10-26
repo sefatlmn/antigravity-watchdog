@@ -6,7 +6,7 @@ Watchdog operates non-intrusively in isolated Git worktrees. It verifies code co
 
 Supported environments:
 - **Google Antigravity**: Native plugin with visual companion panel, lifecycle hooks, and skills.
-- **Claude Code**: Model Context Protocol (MCP) stdio server with custom slash commands (`/watchdog`, `/next-steps`).
+- **Claude Code**: Native plugin (`.claude-plugin/plugin.json`) with live Sidepanel UI (`sidecars/panel/`), automatic `SessionStart` & `Stop` hooks, subagents, slash commands (`/panel`, `/watchdog`, `/next-steps`, `/apply-fix`, `/goal`), and MCP server — 100% shared codebase with Antigravity.
 - **OpenCode Desktop**: Native plugin with chat commands and agent tools (backwards-compatible).
 - **Cursor & Windsurf**: Standard stdio MCP integration.
 - **OpenAI Codex & Custom Agents**: Structured CLI tools and agent rules.
@@ -63,39 +63,39 @@ node /path/to/qa-watchdog/packages/universal/bin/watchdog.js setup [claude|curso
 
 ### Editor Integrations
 
-#### 1. Claude Code
+#### 1. Claude Code (Native Plugin + Sidepanel UI)
 
-Add the Watchdog MCP server to Claude Code:
+The repository root is a native Claude Code plugin sharing the exact same codebase, skills, hooks, controller, and live Sidepanel UI (`sidecars/panel/`) as Antigravity.
+
+**Option A — Launch directly with `--plugin-dir`:**
+
+```bash
+claude --plugin-dir /path/to/qa-watchdog
+```
+
+**Option B — Install via Claude Code Plugin Marketplace:**
+
+Inside Claude Code, run:
+
+```text
+/plugin marketplace add /path/to/qa-watchdog
+/plugin install watchdog@watchdog-local
+```
+
+When a Claude Code session starts (`SessionStart` hook), Watchdog automatically launches the shared Sidepanel UI daemon on `http://127.0.0.1:4891` and opens a right-docked companion window synced to your active repository. When a turn finishes (`Stop` hook), Watchdog inspects new commits and dispatches isolated Git worktree audits and Next Steps synthesis automatically.
+
+Commands available in Claude Code:
+- `/panel` (or `/watchdog:panel`): Launch or focus the live Watchdog Sidepanel UI window.
+- `/watchdog` (or `/watchdog:watchdog`): Review status, trigger audits, forward notes to active auditors, or apply fixes.
+- `/next-steps` (or `/watchdog:next-steps`): Synthesize 4 `/plan`-compliant proposals or execute a plan.
+- `/apply-fix` (or `/watchdog:apply-fix`): Cherry-pick verified fixes from an isolated `fix/watchdog-<sha>` branch.
+- `/goal` (or `/watchdog:goal`): Inspect, set, or clear the repository milestone goal.
+
+*(Optional Standalone MCP setup)*: If you prefer registering only the MCP server without the full plugin:
 
 ```bash
 claude mcp add watchdog node /path/to/qa-watchdog/packages/universal/dist/mcp.js
 ```
-
-Or configure `.mcp.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "watchdog": {
-      "command": "node",
-      "args": [
-        "/path/to/qa-watchdog/packages/universal/dist/mcp.js"
-      ]
-    }
-  }
-}
-```
-
-To enable slash commands in Claude Code, copy the provided templates into your project:
-
-```bash
-mkdir -p .claude/commands
-cp /path/to/qa-watchdog/packages/universal/templates/claude/commands/* .claude/commands/
-```
-
-Commands available in Claude Code:
-- `/watchdog`: Review status, run audits, and apply fixes.
-- `/next-steps`: Synthesize proposals and load approved implementation plans.
 
 #### 2. Cursor / Windsurf
 
@@ -149,8 +149,7 @@ When connected via MCP, the following tools are available to agents:
 | `watchdog_comment` | Send guidance or focus notes to an in-progress Watchdog audit |
 | `watchdog_continue` | Resume an interrupted audit or check completed audit report |
 | `watchdog_cancel_synthesis` | Cancel an ongoing next-steps synthesis turn |
-
-*(All tools also respond to `qa_watchdog_*` aliases for backwards compatibility.)*
+| `watchdog_open_panel` | Launch and open the live Watchdog Sidepanel UI for the current repository |
 
 MCP Prompts exposed:
 - `watchdog_audit`: Instructions and testing guidelines for reviewing commits.
@@ -183,6 +182,9 @@ You can execute Watchdog directly from the command line or scripts:
 
 # Inspect or set project milestone goal
 ./packages/universal/bin/watchdog.js goal --set "Ship production v2 release"
+
+# Open the live Watchdog Sidepanel UI
+./packages/universal/bin/watchdog.js panel
 
 # Start the MCP stdio server
 ./packages/universal/bin/watchdog.js mcp

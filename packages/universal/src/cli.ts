@@ -13,6 +13,7 @@ import {
   cancelSynthesis,
   manageGoal,
   executePlan,
+  openPanel,
   formatStatusReport,
   formatNextStepsReport,
   resolveRepo,
@@ -38,6 +39,7 @@ Commands:
   goal                     Inspect current milestone goal
   goal --set "<goal>"      Set project milestone goal
   goal --clear             Clear current milestone goal
+  panel                    Start and open the live Watchdog & Next Steps Sidepanel UI
   mcp                      Start the Model Context Protocol stdio server
   setup [editor]           Configure integration for claude, cursor, opencode, or codex
 
@@ -129,7 +131,12 @@ To execute a proposal, call \`watchdog_execute_plan\` with the plan ID.
       console.warn(`Could not create .claude/commands: ${err.message}`);
     }
 
-    console.log("\nTo add Watchdog MCP server to Claude Code CLI, run:");
+    console.log("\nNative Claude Code Plugin (includes Sidepanel UI, hooks, skills, agents & MCP):");
+    console.log(`  claude --plugin-dir "${PLUGIN_ROOT}"`);
+    console.log("Or install via Claude Code Marketplace:");
+    console.log(`  /plugin marketplace add "${PLUGIN_ROOT}"`);
+    console.log("  /plugin install watchdog@watchdog-marketplace");
+    console.log("\nOr add Watchdog MCP server standalone to Claude Code CLI:");
     console.log(`  claude mcp add watchdog node "${universalDistMcp}"`);
   }
 
@@ -338,6 +345,16 @@ async function main(): Promise<void> {
         } else {
           const res = await manageGoal(repo);
           console.log(isJson ? JSON.stringify(res, null, 2) : (res?.goal ? `Milestone goal: "${res.goal}"` : "No goal set."));
+        }
+        break;
+      }
+
+      case "panel": {
+        const res = await openPanel(repo, flags.open !== false);
+        if (isJson) {
+          console.log(JSON.stringify(res, null, 2));
+        } else {
+          console.log(`Watchdog Sidepanel UI active at: ${res.url}`);
         }
         break;
       }

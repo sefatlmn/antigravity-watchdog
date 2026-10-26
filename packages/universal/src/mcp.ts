@@ -11,6 +11,7 @@ import {
   cancelSynthesis,
   manageGoal,
   executePlan,
+  openPanel,
   formatStatusReport,
   formatNextStepsReport,
 } from "./bridge.js";
@@ -197,6 +198,23 @@ const PRIMARY_TOOLS = [
       },
     },
   },
+  {
+    name: "watchdog_open_panel",
+    description: "Start and open the live Watchdog & Next Steps Sidepanel UI window.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: {
+          type: "string",
+          description: "Path to git repository (defaults to working directory).",
+        },
+        open: {
+          type: "boolean",
+          description: "Whether to open the sidepanel window (defaults to true).",
+        },
+      },
+    },
+  },
 ];
 
 const ALL_TOOLS = PRIMARY_TOOLS;
@@ -322,6 +340,13 @@ async function handleToolCall(rawName: string, args: Record<string, any> = {}): 
       case "watchdog_cancel_synthesis": {
         const res = await cancelSynthesis(args.repo);
         return { text: `Next steps synthesis cancelled.${res?.notifiedChat ? " Active turn notified." : ""}` };
+      }
+
+      case "watchdog_open_panel": {
+        const res = await openPanel(args.repo, args.open !== false);
+        return {
+          text: `Watchdog Sidepanel UI is active at: ${res.url}\n${res.opened ? "Opened dedicated sidepanel window." : "Server running in background."}`,
+        };
       }
 
       default:

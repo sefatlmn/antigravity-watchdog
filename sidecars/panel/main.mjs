@@ -1,15 +1,187 @@
 import { execFileSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Response, SidecarApp } from 'sidecar_sdk';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(HERE, '..', '..');
 const QA_CTL_SCRIPT = join(PLUGIN_ROOT, 'scripts', 'qa_ctl.py');
 const WATCHDOG_DIR = join(homedir(), '.gemini', 'antigravity', 'qa_watchdog');
 const STATE_FILE = join(WATCHDOG_DIR, 'state.json');
+const PANEL_SERVER_FILE = join(WATCHDOG_DIR, 'panel_server.json');
+
+class StandaloneResponse {
+  constructor(body, options = {}) {
+    this.body = body;
+    this.status = options.status || 200;
+    this.contentType = options.contentType || 'application/json';
+  }
+}
+
+class StandaloneSidecarApp {
+  constructor() {
+    this.routes = new Map();
+  }
+
+  page(routePath, handler) {
+    const contentType = routePath.endsWith('.js')
+      ? 'application/javascript; charset=utf-8'
+      : 'text/html; charset=utf-8';
+    this.routes.set(`GET:${routePath}`, { handler, contentType, isPage: true });
+  }
+
+  api(routePath, handler, method = 'POST') {
+    this.routes.set(`${String(method).toUpperCase()}:${routePath}`, {
+      handler,
+      contentType: 'application/json; charset=utf-8',
+      isPage: false,
+    });
+  }
+
+  run() {
+    const preferredPort = parseInt(process.env.WATCHDOG_PANEL_PORT || '4891', 10);
+    const host = process.env.WATCHDOG_PANEL_HOST || '127.0.0.1';
+
+    const server = createServer(async (req, res) => {
+      try {
+        const parsedUrl = new URL(req.url || '/', `http://${host}`);
+        const pathname = parsedUrl.pathname;
+        const method = (req.method || 'GET').toUpperCase();
+
+        if (method === 'OPTIONS') {
+          res.writeHead(204, {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, x-sidecar-token',
+          });
+          res.end();
+          return;
+        }
+
+        const route =
+          this.routes.get(`${method}:${pathname}`) ||
+          (method === 'GET' ? this.routes.get(`POST:${pathname}`) : null);
+
+        if (!route) {
+          res.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: `Not found: ${method} ${pathname}` }));
+          return;
+        }
+
+        let bodyData = {};
+        if (method === 'POST' || method === 'PUT') {
+          const chunks = [];
+          for await (const chunk of req) {
+            chunks.push(chunk);
+          }
+          const rawBody = Buffer.concat(chunks).toString('utf8').trim();
+          if (rawBody) {
+            try {
+              bodyData = JSON.parse(rawBody);
+            } catch {
+              bodyData = {};
+            }
+          }
+        } else {
+          for (const [k, v] of parsedUrl.searchParams.entries()) {
+            bodyData[k] = v;
+          }
+        }
+
+        const result = await route.handler(bodyData, req);
+        if (result && (result instanceof StandaloneResponse || (typeof result === 'object' && 'body' in result && 'contentType' in result))) {
+          res.writeHead(result.status || 200, {
+            'Content-Type': result.contentType || 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+          });
+          res.end(typeof result.body === 'string' || Buffer.isBuffer(result.body) ? result.body : JSON.stringify(result.body));
+          return;
+        }
+
+        if (route.isPage && typeof result === 'string') {
+          res.writeHead(200, {
+            'Content-Type': route.contentType,
+            'Cache-Control': 'no-store',
+          });
+          res.end(result);
+          return;
+        }
+
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify(result ?? {}));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ ok: false, error: String(err?.message || err) }));
+      }
+    });
+
+    const startListen = (portToTry, attemptsLeft) => {
+      server.once('error', (err) => {
+        if (err.code === 'EADDRINUSE' && attemptsLeft > 0) {
+          startListen(portToTry + 1, attemptsLeft - 1);
+        } else {
+          console.error(`Watchdog panel server failed to bind: ${err.message}`);
+          process.exit(1);
+        }
+      });
+      server.listen(portToTry, host, () => {
+        const addr = server.address();
+        const actualPort = typeof addr === 'object' && addr ? addr.port : portToTry;
+        const url = `http://${host}:${actualPort}`;
+        try {
+          mkdirSync(WATCHDOG_DIR, { recursive: true });
+          writeFileSync(
+            PANEL_SERVER_FILE,
+            JSON.stringify({ pid: process.pid, port: actualPort, host, url, startedAt: new Date().toISOString() }, null, 2),
+            'utf8'
+          );
+        } catch {}
+        if (process.env.WATCHDOG_PANEL_QUIET !== '1') {
+          console.log(`Watchdog Sidepanel UI listening on ${url}`);
+        }
+      });
+    };
+
+    startListen(preferredPort, 10);
+  }
+}
+
+let SidecarApp = StandaloneSidecarApp;
+let Response = StandaloneResponse;
+let isStandaloneMode = true;
+let app;
+
+const hasAntigravitySidecarEnv = Boolean(
+  process.env.ANTIGRAVITY_LS_ADDRESS &&
+  process.env.ANTIGRAVITY_CSRF_TOKEN &&
+  process.env.ANTIGRAVITY_SIDECAR_WEB_PORT &&
+  process.env.WATCHDOG_STANDALONE !== '1'
+);
+
+if (hasAntigravitySidecarEnv) {
+  try {
+    const sdk = await import('sidecar_sdk');
+    if (sdk?.SidecarApp && sdk?.Response) {
+      app = new sdk.SidecarApp();
+      SidecarApp = sdk.SidecarApp;
+      Response = sdk.Response;
+      isStandaloneMode = false;
+    }
+  } catch {
+    // Fallback to standalone mode
+  }
+}
+
+if (!app) {
+  app = new StandaloneSidecarApp();
+  Response = StandaloneResponse;
+  isStandaloneMode = true;
+}
 
 const EMPTY_TREE_HASH = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 const SKIP_SCAN_DIRS = new Set([
@@ -37,14 +209,78 @@ const SKIP_SCAN_DIRS = new Set([
 ]);
 const SKIP_TAGS = ['[auto-review]', '[qa-watchdog]', '[skip-qa]'];
 
-const app = new SidecarApp();
-
 const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
+
+let activeStandaloneWorkspaces = process.env.WATCHDOG_REPO ? [resolve(process.env.WATCHDOG_REPO)] : [];
+
+const STANDALONE_PRELOAD_JS = `// Watchdog Standalone Host Bridge (Claude Code / Browser)
+if (!window.sidecar) {
+  let _listeners = [];
+  let _lastUrisKey = '';
+  async function _fetchWorkspaces() {
+    try {
+      const r = await window.fetch('/api/active-workspace', { method: 'GET' });
+      const d = await r.json();
+      return Array.isArray(d.workspaceUris) ? d.workspaceUris : [];
+    } catch {
+      return [];
+    }
+  }
+  window.sidecar = {
+    isStandalone: true,
+    getWorkspaceUris: async () => {
+      const uris = await _fetchWorkspaces();
+      _lastUrisKey = uris.join('|');
+      return uris;
+    },
+    onWorkspaceChange: (cb) => {
+      if (typeof cb === 'function') _listeners.push(cb);
+    }
+  };
+  setInterval(async () => {
+    if (document.hidden || _listeners.length === 0) return;
+    const uris = await _fetchWorkspaces();
+    const key = uris.join('|');
+    if (key && key !== _lastUrisKey) {
+      _lastUrisKey = key;
+      for (const fn of _listeners) {
+        try { fn(uris); } catch {}
+      }
+    }
+  }, 4000);
+}
+`;
 
 app.page('/', () => readLocal('index.html'));
 app.page('/app.js', () => readLocal('app.js'));
-app.api('/preload.js', () => new Response('// preload stub\n', { contentType: 'application/javascript' }), 'GET');
+app.api('/preload.js', () => new Response(isStandaloneMode ? STANDALONE_PRELOAD_JS : '// preload stub\n', { contentType: 'application/javascript' }), 'GET');
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
+app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, pid: process.pid }), 'GET');
+app.api('/api/active-workspace', (data, req) => {
+  if (req && req.method === 'POST' && data?.repoPath) {
+    const resolved = resolve(String(data.repoPath).trim());
+    if (existsSync(resolved)) {
+      activeStandaloneWorkspaces = [resolved, ...activeStandaloneWorkspaces.filter((p) => p !== resolved)].slice(0, 5);
+      saveStatePatch({ active_workspace: resolved });
+    }
+  }
+  const state = loadState(true);
+  const uris = [...activeStandaloneWorkspaces];
+  if (state.active_workspace && !uris.includes(state.active_workspace) && existsSync(state.active_workspace)) {
+    uris.unshift(state.active_workspace);
+  }
+  return { ok: true, workspaceUris: uris };
+}, 'GET');
+app.api('/api/active-workspace', (data) => {
+  if (data?.repoPath) {
+    const resolved = resolve(String(data.repoPath).trim());
+    if (existsSync(resolved)) {
+      activeStandaloneWorkspaces = [resolved, ...activeStandaloneWorkspaces.filter((p) => p !== resolved)].slice(0, 5);
+      saveStatePatch({ active_workspace: resolved });
+    }
+  }
+  return { ok: true, workspaceUris: activeStandaloneWorkspaces };
+}, 'POST');
 
 let resolvedPythonBin = null;
 
