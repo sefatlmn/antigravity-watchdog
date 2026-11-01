@@ -9,7 +9,7 @@ Supported environments:
 | Environment | What you get |
 | :--- | :--- |
 | **Google Antigravity** | Native plugin: Watchdog panel in the side pane, skills, agent rules |
-| **Claude Code** | Native plugin: Watchdog panel as a Claude Code pane, subagents, slash commands, MCP server |
+| **Claude Code** | Native plugin: `/watchdog`, `/next-steps`, `/apply-fix` and `/goal` slash commands, an in-session audit agent, MCP server |
 | **OpenCode Desktop** | Plugin with chat commands and agent tools |
 | **Cursor & Windsurf** | stdio MCP server |
 | **OpenAI Codex & custom agents** | CLI and agent rules |
@@ -65,28 +65,25 @@ Install it in each editor as above. The two installs share one state folder (see
 
 ---
 
-## The Watchdog panel
+## The Watchdog panel (Antigravity)
 
-The panel has two tabs:
+The panel is Antigravity's Watchdog view in the side pane. It has two tabs:
 
 - **Audits:** the active repository and its latest commit, a button to audit it (with an optional focus note, or a note sent to an audit already running), recent audits with their verdicts, the report reader, one-click **Apply Fix**, and an archive.
 - **Next Steps:** the project goal (edit it, or have Watchdog review the codebase and propose one), and 4 synthesized proposals, each with its plan and an **Execute in Agent** button.
 
-**In Antigravity** it is the Watchdog view in the side pane.
-
-**In Claude Code** it is a pane beside the chat, for the Git project the session is in. It opens by itself in the desktop app and IDE extensions; in a terminal, run `/watchdog-panel`. Clicking **Audit**, **Continue Audit** or Next Steps' refresh puts a one-line request in your chat box; press Enter, and Claude starts the work as a background agent. (Claude Code only starts agents you asked for in a message, auto mode included, so the request is yours to send.) The pane runs the same panel server and makes the same decisions as Antigravity's panel, drawn with Claude Code's own controls. Its **Open full panel** link opens the identical web panel in your browser. **Send to Chat** and **Execute in Agent** place the text in your prompt box for you to send.
-
-Watchdog works on Git projects only: outside one, the pane says so and offers no actions.
+Watchdog works on Git repositories only.
 
 ---
 
 ## Slash commands (Claude Code)
 
+In Claude Code, Watchdog is a set of slash commands, run in the Git project the session is in:
+
 - `/watchdog [status | audit [notes] | comment <notes> | continue [sha] | apply-fix [sha]]`
 - `/next-steps [refresh | execute <1-4> | goal [text]]`
 - `/apply-fix [sha]`
 - `/goal [--refresh | --clear | <new goal text>]`
-- `/watchdog-panel`: open the Watchdog panel
 
 ---
 
@@ -113,7 +110,7 @@ node /path/to/antigravity-watchdog/packages/universal/bin/watchdog.js setup all
 }
 ```
 
-**Claude Code, MCP server only** (without the plugin's panel, hooks and commands):
+**Claude Code, MCP server only** (without the plugin's commands and audit agent):
 
 ```bash
 claude mcp add watchdog node /path/to/antigravity-watchdog/packages/universal/dist/mcp.js
@@ -192,11 +189,10 @@ It prints a `WATCHDOG_PANEL_URL=…` line to open in a browser.
 - **Fix branch:** reproducible fixes are committed to `fix/watchdog-<short_sha>`. Apply them with **Apply Fix**, `/apply-fix`, or `apply-fix`.
 - **Agents:** Antigravity runs audits and syntheses as new agent conversations.
 
-  Claude Code runs them inside your session, as background subagents (`watchdog:watchdog-auditor` and `watchdog:next-steps-synthesizer`) on your existing sign-in. **Execute in Agent** puts the plan in your prompt box, so it runs in the main chat with your usual permissions. Claude starts one when you send a panel button's request, or when you run `/watchdog audit`. Once running, Watchdog's own agents may only do what their task needs; the plugin refuses everything else, without changing your permission settings:
+  In Claude Code, `/watchdog audit` starts the audit as a background subagent of your session (`watchdog:watchdog-auditor`), on your existing sign-in. `/next-steps refresh` synthesizes proposals locally, and `/next-steps execute <n>` hands the plan to Claude in the main chat, with your usual permissions. The audit agent may only do what an audit needs; the plugin refuses everything else, without changing your permission settings:
   - **Audit:** read files; edit only in its isolated worktree and the repository's `.antigravity/audits/`; read-only git, plus `git add` and `git commit` in the worktree; test, lint, typecheck, build and dev-server commands (npm, pnpm, yarn, npx, pytest, cargo, go); the Playwright MCP tools; and reporting back to Watchdog.
-  - **Next Steps:** read files and read-only git; write only in `.antigravity/next_steps/`; report back.
 
-  Neither may push, install packages, use the network, or delete files. An audit agent that stops without reporting is marked interrupted, and **Continue Audit** starts it again.
+  It may not push, install packages, use the network, or delete files. An audit agent that stops without reporting is marked interrupted, and `/watchdog continue` starts it again.
 
   Outside Claude Code (Cursor, the CLI), Watchdog falls back to background `claude -p` sessions with the same limits. Those need the `claude` CLI to be signed in; set `WATCHDOG_CLAUDE_BACKGROUND=0` to turn them off.
 - **Next Steps:** proposals and plans are written to `.antigravity/next_steps/` in your repository, based on its docs, recent commits, and goal.
@@ -223,12 +219,12 @@ Watchdog does not audit commits whose message contains any of these tags (its ow
 One codebase serves every host:
 
 - `scripts/watchdog_ctl.py`: the controller, used by every host.
-- `sidecars/panel/`: the panel. `main.mjs` is the panel server (Antigravity's `sidecar_sdk` inside Antigravity, the bundled `standalone_sdk.mjs` anywhere else). `view-model.js` holds the decisions both GUIs share. `index.html`, `app.js` and `styles.css` are the web panel.
-- `hooks/register.tsx`: the Claude Code pane, drawn from the same server and `view-model.js`. `hooks/agents.ts`: Watchdog's agents inside a Claude Code session and their permissions.
+- `sidecars/panel/`: the panel. `main.mjs` is the panel server (Antigravity's `sidecar_sdk` inside Antigravity, the bundled `standalone_sdk.mjs` anywhere else). `view-model.js` holds the panel's decisions (badges, button states). `index.html`, `app.js` and `styles.css` are the web panel.
+- `hooks/agents.ts`: the Claude Code audit agent in the session, and its permissions.
 - `plugin.json`, `rules/`: the Antigravity plugin. `.claude-plugin/`, `hooks/hooks.json`, `.mcp.json`, `commands/`, `agents/`: the Claude Code plugin. `skills/` serves both.
 - `packages/universal/`: MCP server, CLI, and OpenCode plugin.
 
-To run the Claude Code pane's tests: `claude plugin test .`
+To run the Claude Code plugin's tests: `claude plugin test .`
 
 ---
 
