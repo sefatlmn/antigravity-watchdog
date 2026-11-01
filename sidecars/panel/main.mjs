@@ -11,6 +11,7 @@ const WATCHDOG_CTL_SCRIPT = join(PLUGIN_ROOT, 'scripts', 'watchdog_ctl.py');
 const WATCHDOG_DIR = join(homedir(), '.gemini', 'antigravity', 'watchdog');
 const STATE_FILE = join(WATCHDOG_DIR, 'state.json');
 const PANEL_SERVER_FILE = join(WATCHDOG_DIR, 'panel_server.json');
+const CLAUDE_SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
 
 class StandaloneResponse {
   constructor(body, options = {}) {
@@ -268,11 +269,55 @@ if (!window.sidecar) {
 }
 `;
 
+function discoverActiveClaudeWorkspaces() {
+  if (!existsSync(CLAUDE_SESSIONS_DIR)) return [];
+  const entries = [];
+  try {
+    for (const name of readdirSync(CLAUDE_SESSIONS_DIR)) {
+      if (!name.endsWith('.json')) continue;
+      const fullPath = join(CLAUDE_SESSIONS_DIR, name);
+      try {
+        const st = statSync(fullPath);
+        const raw = JSON.parse(readFileSync(fullPath, 'utf8'));
+        const pid = Number(raw?.pid || name.replace(/\.json$/, ''));
+        const cwd = raw?.cwd ? resolve(String(raw.cwd).trim()) : '';
+        if (!cwd || !existsSync(cwd)) continue;
+        let alive = false;
+        if (!Number.isNaN(pid) && pid > 0) {
+          try {
+            process.kill(pid, 0);
+            alive = true;
+          } catch {
+            alive = false;
+          }
+        }
+        if (!alive) continue;
+        const ts = Number(raw?.updatedAt || raw?.startedAt || st.mtimeMs || 0);
+        entries.push({ cwd, ts });
+      } catch {
+        // ignore malformed session file
+      }
+    }
+  } catch {
+    return [];
+  }
+  entries.sort((a, b) => b.ts - a.ts);
+  const result = [];
+  for (const item of entries) {
+    if (!result.includes(item.cwd)) {
+      result.push(item.cwd);
+    }
+  }
+  return result;
+}
+
 app.page('/', () => readLocal('index.html'));
 app.page('/app.js', () => readLocal('app.js'));
-app.api('/preload.js', () => new Response(isStandaloneMode ? STANDALONE_PRELOAD_JS : '// preload stub\n', { contentType: 'application/javascript' }), 'GET');
+if (isStandaloneMode) {
+  app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
+}
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
-app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, pid: process.pid }), 'GET');
+app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, host: isStandaloneMode ? 'claude' : 'antigravity', pid: process.pid }), 'GET');
 app.api('/api/active-workspace', (data, req) => {
   if (req && req.method === 'POST' && data?.repoPath) {
     const resolved = resolve(String(data.repoPath).trim());
@@ -282,9 +327,15 @@ app.api('/api/active-workspace', (data, req) => {
     }
   }
   const state = loadState(true);
-  const uris = [...activeStandaloneWorkspaces];
+  const uris = [];
+  for (const cw of discoverActiveClaudeWorkspaces()) {
+    if (!uris.includes(cw)) uris.push(cw);
+  }
+  for (const sw of activeStandaloneWorkspaces) {
+    if (!uris.includes(sw) && existsSync(sw)) uris.push(sw);
+  }
   if (state.active_workspace && !uris.includes(state.active_workspace) && existsSync(state.active_workspace)) {
-    uris.unshift(state.active_workspace);
+    uris.push(state.active_workspace);
   }
   return { ok: true, workspaceUris: uris };
 }, 'GET');
@@ -301,16 +352,23 @@ app.api('/api/active-workspace', (data) => {
 
 let resolvedPythonBin = null;
 
-function runPythonCtl(args) {
+function runPythonCtl(args, hostOverride = '') {
   const candidates = resolvedPythonBin
     ? [resolvedPythonBin]
     : ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', 'python3'];
+  const effectiveHost = String(hostOverride || process.env.WATCHDOG_HOST || (isStandaloneMode ? 'claude' : 'antigravity')).trim();
+  const fullArgs = [WATCHDOG_CTL_SCRIPT, ...args];
+  if (effectiveHost && !fullArgs.includes('--host')) {
+    fullArgs.push('--host', effectiveHost);
+  }
+  const childEnv = { ...process.env, WATCHDOG_HOST: effectiveHost };
   let lastErr = null;
   for (const bin of candidates) {
     try {
-      const out = execFileSync(bin, [WATCHDOG_CTL_SCRIPT, ...args], {
+      const out = execFileSync(bin, fullArgs, {
         encoding: 'utf8',
         timeout: 25000,
+        env: childEnv,
       });
       resolvedPythonBin = bin;
       return JSON.parse(out.trim() || '{}');
@@ -933,7 +991,14 @@ function collectActiveRepos(uris, state) {
   const roots = [];
   const seen = new Set();
 
-  for (const u of uris) {
+  const effectiveUris = [...uris];
+  if (isStandaloneMode) {
+    for (const cw of discoverActiveClaudeWorkspaces()) {
+      if (!effectiveUris.includes(cw)) effectiveUris.push(cw);
+    }
+  }
+
+  for (const u of effectiveUris) {
     for (const root of discoverCandidateGitRoots(u)) {
       if (!seen.has(root)) {
         seen.add(root);
@@ -1105,11 +1170,12 @@ app.api('/api/settings', (data) => {
   };
 });
 
-// POST /api/trigger { repoPath, sha, comment? }
+// POST /api/trigger { repoPath, sha, comment?, host? }
 app.api('/api/trigger', (data) => {
   const repoPath = String(data?.repoPath || '').trim();
   const sha = String(data?.sha || 'YOUNGEST').trim();
   const comment = String(data?.comment || '').trim();
+  const host = String(data?.host || '').trim();
   if (!repoPath) {
     return new Response(JSON.stringify({ error: 'Missing repoPath' }), {
       status: 400,
@@ -1125,7 +1191,7 @@ app.api('/api/trigger', (data) => {
 
   if (running) {
     if (comment) {
-      const ctlRes = runPythonCtl(['send-comment', '--repo', repoPath, '--comment', comment, '--job-id', running.id || '']);
+      runPythonCtl(['send-comment', '--repo', repoPath, '--comment', comment, '--job-id', running.id || ''], host);
       return {
         ok: true,
         alreadyRunning: true,
@@ -1147,7 +1213,7 @@ app.api('/api/trigger', (data) => {
   if (comment) {
     ctlArgs.push('--comment', comment);
   }
-  const result = runPythonCtl(ctlArgs);
+  const result = runPythonCtl(ctlArgs, host);
   return result;
 });
 
@@ -1176,33 +1242,36 @@ app.api('/api/mark-running', (data) => {
   return { ok: true };
 });
 
-// POST /api/dispatch { jobId? }
+// POST /api/dispatch { jobId?, host? }
 app.api('/api/dispatch', (data) => {
   const jobId = data?.jobId ? String(data.jobId).trim() : '';
+  const host = String(data?.host || '').trim();
   const args = ['dispatch'];
   if (jobId) args.push('--job-id', jobId);
-  return runPythonCtl(args);
+  return runPythonCtl(args, host);
 });
 
-// POST /api/continue-audit { jobId?, repoPath?, sha? }
+// POST /api/continue-audit { jobId?, repoPath?, sha?, host? }
 app.api('/api/continue-audit', (data) => {
   const jobId = String(data?.jobId || '').trim();
   const repoPath = String(data?.repoPath || '').trim();
   const sha = String(data?.sha || '').trim();
+  const host = String(data?.host || '').trim();
 
   const ctlArgs = ['continue-job'];
   if (jobId) ctlArgs.push('--job-id', jobId);
   if (repoPath) ctlArgs.push('--repo', repoPath);
   if (sha) ctlArgs.push('--sha', sha);
 
-  return runPythonCtl(ctlArgs);
+  return runPythonCtl(ctlArgs, host);
 });
 
-// POST /api/send-comment { repoPath?, comment, jobId? }
+// POST /api/send-comment { repoPath?, comment, jobId?, host? }
 app.api('/api/send-comment', (data) => {
   const repoPath = String(data?.repoPath || '').trim();
   const comment = String(data?.comment || '').trim();
   const jobId = String(data?.jobId || '').trim();
+  const host = String(data?.host || '').trim();
 
   if (!comment) {
     return new Response(JSON.stringify({ error: 'Missing comment' }), {
@@ -1215,7 +1284,7 @@ app.api('/api/send-comment', (data) => {
   if (repoPath) ctlArgs.push('--repo', repoPath);
   if (jobId) ctlArgs.push('--job-id', jobId);
 
-  return runPythonCtl(ctlArgs);
+  return runPythonCtl(ctlArgs, host);
 });
 
 function isAllowedArtifactPath(filePath) {
@@ -1296,28 +1365,30 @@ app.api('/api/next-steps', (data) => {
   return runPythonCtl(['check-synthesis', '--repo', repo]);
 });
 
-// POST /api/next-steps/refresh { repo }
+// POST /api/next-steps/refresh { repo, host? }
 app.api('/api/next-steps/refresh', (data) => {
   const repo = String(data?.repo || '').trim();
+  const host = String(data?.host || '').trim();
   if (!repo) {
     return new Response(JSON.stringify({ error: 'Missing repo' }), {
       status: 400,
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['dispatch-synthesis', '--repo', repo]);
+  return runPythonCtl(['dispatch-synthesis', '--repo', repo], host);
 });
 
-// POST /api/next-steps/cancel { repo }
+// POST /api/next-steps/cancel { repo, host? }
 app.api('/api/next-steps/cancel', (data) => {
   const repo = String(data?.repo || '').trim();
+  const host = String(data?.host || '').trim();
   if (!repo) {
     return new Response(JSON.stringify({ error: 'Missing repo' }), {
       status: 400,
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['cancel-synthesis', '--repo', repo]);
+  return runPythonCtl(['cancel-synthesis', '--repo', repo], host);
 });
 
 // POST /api/next-steps/goal { repo, goal?, clear?, refresh? }
@@ -1390,17 +1461,18 @@ app.api('/api/next-steps/plan', (data) => {
   }
 });
 
-// POST /api/next-steps/execute { repo, planId }
+// POST /api/next-steps/execute { repo, planId, host? }
 app.api('/api/next-steps/execute', (data) => {
   const repo = String(data?.repo || '').trim();
   const planId = String(data?.planId || '').trim();
+  const host = String(data?.host || '').trim();
   if (!repo || !planId) {
     return new Response(JSON.stringify({ error: 'Missing repo or planId' }), {
       status: 400,
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['execute-plan', '--repo', repo, '--plan-id', planId]);
+  return runPythonCtl(['execute-plan', '--repo', repo, '--plan-id', planId], host);
 });
 
 // POST /api/next-steps/cancel-execution { repo, planId }

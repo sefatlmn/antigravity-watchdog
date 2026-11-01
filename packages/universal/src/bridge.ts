@@ -63,9 +63,13 @@ export function resolveRepo(repo?: string): string {
 
 export async function runCtlJson<T = any>(args: string[]): Promise<T> {
   const py = getPythonBin();
+  const effectiveHost = process.env.WATCHDOG_HOST || "claude";
   const fullArgs = [WATCHDOG_CTL_SCRIPT, ...args];
   if (!fullArgs.includes("--json")) {
     fullArgs.push("--json");
+  }
+  if (!fullArgs.includes("--host")) {
+    fullArgs.push("--host", effectiveHost);
   }
 
   try {
@@ -74,6 +78,7 @@ export async function runCtlJson<T = any>(args: string[]): Promise<T> {
       encoding: "utf8",
       maxBuffer: 20 * 1024 * 1024,
       timeout: 60000,
+      env: { ...process.env, WATCHDOG_HOST: effectiveHost },
     });
     return JSON.parse(stdout.trim() || "{}");
   } catch (err: any) {
@@ -222,6 +227,7 @@ export async function triggerStopHook(payload: {
     const child = execFile(py, [WATCHDOG_STOP_HOOK_SCRIPT], {
       cwd: PLUGIN_ROOT,
       timeout: 30000,
+      env: { ...process.env, WATCHDOG_HOST: process.env.WATCHDOG_HOST || "claude" },
     });
     if (child.stdin) {
       child.stdin.write(jsonStr);

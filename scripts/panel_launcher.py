@@ -87,6 +87,8 @@ def start_panel_server(repo_path: Optional[str] = None) -> str:
     node_bin = find_node_bin()
     env = dict(os.environ)
     env["WATCHDOG_PANEL_QUIET"] = "1"
+    env["WATCHDOG_STANDALONE"] = "1"
+    env["WATCHDOG_HOST"] = "claude"
     if repo_path:
         env["WATCHDOG_REPO"] = str(Path(repo_path).resolve())
 
@@ -130,10 +132,10 @@ def register_active_workspace(base_url: str, repo_path: str) -> None:
 
 
 def open_sidepanel_window(url: str, repo_path: Optional[str] = None) -> bool:
-    target_url = url
+    target_url = f"{url}/?host=claude"
     if repo_path:
         resolved = str(Path(repo_path).resolve())
-        target_url = f"{url}/?repo={urllib.parse.quote(resolved)}"
+        target_url = f"{url}/?host=claude&repo={urllib.parse.quote(resolved)}"
 
     if sys.platform == "darwin":
         mac_browsers = [
@@ -149,7 +151,7 @@ def open_sidepanel_window(url: str, repo_path: Optional[str] = None) -> bool:
                         [
                             bin_path,
                             f"--app={target_url}",
-                            "--window-size=400,900",
+                            "--window-size=420,920",
                             "--window-position=1280,40",
                         ],
                         stdout=subprocess.DEVNULL,
@@ -177,15 +179,57 @@ def open_sidepanel_window(url: str, repo_path: Optional[str] = None) -> bool:
         return False
 
 
+def install_macos_app_bundle() -> Dict[str, Any]:
+    app_dir = HOME / "Applications" / "Watchdog.app"
+    contents_dir = app_dir / "Contents"
+    macos_dir = contents_dir / "MacOS"
+    resources_dir = contents_dir / "Resources"
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    resources_dir.mkdir(parents=True, exist_ok=True)
+
+    plist_content = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>Watchdog</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.sefa.watchdog.panel</string>
+    <key>CFBundleName</key>
+    <string>Watchdog</string>
+    <key>CFBundleDisplayName</key>
+    <string>Watchdog</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.1.0</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
+"""
+    (contents_dir / "Info.plist").write_text(plist_content, encoding="utf-8")
+
+    launcher_script = Path(__file__).resolve()
+    exec_path = macos_dir / "Watchdog"
+    exec_script = f"""#!/bin/bash
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+exec python3 "{launcher_script}" --open
+"""
+    exec_path.write_text(exec_script, encoding="utf-8")
+    os.chmod(exec_path, 0o755)
+    return {"ok": True, "appPath": str(app_dir)}
+
+
 def ensure_panel(repo_path: Optional[str] = None, open_window: bool = False) -> Dict[str, Any]:
     url = start_panel_server(repo_path)
     opened = False
     if open_window:
         opened = open_sidepanel_window(url, repo_path)
     target_url = (
-        f"{url}/?repo={urllib.parse.quote(str(Path(repo_path).resolve()))}"
+        f"{url}/?host=claude&repo={urllib.parse.quote(str(Path(repo_path).resolve()))}"
         if repo_path
-        else url
+        else f"{url}/?host=claude"
     )
     return {
         "ok": True,
@@ -200,8 +244,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Launch Watchdog Sidepanel UI")
     parser.add_argument("--repo", default="", help="Active repository path")
     parser.add_argument("--open", action="store_true", help="Open sidepanel window")
+    parser.add_argument("--install-app", action="store_true", help="Install ~/Applications/Watchdog.app")
     parser.add_argument("--json", action="store_true", help="Output JSON")
     args = parser.parse_args()
+
+    if args.install_app:
+        app_res = install_macos_app_bundle()
+        if args.json:
+            print(json.dumps(app_res, indent=2))
+        else:
+            print(f"Installed Watchdog app bundle at: {app_res['appPath']}")
+        if not args.open and not args.repo:
+            return 0
 
     repo = args.repo.strip() or os.getcwd()
     res = ensure_panel(repo_path=repo, open_window=args.open)

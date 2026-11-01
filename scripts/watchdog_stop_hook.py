@@ -96,6 +96,7 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
 
     hook_event = payload.get("hook_event_name", "")
     if hook_event == "SessionStart":
+        os.environ["WATCHDOG_HOST"] = "claude"
         cwd = payload.get("cwd") or os.getcwd()
         auto_open = os.environ.get("WATCHDOG_AUTO_OPEN_PANEL", "1") != "0"
         try:
@@ -105,6 +106,7 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
         return
 
     if is_claude_payload(payload):
+        os.environ["WATCHDOG_HOST"] = "claude"
         if payload.get("stop_hook_active"):
             return
         payload = dict(payload)
@@ -120,6 +122,8 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
             panel_launcher.start_panel_server(payload.get("cwd"))
         except Exception:
             pass
+    else:
+        os.environ["WATCHDOG_HOST"] = "antigravity"
 
     if not payload.get("fullyIdle", False):
         return

@@ -1,6 +1,7 @@
 // Watchdog & Next Steps Sidecar Panel Logic
 
 const sidecar = window.sidecar;
+const hostMode = new URLSearchParams(window.location.search).get('host') || (sidecar?.isStandalone ? 'claude' : 'antigravity');
 const $ = (id) => document.getElementById(id);
 
 // Theme Synchronization & Adaptation for Antigravity Host Themes
@@ -114,7 +115,10 @@ async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000 } =
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
     let res;
-    const bodyStr = method === 'GET' ? undefined : JSON.stringify(body);
+    const payloadBody = (method !== 'GET' && body && typeof body === 'object' && !Array.isArray(body))
+      ? { host: hostMode, ...body }
+      : body;
+    const bodyStr = method === 'GET' ? undefined : JSON.stringify(payloadBody);
     if (sidecar?.fetch) {
       const fetchPromise = sidecar.fetch(path, {
         method,
@@ -1734,6 +1738,7 @@ async function init() {
       sidecar.onWorkspaceChange((uris) => {
         workspaceUris = uris || [];
         selectedRepoPath = '';
+        userExplicitlySelectedRepo = false;
         syncGit({ silent: true });
       });
     }

@@ -33,11 +33,30 @@ ENV_CACHE_FILE = WATCHDOG_DIR / "ls_env.json"
 CONVERSATION_SUMMARIES_DB = APP_DATA_DIR / "conversation_summaries.db"
 BRAIN_DIR = APP_DATA_DIR / "brain"
 PROJECTS_DIR = HOME / ".gemini" / "config" / "projects"
+CLAUDE_DIR = HOME / ".claude"
+CLAUDE_PROJECTS_DIR = CLAUDE_DIR / "projects"
+CLAUDE_SESSIONS_DIR = CLAUDE_DIR / "sessions"
 NEXT_STEPS_DIR_NAME = "next_steps"
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SKILL_PATH = PLUGIN_DIR / "skills" / "watchdog" / "SKILL.md"
 AGENTAPI_DEFAULT = HOME / ".gemini" / "antigravity" / "bin" / "agentapi"
+
+
+def resolve_host(preferred_host: str = "") -> str:
+    """
+    Determine active host environment ('antigravity', 'claude', or 'auto').
+    Respects explicit preferred_host, WATCHDOG_HOST env var, CLAUDE_PLUGIN_ROOT, and ANTIGRAVITY_LS_ADDRESS.
+    """
+    for cand in (preferred_host, os.environ.get("WATCHDOG_HOST", "")):
+        c = str(cand or "").strip().lower()
+        if c in ("antigravity", "claude"):
+            return c
+    if os.environ.get("CLAUDE_PLUGIN_ROOT") or os.environ.get("CLAUDECODE") == "1":
+        return "claude"
+    if os.environ.get("ANTIGRAVITY_LS_ADDRESS") and os.environ.get("ANTIGRAVITY_CSRF_TOKEN"):
+        return "antigravity"
+    return "auto"
 
 SKIP_TAGS = ("[auto-review]", "[skip-watchdog]", "[watchdog]")
 EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -349,18 +368,43 @@ def resolve_git_root(path_str: str) -> Optional[Path]:
 # 4-Pillar Project Intelligence & Next Steps Synthesizer
 # -----------------------------------------------------------------------------
 
+def _extract_claude_user_text(step: Dict[str, Any]) -> str:
+    if step.get("type") != "user":
+        return ""
+    msg = step.get("message")
+    raw_text = ""
+    if isinstance(msg, dict):
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            raw_text = content
+        elif isinstance(content, list):
+            parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    parts.append(str(item.get("text", "")))
+                elif isinstance(item, str):
+                    parts.append(item)
+            raw_text = "\n".join(parts)
+    elif isinstance(step.get("content"), str):
+        raw_text = step.get("content", "")
+    raw_text = raw_text.strip()
+    if not raw_text:
+        return ""
+    if raw_text.startswith("<command-message>") or raw_text.startswith("<local-command-"):
+        return ""
+    return raw_text
+
+
 def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
     """
-    Find all Antigravity conversations associated with this repository.
+    Find all Antigravity and Claude Code conversations associated with this repository.
     Matches via:
     1. Direct folder matching in `conversation_summaries.db` (workspace_uris containing repo path or repo name)
     2. Parent workspace folders up to home
     3. Project resource mapping in ~/.gemini/config/projects/*.json
     4. Transcript content search (fallback when workspace_uris was left empty)
+    5. Claude Code project transcripts in ~/.claude/projects/<encoded-path>/*.jsonl and ~/.claude/sessions/*.json
     """
-    if not CONVERSATION_SUMMARIES_DB.exists():
-        return []
-
     repo_str = str(repo_root.resolve())
     repo_name = repo_root.name
     ancestors: List[str] = []
@@ -368,6 +412,74 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
     while curr and curr != HOME and curr != Path("/"):
         ancestors.append(str(curr))
         curr = curr.parent
+
+    conversations: List[Dict[str, Any]] = []
+    seen_ids = set()
+
+    # A. Scan Claude Code project transcripts (~/.claude/projects/*/*.jsonl)
+    if CLAUDE_PROJECTS_DIR.exists():
+        encoded_candidates = {re.sub(r"[^a-zA-Z0-9]", "-", p) for p in [repo_str] + ancestors}
+        try:
+            for proj_dir in CLAUDE_PROJECTS_DIR.iterdir():
+                if not proj_dir.is_dir():
+                    continue
+                dir_matches = proj_dir.name in encoded_candidates or (
+                    len(repo_name) > 3 and repo_name.lower() in proj_dir.name.lower()
+                )
+                for jsonl_file in sorted(proj_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True):
+                    cid = jsonl_file.stem
+                    if not cid or cid in seen_ids:
+                        continue
+                    try:
+                        matches = dir_matches
+                        first_user_msg = ""
+                        last_user_msg = ""
+                        step_count = 0
+                        with open(jsonl_file, "r", encoding="utf-8", errors="ignore") as fp:
+                            for idx, line in enumerate(fp):
+                                if not line.strip():
+                                    continue
+                                if not matches and idx < 25 and repo_str in line:
+                                    matches = True
+                                try:
+                                    obj = json.loads(line)
+                                    if not matches and obj.get("cwd"):
+                                        obj_cwd = str(obj.get("cwd"))
+                                        if obj_cwd == repo_str or obj_cwd.startswith(repo_str + "/"):
+                                            matches = True
+                                    u_text = _extract_claude_user_text(obj)
+                                    if u_text and not u_text.startswith("[WATCHDOG") and not u_text.startswith("[NEXT-STEPS"):
+                                        step_count += 1
+                                        if not first_user_msg:
+                                            first_user_msg = u_text
+                                        last_user_msg = u_text
+                                except Exception:
+                                    pass
+                        if matches and (first_user_msg or dir_matches):
+                            seen_ids.add(cid)
+                            st = jsonl_file.stat()
+                            mtime_iso = datetime.datetime.fromtimestamp(st.st_mtime, tz=datetime.timezone.utc).isoformat()
+                            clean_title = re.sub(r"\s+", " ", (first_user_msg or f"Claude Session ({repo_name})")).strip()[:80]
+                            clean_preview = re.sub(r"\s+", " ", (last_user_msg or first_user_msg or "")).strip()[:160]
+                            conversations.append(
+                                {
+                                    "conversationId": cid,
+                                    "title": clean_title,
+                                    "preview": clean_preview,
+                                    "stepCount": step_count,
+                                    "lastModifiedTime": mtime_iso,
+                                    "projectId": proj_dir.name,
+                                    "host": "claude",
+                                    "transcriptPath": str(jsonl_file),
+                                }
+                            )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    if not CONVERSATION_SUMMARIES_DB.exists():
+        return conversations
 
     # Find project IDs from ~/.gemini/config/projects
     matched_project_ids = set()
@@ -389,8 +501,6 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    conversations: List[Dict[str, Any]] = []
-    seen_ids = set()
     try:
         conn = sqlite3.connect(str(CONVERSATION_SUMMARIES_DB))
         cur = conn.cursor()
@@ -454,6 +564,7 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
                         "stepCount": step_count or 0,
                         "lastModifiedTime": mtime or "",
                         "projectId": pid or "",
+                        "host": "antigravity",
                     }
                 )
     except Exception:
@@ -466,16 +577,21 @@ def get_conversation_user_requests(
     conv_id: str, limit: int = 5, transcript_path: Optional[Path] = None
 ) -> List[str]:
     """
-    Extract recent user requests from a conversation transcript.
+    Extract recent user requests from an Antigravity or Claude Code conversation transcript.
     """
+    t_file: Optional[Path] = None
     if transcript_path and Path(transcript_path).exists():
         t_file = Path(transcript_path)
     elif conv_id:
-        t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
-    else:
-        return []
+        cand = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+        if cand.exists():
+            t_file = cand
+        elif CLAUDE_PROJECTS_DIR.exists():
+            matches = list(CLAUDE_PROJECTS_DIR.glob(f"*/{conv_id}.jsonl"))
+            if matches:
+                t_file = matches[0]
 
-    if not t_file.exists():
+    if not t_file or not t_file.exists():
         return []
     requests: List[str] = []
     try:
@@ -485,19 +601,22 @@ def get_conversation_user_requests(
                     continue
                 try:
                     step = json.loads(line)
+                    req_text = ""
                     if step.get("type") == "USER_INPUT":
                         content = step.get("content", "")
                         m = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
                         req_text = m.group(1).strip() if m else content.strip()
-                        if (
-                            req_text
-                            and not req_text.startswith("Comments on artifact URI:")
-                            and not req_text.startswith("[WATCHDOG")
-                            and not req_text.startswith("[NEXT-STEPS")
-                            and not req_text.startswith("[Notice]")
-                            and req_text not in requests
-                        ):
-                            requests.append(req_text)
+                    elif step.get("type") == "user":
+                        req_text = _extract_claude_user_text(step)
+                    if (
+                        req_text
+                        and not req_text.startswith("Comments on artifact URI:")
+                        and not req_text.startswith("[WATCHDOG")
+                        and not req_text.startswith("[NEXT-STEPS")
+                        and not req_text.startswith("[Notice]")
+                        and req_text not in requests
+                    ):
+                        requests.append(req_text)
                 except Exception:
                     pass
     except Exception:
@@ -1923,28 +2042,36 @@ def cancel_synthesis(repo_root: Path) -> Dict[str, Any]:
                 ]
                 save_state(global_state)
 
-        # Notify the conversation via AgentAPI send-message
-        env = get_cached_ls_env()
-        agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-        if Path(agentapi_bin).exists():
-            msg = "[CANCEL-SYNTHESIS] Next steps refresh was cancelled by user. Stop synthesis immediately."
-            if "language_server" in Path(agentapi_bin).name:
-                cmd = [agentapi_bin, "agentapi", "send-message", conv_id, msg]
-            else:
-                cmd = [agentapi_bin, "send-message", conv_id, msg]
+        if conv_id.startswith("claude-pid-"):
             try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    cwd=str(repo_root),
-                    env=env,
-                    timeout=8,
-                )
-                if proc.returncode == 0:
-                    notified_chat = True
+                pid = int(conv_id[len("claude-pid-"):])
+                os.kill(pid, 15)
+                notified_chat = True
             except Exception:
                 pass
+        elif resolve_host() != "claude":
+            # Notify the conversation via AgentAPI send-message
+            env = get_cached_ls_env()
+            agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+            if Path(agentapi_bin).exists():
+                msg = "[CANCEL-SYNTHESIS] Next steps refresh was cancelled by user. Stop synthesis immediately."
+                if "language_server" in Path(agentapi_bin).name:
+                    cmd = [agentapi_bin, "agentapi", "send-message", conv_id, msg]
+                else:
+                    cmd = [agentapi_bin, "send-message", conv_id, msg]
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        cwd=str(repo_root),
+                        env=env,
+                        timeout=8,
+                    )
+                    if proc.returncode == 0:
+                        notified_chat = True
+                except Exception:
+                    pass
 
     proposals = []
     goal_data = load_goal(repo_root)
@@ -2197,13 +2324,14 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
 ```
 """
 
+    host_mode = resolve_host()
     env = get_cached_ls_env()
     agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
     title = f"Next Steps Synthesizer: {repo_root.name} @ {short_sha}"
 
     dispatched = False
     conv_id = None
-    if Path(agentapi_bin).exists():
+    if host_mode in ("antigravity", "auto") and Path(agentapi_bin).exists():
         if "language_server" in Path(agentapi_bin).name:
             cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
         else:
@@ -2242,7 +2370,7 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
                 active.append(conv_id)
                 save_state(st)
 
-    if not dispatched:
+    if not dispatched and host_mode in ("claude", "auto"):
         claude_conv_id = spawn_claude_cli_agent(prompt, repo_root, LOGS_DIR / f"synthesis-{repo_slug(repo_root)}.log")
         if claude_conv_id:
             dispatched = True
@@ -2337,9 +2465,10 @@ You are tasked with executing the following approved implementation plan:
 
 Execute this plan step by step, adhering to the plan specifications, writing necessary tests, and verifying results.
 """
+    host_mode = resolve_host()
     env = get_cached_ls_env()
     agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-    if Path(agentapi_bin).exists():
+    if host_mode in ("antigravity", "auto") and Path(agentapi_bin).exists():
         title = f"Next Step: {plan_title}"
         if "language_server" in Path(agentapi_bin).name:
             cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
@@ -2363,7 +2492,9 @@ Execute this plan step by step, adhering to the plan specifications, writing nec
         except Exception:
             pass
 
-    return spawn_claude_cli_agent(prompt, repo_root, LOGS_DIR / f"plan-{repo_slug(repo_root)}.log")
+    if host_mode in ("claude", "auto"):
+        return spawn_claude_cli_agent(prompt, repo_root, LOGS_DIR / f"plan-{repo_slug(repo_root)}.log")
+    return None
 
 
 def get_execution_state_file(repo_root: Path) -> Path:
@@ -2476,6 +2607,12 @@ def cancel_execution(repo_root: Path, plan_id: str) -> Dict[str, Any]:
         matched["summary"] = "Execution was stopped by user. Click Continue Execution to resume."
         conv_id = matched.get("conversationId")
         if conv_id:
+            if conv_id.startswith("claude-pid-"):
+                try:
+                    pid = int(conv_id[len("claude-pid-"):])
+                    os.kill(pid, 15)
+                except Exception:
+                    pass
             remove_active_conversation(conv_id)
         save_execution_state(repo_root, state)
         return {"ok": True, "planId": clean_id, "status": "interrupted"}
@@ -3126,9 +3263,10 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
     log_file = LOGS_DIR / f"agent-{job['id']}.log"
     target_cwd = Path(job["worktree_path"]) if Path(job["worktree_path"]).exists() else Path(job["repo_path"])
 
+    host_mode = resolve_host()
     env = get_cached_ls_env()
     agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-    if Path(agentapi_bin).exists():
+    if host_mode in ("antigravity", "auto") and Path(agentapi_bin).exists():
         if "language_server" in Path(agentapi_bin).name:
             cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
         else:
@@ -3179,18 +3317,19 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
             except Exception:
                 pass
 
-    claude_conv_id = spawn_claude_cli_agent(prompt, target_cwd, log_file)
-    if claude_conv_id:
-        job["conversation_id"] = claude_conv_id
-        track_active_conversation(claude_conv_id)
-        with StateLock():
-            st = load_state()
-            for j in st.get("jobs", []):
-                if j["id"] == job["id"]:
-                    j["conversation_id"] = claude_conv_id
-                    break
-            save_state(st)
-        return True
+    if host_mode in ("claude", "auto"):
+        claude_conv_id = spawn_claude_cli_agent(prompt, target_cwd, log_file)
+        if claude_conv_id:
+            job["conversation_id"] = claude_conv_id
+            track_active_conversation(claude_conv_id)
+            with StateLock():
+                st = load_state()
+                for j in st.get("jobs", []):
+                    if j["id"] == job["id"]:
+                        j["conversation_id"] = claude_conv_id
+                        break
+                save_state(st)
+            return True
 
     return False
 
@@ -3686,7 +3825,7 @@ def send_comment_to_job(job: Dict[str, Any], comment: str) -> Dict[str, Any]:
 
     conv_id = target_j.get("conversation_id") or find_watchdog_conversation_for_job(target_j)
     notified = False
-    if conv_id:
+    if conv_id and not conv_id.startswith("claude-pid-") and resolve_host() != "claude":
         env = get_cached_ls_env()
         agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
         if Path(agentapi_bin).exists():
@@ -3801,7 +3940,7 @@ When your checks and visual verification testing are finished:
 python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{target_job['sha']}" --verdict <PASS|FIXED_ON_BRANCH|NEEDS_ATTENTION> --summary "<concise summary>" --bugs-count <count> --fixes-committed <true|false>
 """
 
-        if conv_id and Path(agentapi_bin).exists():
+        if conv_id and not conv_id.startswith("claude-pid-") and resolve_host() != "claude" and Path(agentapi_bin).exists():
             if "language_server" in Path(agentapi_bin).name:
                 cmd = [agentapi_bin, "agentapi", "send-message", conv_id, continue_msg]
             else:
@@ -3981,6 +4120,7 @@ def main() -> int:
     cache_ls_env()
     p_common = argparse.ArgumentParser(add_help=False)
     p_common.add_argument("--json", action="store_true", help="Output JSON")
+    p_common.add_argument("--host", default="", choices=["", "auto", "antigravity", "claude"], help="Host environment")
 
     parser = argparse.ArgumentParser(description="Antigravity Watchdog Controller", parents=[p_common])
     sub = parser.add_subparsers(dest="cmd")
@@ -4094,6 +4234,8 @@ def main() -> int:
     p_panel.add_argument("--open", action="store_true", help="Open the sidepanel window")
 
     args, _ = parser.parse_known_args()
+    if getattr(args, "host", "") in ("antigravity", "claude"):
+        os.environ["WATCHDOG_HOST"] = args.host
 
     if args.cmd == "panel":
         import panel_launcher
