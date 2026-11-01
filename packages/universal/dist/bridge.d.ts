@@ -1,6 +1,5 @@
 export declare const PLUGIN_ROOT: string;
 export declare const WATCHDOG_CTL_SCRIPT: string;
-export declare const WATCHDOG_STOP_HOOK_SCRIPT: string;
 export declare function getPythonBin(): string;
 export declare function resolveRepo(repo?: string): string;
 export declare function runCtlJson<T = any>(args: string[]): Promise<T>;
@@ -18,12 +17,6 @@ export declare function cancelSynthesis(repo?: string): Promise<any>;
 export declare function manageGoal(repo?: string, goal?: string, clear?: boolean): Promise<any>;
 export declare function executePlan(repo?: string, planId?: string, noSpawn?: boolean): Promise<any>;
 export declare function cancelPlanExecution(repo?: string, planId?: string): Promise<any>;
-export declare function triggerStopHook(payload: {
-    fullyIdle: boolean;
-    terminationReason: string;
-    workspacePaths: string[];
-    conversationId?: string;
-}): Promise<void>;
 export declare function readReportMarkdown(reportPath: string): string;
 export declare function formatStatusReport(status: any, syncInfo?: any): string;
 export declare function formatNextStepsReport(proposalsRes: any): string;

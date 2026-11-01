@@ -1,16 +1,4 @@
 {
-  "description": "Watchdog post-commit isolated worktree audit and next-steps synthesis hook",
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/watchdog_stop_hook.py\"",
-            "timeout": 15
-          }
-        ]
-      }
-    ]
-  }
+  "description": "Watchdog pane, and in-session audit agents with their permissions",
+  "modules": ["./register.tsx"]
 }

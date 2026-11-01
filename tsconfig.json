@@ -1,0 +1,5 @@
+{
+  "extends": "./.claude-plugin/types/tsconfig.json",
+  "compilerOptions": { "allowJs": true },
+  "include": [".claude-plugin/types", "hooks", "types", "tests", "sidecars/panel/view-model.js"]
+}

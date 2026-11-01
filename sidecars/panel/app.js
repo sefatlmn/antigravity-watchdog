@@ -1,5 +1,17 @@
 // Watchdog & Next Steps Sidecar Panel Logic
 
+import {
+  SKIP_TAGS,
+  auditAction,
+  goalText,
+  jobView,
+  partitionJobs,
+  proposalView,
+  selectActiveRepo,
+  stripEmojis,
+  timeAgo,
+} from '/view-model.js';
+
 const sidecar = window.sidecar;
 const hostMode = new URLSearchParams(window.location.search).get('host') || (sidecar?.isStandalone ? 'claude' : 'antigravity');
 const $ = (id) => document.getElementById(id);
@@ -91,14 +103,6 @@ let isRefreshingProposals = false;
 let isSynthesisCancelled = false;
 let isCancellingSynthesis = false;
 let isSyncing = false;
-
-function stripEmojis(str) {
-  if (!str) return '';
-  return String(str)
-    .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{25A0}-\u{25FF}\u{2B50}-\u{2B55}\u{2300}-\u{23FF}]/gu, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 const ICONS = {
   check: `<svg class="icon-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`,
@@ -277,19 +281,7 @@ function renderMarkdown(md) {
 }
 
 function getActiveRepo(data = currentDashboard) {
-  const repos = data?.activeRepos || [];
-  if (repos.length === 0) return null;
-  if (userExplicitlySelectedRepo && selectedRepoPath) {
-    const found = repos.find((r) => r.repoPath === selectedRepoPath);
-    if (found) return found;
-  }
-  if (workspaceUris.length > 0) {
-    const matched = repos.find((r) =>
-      workspaceUris.some((u) => u.includes(r.repoPath) || r.repoPath.includes(u))
-    );
-    if (matched) return matched;
-  }
-  return repos[0];
+  return selectActiveRepo(data, { selectedRepoPath, explicit: userExplicitlySelectedRepo, workspaceUris });
 }
 
 function switchTab(tab) {
@@ -339,23 +331,11 @@ function switchTab(tab) {
 window.switchTab = switchTab;
 
 function renderJobBadge(job) {
-  const status = (job.status || 'queued').toLowerCase();
-  const verdict = (job.verdict || 'PENDING').toUpperCase();
-
-  if (status === 'running' || status === 'queued' || status === 'interrupted') {
-    return '';
-  }
-  if (job.fixes_applied || verdict === 'PASS') {
-    return '';
-  }
-  const hasFix = Boolean(job.fixes_committed || verdict === 'FIXED_ON_BRANCH');
-  if (hasFix && (job.fix_branch || !job.fixes_applied)) {
-    return '<span class="tag fix">Ready</span>';
-  }
-  if (verdict === 'NEEDS_ATTENTION') {
-    return `<span class="tag warn">${ICONS.warn} Issues</span>`;
-  }
-  return `<span class="tag">${escapeHtml(verdict)}</span>`;
+  const { badge } = jobView(job);
+  if (!badge) return '';
+  if (badge.kind === 'fix') return `<span class="tag fix">${badge.label}</span>`;
+  if (badge.kind === 'warn') return `<span class="tag warn">${ICONS.warn} ${badge.label}</span>`;
+  return `<span class="tag">${escapeHtml(badge.label)}</span>`;
 }
 
 function renderDashboard(data) {
@@ -400,45 +380,17 @@ function renderDashboard(data) {
       if (commitSubjectEl) commitSubjectEl.textContent = subject || '(no message)';
       if (commitTimeEl) commitTimeEl.textContent = latest.relativeTime || latest.relative_time || '';
 
-      const matchingJob = (data.jobs || []).find((j) => {
-        const jRepo = (j.repo_path || '').trim();
-        const jSha = (j.sha || '').toLowerCase();
-        const jShortSha = (j.short_sha || '').toLowerCase();
-        const repoMatches = !jRepo || jRepo === activeRepo.repoPath;
-        const shaMatches = (activeSha && jSha === activeSha) || (activeShortSha && jShortSha === activeShortSha);
-        return repoMatches && shaMatches;
-      });
-
-      const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
-      const hasSkipTag = latest.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag));
-      const isAppliedFix = hasSkipTag || (data.jobs || []).some((j) => {
-        const jRepo = (j.repo_path || '').trim();
-        const repoMatches = !jRepo || jRepo === activeRepo.repoPath;
-        const appliedSha = (j.applied_commit_sha || '').toLowerCase();
-        const appliedShortSha = (j.applied_short_sha || '').toLowerCase();
-        return repoMatches && ((activeSha && appliedSha === activeSha) || (activeShortSha && appliedShortSha === activeShortSha));
-      });
-
-      const isIgnoredDocs = Boolean(latest.isDocsOnly);
+      const commentInput = $('input-audit-comment');
+      const action = auditAction(data, activeRepo, commentInput ? commentInput.value : '');
 
       if (commitTagBadge) {
-        commitTagBadge.hidden = !isAppliedFix;
+        commitTagBadge.hidden = !action.isAppliedFix;
       }
 
-      // Check for any currently running or queued job for this repo to prevent double auditing
-      const activeRunningJob = (data.jobs || []).find((j) => {
-        const jRepo = (j.repo_path || '').trim();
-        const repoMatches = !jRepo || jRepo === activeRepo.repoPath;
-        return repoMatches && (j.status === 'running' || j.status === 'queued');
-      });
-
-      const commentInput = $('input-audit-comment');
       if (commentInput) {
-        if (activeRunningJob) {
-          commentInput.placeholder = `Send comment/guidance to in-progress audit (${activeRunningJob.short_sha || activeShortSha})…`;
-        } else {
-          commentInput.placeholder = 'Add a comment or focus note for this audit…';
-        }
+        commentInput.placeholder = action.runningJob
+          ? `Send comment/guidance to in-progress audit (${action.runningJob.short_sha || activeShortSha})…`
+          : 'Add a comment or focus note for this audit…';
       }
 
       if (runBtn) {
@@ -449,57 +401,18 @@ function renderDashboard(data) {
         delete runBtn.dataset.repo;
         delete runBtn.dataset.sha;
 
-        if (activeRunningJob) {
-          const commentVal = commentInput ? commentInput.value.trim() : '';
-          if (commentVal) {
-            runBtn.disabled = false;
-            runBtn.classList.add('accent-btn');
-            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
-            if (runBtnText) runBtnText.textContent = 'Send Comment to Auditor';
-            runBtn.title = `Send your comment to the active audit for commit ${activeRunningJob.short_sha || activeShortSha}.`;
-            runBtn.dataset.action = 'send-comment';
-            runBtn.dataset.jobId = activeRunningJob.id || '';
-            runBtn.dataset.repo = activeRunningJob.repo_path || activeRepo.repoPath || '';
-            runBtn.dataset.sha = activeRunningJob.sha || '';
-          } else {
-            runBtn.disabled = true;
-            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.dots;
-            if (runBtnText) runBtnText.textContent = `Auditing ${activeRunningJob.short_sha || activeShortSha}…`;
-            runBtn.title = `An audit is currently running for commit ${activeRunningJob.short_sha || activeShortSha}. Type a comment above to send guidance.`;
-          }
-        } else if (matchingJob) {
-          if (matchingJob.status === 'interrupted') {
-            runBtn.disabled = false;
-            runBtn.classList.add('accent-btn');
-            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
-            if (runBtnText) runBtnText.textContent = `Continue Audit (${activeShortSha})`;
-            runBtn.title = `The previous audit for ${activeShortSha} was interrupted. Click to continue audit.`;
-            runBtn.dataset.action = 'continue-audit';
-            runBtn.dataset.jobId = matchingJob.id || '';
-            runBtn.dataset.repo = matchingJob.repo_path || activeRepo.repoPath || '';
-            runBtn.dataset.sha = matchingJob.sha || activeSha || '';
-          } else {
-            runBtn.disabled = true;
-            if (runBtnIcon) runBtnIcon.innerHTML = ICONS.check;
-            if (runBtnText) runBtnText.textContent = `Commit ${activeShortSha} Audited`;
-            runBtn.title = `Commit ${activeShortSha} has already been audited. Make a new commit to audit again.`;
-          }
-        } else if (isAppliedFix) {
-          runBtn.disabled = true;
-          if (runBtnIcon) runBtnIcon.innerHTML = ICONS.check;
-          if (runBtnText) runBtnText.textContent = `Commit ${activeShortSha} Verified (Fix Applied)`;
-          runBtn.title = `The latest commit is a verified fix applied to ${activeRepo.branch || 'main'}. Make a new commit to audit again.`;
-        } else if (isIgnoredDocs) {
-          runBtn.disabled = false;
-          runBtn.classList.add('warn-btn');
-          if (runBtnIcon) runBtnIcon.innerHTML = ICONS.warn;
-          if (runBtnText) runBtnText.textContent = `Audit Commit ${activeShortSha} (Docs Only)`;
-          runBtn.title = `Warning: Commit ${activeShortSha} only updated documentation/README files. Click to audit anyway.`;
-        } else {
-          runBtn.disabled = false;
-          if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
-          if (runBtnText) runBtnText.textContent = `Audit Commit ${activeShortSha}`;
-          runBtn.title = `Audit commit ${activeShortSha}`;
+        runBtn.disabled = action.disabled;
+        if (action.tone === 'accent') runBtn.classList.add('accent-btn');
+        if (action.tone === 'warn') runBtn.classList.add('warn-btn');
+        if (runBtnIcon) runBtnIcon.innerHTML = ICONS[action.icon];
+        if (runBtnText) runBtnText.textContent = action.label;
+        runBtn.title = action.title;
+        const actionJob = action.kind === 'send-comment' ? action.runningJob : action.kind === 'continue-audit' ? action.matchingJob : null;
+        if (actionJob) {
+          runBtn.dataset.action = action.kind;
+          runBtn.dataset.jobId = actionJob.id || '';
+          runBtn.dataset.repo = actionJob.repo_path || activeRepo.repoPath || '';
+          runBtn.dataset.sha = actionJob.sha || (action.kind === 'continue-audit' ? activeSha : '') || '';
         }
       }
     } else {
@@ -542,9 +455,7 @@ function renderDashboard(data) {
   }
 
   // Audits Partition
-  const allJobs = data.jobs || [];
-  const recentJobs = allJobs.filter((j) => !j.archived);
-  const archivedJobs = allJobs.filter((j) => Boolean(j.archived));
+  const { recent: recentJobs, archived: archivedJobs } = partitionJobs(data);
 
   const auditsCountEl = $('audits-count');
   if (auditsCountEl) auditsCountEl.textContent = recentJobs.length;
@@ -559,16 +470,7 @@ function renderDashboard(data) {
   const currentBranch = activeRepo?.branch || 'main';
 
   function renderCard(job, isArchived) {
-    const status = (job.status || 'queued').toLowerCase();
-    const isRunning = status === 'running';
-    const isQueued = status === 'queued';
-    const isInterrupted = status === 'interrupted';
-    const isFixedOnBranch = (job.verdict || '').toUpperCase() === 'FIXED_ON_BRANCH';
-    const fixBranch = job.fix_branch || (isFixedOnBranch ? `fix/watchdog-${job.short_sha}` : null);
-    const hasFixToApply = Boolean((job.fixes_committed || isFixedOnBranch) && fixBranch && !job.fixes_applied);
-    const isApplied = Boolean(job.fixes_applied);
-    const isPassed = (job.verdict || '').toUpperCase() === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued && !isInterrupted;
-    const hasReport = Boolean(job.report_path || status === 'completed');
+    const { isRunning, isQueued, isInterrupted, hasFixToApply, isApplied, isPassed, hasReport } = jobView(job);
 
     return `
       <div class="job-item">
@@ -605,7 +507,7 @@ function renderDashboard(data) {
       listEl.innerHTML = `
         <div class="empty-state">
           <p class="muted">No recent audits.</p>
-          <span class="small muted">Audits run automatically after coding turns, or click above to audit now.</span>
+          <span class="small muted">Click above to audit the latest commit.</span>
         </div>
       `;
     } else {
@@ -681,16 +583,8 @@ function renderNextSteps(activeRepo) {
 
   try {
     // 1. Goal Banner
-    const goalData = activeRepo.goal;
-
     if (goalTextEl) {
-      if (goalData && typeof goalData === 'object' && goalData.goal) {
-        goalTextEl.textContent = goalData.goal;
-      } else if (typeof goalData === 'string' && goalData) {
-        goalTextEl.textContent = goalData;
-      } else {
-        goalTextEl.textContent = `Develop and maintain ${activeRepo.repoName}`;
-      }
+      goalTextEl.textContent = goalText(activeRepo);
     }
 
     // 2. Proposal count badge on tab
@@ -747,40 +641,11 @@ function renderNextSteps(activeRepo) {
         }
       } else {
         proposalsList.innerHTML = proposals.map((p) => {
-          const files = Array.isArray(p.affectedFiles) ? p.affectedFiles : (Array.isArray(p.affected_files) ? p.affected_files : []);
-          const filesHtml = files.map((f) => `<span class="file-chip">${escapeHtml(f)}</span>`).join('');
-          
-          const goals = Array.isArray(p.goals) ? p.goals : [];
-          const goalsHtml = goals.map((g) => `<div class="proposal-goal-item"><span class="check">${ICONS.check}</span><span>${escapeHtml(stripEmojis(g))}</span></div>`).join('');
-
-          const rawBadge = p.badge || p.tag || p.category || 'Feature';
-          const badge = stripEmojis(rawBadge) || 'Feature';
-          const difficulty = p.difficulty || p.archetype || 'Medium';
-          const title = stripEmojis(p.title || 'Next Step Plan');
-          const subtitle = stripEmojis(p.subtitle || '');
-          const summary = stripEmojis(p.summary || '');
-          let description = '';
-          if (subtitle && summary) {
-            if (summary.toLowerCase().startsWith(subtitle.toLowerCase())) {
-              description = summary;
-            } else {
-              const sep = /[.!?]$/.test(subtitle) ? ' ' : '. ';
-              description = `${subtitle}${sep}${summary}`;
-            }
-          } else {
-            description = subtitle || summary || '';
-          }
-          const planPath = p.planPath || p.plan_absolute_path || '';
-          const planFile = p.planFile || p.plan_file || '';
-          const planId = p.id || 'plan-1';
-
-          const execution = p.execution || (activeRepo.executions && activeRepo.executions[planId]) || null;
-          const execStatus = (execution?.status || '').toLowerCase();
-          const isExecRunning = execStatus === 'running' || execStatus === 'queued';
-          const isExecCompleted = execStatus === 'completed';
-          const isExecInterrupted = execStatus === 'interrupted';
-          const execSummary = execution?.summary || '';
-          const startedTime = execution?.startedAt ? timeAgo(execution.startedAt) : '';
+          const view = proposalView(p, activeRepo);
+          const { badge, difficulty, title, description, planPath, planFile, isExecRunning, isExecCompleted, isExecInterrupted, execSummary } = view;
+          const planId = view.id;
+          const goalsHtml = view.goals.map((g) => `<div class="proposal-goal-item"><span class="check">${ICONS.check}</span><span>${escapeHtml(g)}</span></div>`).join('');
+          const startedTime = view.startedAt ? timeAgo(view.startedAt) : '';
 
           return `
             <div class="proposal-card" data-proposal-id="${escapeHtml(planId)}">
@@ -1316,7 +1181,6 @@ async function runAudit() {
   }
 
   const latest = activeRepo.youngestCommit || activeRepo.head;
-  const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
   const subject = latest?.subject || '';
   if (latest?.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag))) {
     toast('The latest commit is an applied fix and cannot be re-audited. Make a new commit first.', true);

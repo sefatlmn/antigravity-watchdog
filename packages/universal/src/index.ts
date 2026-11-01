@@ -11,7 +11,6 @@ import {
   cancelSynthesis,
   manageGoal,
   executePlan,
-  triggerStopHook,
   syncRepo,
 } from "./bridge.js";
 
@@ -19,8 +18,6 @@ export default Plugin.define({
   id: "watchdog",
 
   async setup(ctx) {
-    const abortController = new AbortController();
-
     // 1. Register slash commands (CLI/chat-only interface)
     try {
       await ctx.command.transform((editor) => {
@@ -498,42 +495,12 @@ export default Plugin.define({
         editor.update("build", (agent) => {
           if (agent.system) {
             agent.system +=
-              "\n\n[Watchdog Guideline]: When making commits, ensure clean commit messages. Watchdog monitors commits in an isolated git worktree without touching your working tree. Use /watchdog to check review verdicts and /next-steps to view proposed implementation plans.";
+              "\n\n[Watchdog Guideline]: When making commits, ensure clean commit messages. Watchdog audits commits on request in an isolated git worktree without touching your working tree. Use /watchdog audit to request one, /watchdog to check review verdicts and /next-steps to view proposed implementation plans.";
           }
         });
       });
     } catch {
       // fallback
     }
-
-    // 4. Subscribe to session lifecycle events to run post-commit reviews
-    void (async () => {
-      try {
-        const stream = ctx.event.subscribe({ signal: abortController.signal });
-        for await (const event of stream) {
-          if (event.type === "session.status") {
-            const data = (event as any).data;
-            if (data?.status?.type === "idle") {
-              const workspaceDir = (event as any).location?.directory || ctx.location.directory;
-              if (workspaceDir) {
-                triggerStopHook({
-                  fullyIdle: true,
-                  terminationReason: "model_stop",
-                  workspacePaths: [workspaceDir],
-                  conversationId: data.sessionID,
-                }).catch(() => {});
-              }
-            }
-          }
-        }
-      } catch {
-        // stream aborted on plugin unload
-      }
-    })();
-
-    // 5. Cleanup handler
-    return async () => {
-      abortController.abort();
-    };
   },
 });
