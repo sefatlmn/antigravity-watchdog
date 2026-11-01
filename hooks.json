@@ -4,7 +4,7 @@
     "Stop": [
       {
         "type": "command",
-        "command": "python3 /Users/sefa/.gemini/config/plugins/watchdog/scripts/watchdog_stop_hook.py",
+        "command": "python3 \"$HOME/.gemini/config/plugins/watchdog/scripts/watchdog_stop_hook.py\"",
         "timeout": 10
       }
     ]
