@@ -176,11 +176,17 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
 
                 with watchdog_ctl.StateLock():
                     st = watchdog_ctl.load_state()
-                    st.setdefault("repos", {})[repo_key] = {
-                        "name": repo_root.name,
-                        "baseline_sha": youngest_info["sha"],
-                        "updated_at": watchdog_ctl.now_iso(),
-                    }
+                    repo_meta = st.setdefault("repos", {}).setdefault(
+                        repo_key,
+                        {
+                            "name": repo_root.name,
+                            "baseline_sha": running_job.get("sha") or youngest_info["sha"],
+                        },
+                    )
+                    if running_job.get("sha") and youngest_info["sha"] != running_job.get("sha"):
+                        repo_meta["pending_sha"] = youngest_info["sha"]
+                        repo_meta["pending_base_sha"] = running_job.get("sha")
+                    repo_meta["updated_at"] = watchdog_ctl.now_iso()
                     watchdog_ctl.save_state(st)
                 continue
 

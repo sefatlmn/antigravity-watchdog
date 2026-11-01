@@ -46,16 +46,33 @@ class StandaloneSidecarApp {
 
     const server = createServer(async (req, res) => {
       try {
+        const reqHost = String(req.headers.host || '').toLowerCase();
+        if (reqHost && !/^(127\.0\.0\.1|localhost)(:\d+)?$/.test(reqHost)) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: 'Forbidden host header' }));
+          return;
+        }
+
+        const reqOrigin = String(req.headers.origin || '').toLowerCase();
+        if (reqOrigin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(reqOrigin)) {
+          res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ ok: false, error: 'Forbidden cross-origin request' }));
+          return;
+        }
+
         const parsedUrl = new URL(req.url || '/', `http://${host}`);
         const pathname = parsedUrl.pathname;
         const method = (req.method || 'GET').toUpperCase();
 
         if (method === 'OPTIONS') {
-          res.writeHead(204, {
-            'Access-Control-Allow-Origin': '*',
+          const headers = {
             'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
             'Access-Control-Allow-Headers': 'Content-Type, x-sidecar-token',
-          });
+          };
+          if (reqOrigin) {
+            headers['Access-Control-Allow-Origin'] = req.headers.origin;
+          }
+          res.writeHead(204, headers);
           res.end();
           return;
         }
@@ -424,7 +441,23 @@ function reconcileJobs(state) {
       // 3. Check for interruption if no report exists and status is 'running'
       if (j.status === 'running') {
         const convId = j.conversation_id;
-        if (convId) {
+        if (convId && convId.startsWith('claude-pid-')) {
+          const pid = parseInt(convId.slice('claude-pid-'.length), 10);
+          let alive = false;
+          if (!Number.isNaN(pid) && pid > 0) {
+            try {
+              process.kill(pid, 0);
+              alive = true;
+            } catch {
+              alive = false;
+            }
+          }
+          if (!alive) {
+            j.status = 'interrupted';
+            j.summary = 'Claude audit process exited before generating report.';
+            modified = true;
+          }
+        } else if (convId) {
           const tFile = join(homedir(), '.gemini', 'antigravity', 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
           if (existsSync(tFile)) {
             try {
@@ -739,18 +772,52 @@ function inspectSingleRepo(topLevel) {
         }
 
         const convId = item.conversationId;
-        if (convId) {
+        if (convId && convId.startsWith('claude-pid-')) {
+          const pid = parseInt(convId.slice('claude-pid-'.length), 10);
+          let alive = false;
+          if (!Number.isNaN(pid) && pid > 0) {
+            try {
+              process.kill(pid, 0);
+              alive = true;
+            } catch {
+              alive = false;
+            }
+          }
+          if (!alive) {
+            item.status = 'interrupted';
+            item.completedAt = new Date().toISOString();
+            item.summary = 'Claude execution process exited before committing changes. Click Continue Execution to resume.';
+            execsModified = true;
+          }
+        } else if (convId && convId !== 'foreground-agent') {
           const transcriptPath = join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
           if (existsSync(transcriptPath)) {
             try {
               const stat = statSync(transcriptPath);
               const ageSec = (Date.now() - stat.mtimeMs) / 1000;
               if (ageSec > 120) {
-                const content = readFileSync(transcriptPath, 'utf8').trim();
-                const lastLine = content.slice(content.lastIndexOf('\n') + 1);
+                let chunkText = '';
+                if (stat.size > 65536) {
+                  const fd = openSync(transcriptPath, 'r');
+                  const buffer = Buffer.alloc(65536);
+                  readSync(fd, buffer, 0, 65536, stat.size - 65536);
+                  closeSync(fd);
+                  chunkText = buffer.toString('utf8');
+                } else {
+                  chunkText = readFileSync(transcriptPath, 'utf8');
+                }
+                const lines = chunkText.trim().split('\n');
+                let lastLine = '';
+                for (let i = lines.length - 1; i >= 0; i--) {
+                  const candidate = lines[i].trim();
+                  if (candidate.startsWith('{')) {
+                    lastLine = candidate;
+                    break;
+                  }
+                }
                 if (lastLine.startsWith('{')) {
                   const parsed = JSON.parse(lastLine);
-                  if (parsed.status === 'ERROR' || parsed.status === 'CANCELLED') {
+                  if (parsed.status === 'ERROR' || parsed.status === 'CANCELLED' || parsed.status === 'CANCELED') {
                     item.status = 'interrupted';
                     item.completedAt = new Date().toISOString();
                     item.summary = 'Agent execution was interrupted or cancelled. Click Continue Execution to resume.';
@@ -1151,17 +1218,27 @@ app.api('/api/send-comment', (data) => {
   return runPythonCtl(ctlArgs);
 });
 
+function isAllowedArtifactPath(filePath) {
+  if (!filePath) return false;
+  const resolved = resolve(String(filePath).trim());
+  if (!resolved.endsWith('.md') && !resolved.endsWith('.json')) {
+    return false;
+  }
+  return resolved.includes('/.antigravity/') || resolved.startsWith(WATCHDOG_DIR);
+}
+
 // POST /api/report { reportPath }
 app.api('/api/report', (data) => {
   const reportPath = String(data?.reportPath || '').trim();
-  if (!reportPath || !existsSync(reportPath)) {
+  if (!reportPath || !isAllowedArtifactPath(reportPath) || !existsSync(reportPath)) {
     return { exists: false, content: '' };
   }
   try {
+    const resolved = resolve(reportPath);
     return {
       exists: true,
-      reportPath,
-      content: readFileSync(reportPath, 'utf8'),
+      reportPath: resolved,
+      content: readFileSync(resolved, 'utf8'),
     };
   } catch (err) {
     return { exists: false, error: err.message, content: '' };
@@ -1295,11 +1372,11 @@ app.api('/api/next-steps/plan', (data) => {
   const planFile = String(data?.planFile || '').trim();
   let target = '';
   if (planPath && existsSync(planPath)) {
-    target = planPath;
+    target = resolve(planPath);
   } else if (repo && planFile && existsSync(join(repo, planFile))) {
-    target = join(repo, planFile);
+    target = resolve(join(repo, planFile));
   }
-  if (!target || !existsSync(target)) {
+  if (!target || !isAllowedArtifactPath(target) || !existsSync(target)) {
     return { ok: false, error: 'Plan file not found' };
   }
   try {

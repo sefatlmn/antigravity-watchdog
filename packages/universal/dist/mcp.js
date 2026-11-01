@@ -249,7 +249,7 @@ async function handleToolCall(name, args = {}) {
                 if (!args.planId) {
                     return { text: "Error: planId is required (e.g. '1', '2', '3', '4').", isError: true };
                 }
-                const res = await executePlan(args.repo, String(args.planId));
+                const res = await executePlan(args.repo, String(args.planId), true);
                 if (!res?.ok || !res?.prompt) {
                     return { text: `Could not load plan #${args.planId}: ${res?.error || "Plan file not found."}`, isError: true };
                 }
@@ -269,6 +269,7 @@ async function handleToolCall(name, args = {}) {
                     text: res?.goal ? `Current milestone goal: "${res.goal}"` : "No goal currently set.",
                 };
             }
+            case "watchdog_send_comment":
             case "watchdog_comment": {
                 if (!args.comment) {
                     return { text: "Error: comment is required.", isError: true };

@@ -16,7 +16,7 @@ export declare function checkSynthesis(repo?: string): Promise<any>;
 export declare function dispatchSynthesis(repo?: string): Promise<any>;
 export declare function cancelSynthesis(repo?: string): Promise<any>;
 export declare function manageGoal(repo?: string, goal?: string, clear?: boolean): Promise<any>;
-export declare function executePlan(repo?: string, planId?: string): Promise<any>;
+export declare function executePlan(repo?: string, planId?: string, noSpawn?: boolean): Promise<any>;
 export declare function cancelPlanExecution(repo?: string, planId?: string): Promise<any>;
 export declare function openPanel(repo?: string, openWindow?: boolean): Promise<any>;
 export declare function triggerStopHook(payload: {

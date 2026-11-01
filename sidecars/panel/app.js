@@ -178,8 +178,14 @@ function escapeHtml(str) {
 function parseInlineMd(text) {
   let s = escapeHtml(text);
   s = s.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/`([^`]+)`/g, '<code>$1</strong>'.replace('strong', 'code'));
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, rawUrl) => {
+    const cleanUrl = String(rawUrl || '').trim();
+    if (/^(https?:\/\/|#|\/)/i.test(cleanUrl)) {
+      return `<a href="${cleanUrl}" target="_blank" rel="noopener">${label}</a>`;
+    }
+    return `${label} (${cleanUrl})`;
+  });
   return s;
 }
 

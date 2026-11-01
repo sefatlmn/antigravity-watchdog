@@ -184,10 +184,14 @@ export async function manageGoal(repo?: string, goal?: string, clear = false): P
   return runCtlJson(args);
 }
 
-export async function executePlan(repo?: string, planId?: string): Promise<any> {
+export async function executePlan(repo?: string, planId?: string, noSpawn = false): Promise<any> {
   const targetRepo = resolveRepo(repo);
   const id = planId || "1";
-  return runCtlJson(["execute-plan", "--repo", targetRepo, "--plan-id", id]);
+  const args = ["execute-plan", "--repo", targetRepo, "--plan-id", id];
+  if (noSpawn) {
+    args.push("--no-spawn");
+  }
+  return runCtlJson(args);
 }
 
 export async function cancelPlanExecution(repo?: string, planId?: string): Promise<any> {
@@ -253,15 +257,16 @@ export function formatStatusReport(status: any, syncInfo?: any): string {
   }
 
   if (latestJob) {
-    const shortSha = latestJob.shortSha || latestJob.sha?.slice(0, 7);
+    const shortSha = latestJob.short_sha || latestJob.shortSha || latestJob.sha?.slice(0, 7);
     output += `\n### Latest Audit (\`${shortSha}\`)\n`;
     output += `- **Verdict**: ${latestJob.verdict || "UNKNOWN"}\n`;
     output += `- **Status**: ${latestJob.status || "completed"}\n`;
     if (latestJob.summary) {
       output += `- **Summary**: ${latestJob.summary}\n`;
     }
-    if (latestJob.fixSha || latestJob.fixBranch) {
-      output += `- **Fix Branch**: \`${latestJob.fixBranch || `fix/watchdog-${shortSha}`}\`\n`;
+    const fixBranch = latestJob.fix_branch || latestJob.fixBranch;
+    if ((latestJob.fixes_committed || latestJob.fixSha || fixBranch) && !latestJob.fixes_applied) {
+      output += `- **Fix Branch**: \`${fixBranch || `fix/watchdog-${shortSha}`}\`\n`;
     }
   } else {
     output += `\nNo recent audits recorded.\n`;

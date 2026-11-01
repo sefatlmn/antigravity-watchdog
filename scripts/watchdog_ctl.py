@@ -76,19 +76,27 @@ def default_state() -> Dict[str, Any]:
 
 
 class StateLock:
-    def __init__(self) -> None:
-        ensure_dirs()
-        self.fp = open(LOCK_FILE, "w")
+    _depth: int = 0
+    _fp: Optional[Any] = None
 
     def __enter__(self) -> "StateLock":
-        fcntl.flock(self.fp.fileno(), fcntl.LOCK_EX)
+        if StateLock._depth == 0:
+            ensure_dirs()
+            StateLock._fp = open(LOCK_FILE, "w")
+            fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_EX)
+        StateLock._depth += 1
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        try:
-            fcntl.flock(self.fp.fileno(), fcntl.LOCK_UN)
-        finally:
-            self.fp.close()
+        StateLock._depth = max(0, StateLock._depth - 1)
+        if StateLock._depth == 0 and StateLock._fp is not None:
+            try:
+                fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
+            finally:
+                try:
+                    StateLock._fp.close()
+                finally:
+                    StateLock._fp = None
 
 
 def load_state() -> Dict[str, Any]:
@@ -108,7 +116,7 @@ def save_state(state: Dict[str, Any]) -> None:
     ensure_dirs()
     if len(state.get("jobs", [])) > 100:
         state["jobs"] = state["jobs"][:100]
-    tmp_file = STATE_FILE.with_suffix(".tmp")
+    tmp_file = STATE_FILE.with_name(f"state.{os.getpid()}.tmp")
     tmp_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp_file.replace(STATE_FILE)
 
@@ -1759,6 +1767,9 @@ flowchart TD
     }
     proposals_file.write_text(json.dumps(cache_data, indent=2), encoding="utf-8")
 
+    exec_data = load_execution_state(repo_root)
+    executions = exec_data.get("executions", {})
+
     return {
         "ok": True,
         "repo": str(repo_root),
@@ -1775,14 +1786,32 @@ flowchart TD
 
 def is_conversation_active(conv_id: str, max_age_seconds: int = 900) -> bool:
     """
-    Check if an Antigravity subagent conversation is actively running.
-    Inspects the transcript log in ~/.gemini/antigravity/brain/<conv_id>/.system_generated/logs/transcript.jsonl
+    Check if an Antigravity subagent conversation or Claude CLI process is actively running.
+    Inspects PID liveness for `claude-pid-*` or transcript log in
+    ~/.gemini/antigravity/brain/<conv_id>/.system_generated/logs/transcript.jsonl
     """
     if not conv_id:
         return False
-    t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
-    if not t_file.exists():
+    if conv_id == "foreground-agent":
         return True
+    if conv_id.startswith("claude-pid-"):
+        try:
+            pid = int(conv_id.split("claude-pid-", 1)[1].strip())
+            os.kill(pid, 0)
+            return True
+        except (ValueError, ProcessLookupError, OSError):
+            return False
+
+    conv_dir = BRAIN_DIR / conv_id
+    t_file = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+    if not t_file.exists():
+        if conv_dir.exists():
+            try:
+                if (datetime.datetime.now().timestamp() - conv_dir.stat().st_mtime) < 60:
+                    return True
+            except Exception:
+                pass
+        return False
 
     try:
         mtime = t_file.stat().st_mtime
@@ -2490,17 +2519,22 @@ def reconcile_executions(repo_root: Path) -> Dict[str, Any]:
                 item["conversationId"] = conv_id
                 modified = True
 
-        if conv_id:
+        if conv_id and conv_id != "foreground-agent":
             if not is_conversation_active(conv_id, max_age_seconds=120):
                 t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
                 if t_file.exists():
                     try:
                         last_line = ""
-                        with open(t_file, "r", encoding="utf-8", errors="ignore") as fp:
-                            for line in fp:
+                        with open(t_file, "rb") as fp:
+                            fp.seek(0, 2)
+                            size = fp.tell()
+                            fp.seek(max(0, size - 65536), 0)
+                            chunk = fp.read().decode("utf-8", errors="ignore")
+                            for line in reversed(chunk.splitlines()):
                                 line = line.strip()
                                 if line.startswith("{"):
                                     last_line = line
+                                    break
                         if last_line:
                             parsed = json.loads(last_line)
                             step_status = parsed.get("status")
@@ -2528,7 +2562,7 @@ def reconcile_executions(repo_root: Path) -> Dict[str, Any]:
                 else:
                     item["status"] = "interrupted"
                     item["completedAt"] = now_iso()
-                    item["summary"] = "Agent conversation transcript not found. Click Continue Execution to resume."
+                    item["summary"] = "Agent process exited before committing changes. Click Continue Execution to resume."
                     modified = True
                 remove_active_conversation(conv_id)
         else:
@@ -2551,7 +2585,7 @@ def reconcile_executions(repo_root: Path) -> Dict[str, Any]:
     return {"ok": True, "executions": executions}
 
 
-def execute_plan_in_agent(repo_root: Path, plan_id: str) -> Dict[str, Any]:
+def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = True) -> Dict[str, Any]:
     """
     Prepare prompt or launch detached agent conversation for an approved next step plan.
     Tracks execution status and progress in execution_state.json.
@@ -2590,7 +2624,7 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str) -> Dict[str, Any]:
         plan_content = plan_path.read_text(encoding="utf-8")
         title = matched["title"]
 
-        conv_id = spawn_plan_agent(repo_root, title, plan_content)
+        conv_id = spawn_plan_agent(repo_root, title, plan_content) if spawn_agent else "foreground-agent"
         prompt_text = f"[NEXT-STEPS-SESSION]\nImplement the approved plan '{title}':\n\n{plan_content}"
 
         exec_record = mark_execution_running(repo_root, clean_id, conv_id, title)
@@ -2599,7 +2633,7 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str) -> Dict[str, Any]:
             "ok": True,
             "planId": clean_id,
             "title": title,
-            "dispatched": bool(conv_id),
+            "dispatched": bool(conv_id and conv_id != "foreground-agent"),
             "conversationId": conv_id,
             "prompt": prompt_text,
             "execution": exec_record,
@@ -2815,6 +2849,17 @@ DOC_FILENAMES = {
 }
 
 
+def resolve_base_sha(repo_root: Path, sha: str, base_sha: str = "") -> str:
+    if base_sha:
+        rc, out, _ = run_git(repo_root, ["rev-parse", "--verify", f"{base_sha}^{{commit}}"])
+        if rc == 0 and out:
+            return out.strip()
+    rc_p, parent_out, _ = run_git(repo_root, ["rev-parse", "--verify", f"{sha}~1"])
+    if rc_p == 0 and parent_out:
+        return parent_out.strip()
+    return EMPTY_TREE_HASH
+
+
 def is_docs_only_commit(repo_root: Path, sha: str, base_sha: str = "") -> bool:
     rc_log, subject, _ = run_git(repo_root, ["log", "-1", "--format=%s", sha])
     subject = subject.lower().strip()
@@ -2830,7 +2875,7 @@ def is_docs_only_commit(repo_root: Path, sha: str, base_sha: str = "") -> bool:
     if not files:
         return True
 
-    parent = base_sha or f"{sha}~1"
+    parent = resolve_base_sha(repo_root, sha, base_sha)
     for f in files:
         if f.startswith(".antigravity/"):
             continue
@@ -2861,6 +2906,50 @@ def repo_slug(repo_root: Path) -> str:
     safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", repo_root.name).strip("-") or "repo"
     short_hash = hashlib.sha1(str(repo_root).encode("utf-8")).hexdigest()[:6]
     return f"{safe_name}-{short_hash}"
+
+
+def prune_stale_worktrees(max_age_hours: float = 48.0) -> Dict[str, Any]:
+    """
+    Remove abandoned worktrees in WORKTREES_DIR that are older than max_age_hours
+    and not tied to an actively running job or an unapplied fix branch.
+    """
+    ensure_dirs()
+    state = load_state()
+    protected_paths = set()
+    now_ts = datetime.datetime.now().timestamp()
+    for j in state.get("jobs", []):
+        wt = j.get("worktree_path")
+        if not wt:
+            continue
+        status = j.get("status")
+        if status in ("running", "queued"):
+            protected_paths.add(str(Path(wt).resolve()))
+        elif j.get("fixes_committed") and not j.get("fixes_applied"):
+            # Keep unapplied fix worktrees up to max_age_hours
+            pass
+
+    removed: List[str] = []
+    if WORKTREES_DIR.exists():
+        for entry in WORKTREES_DIR.iterdir():
+            if not entry.is_dir():
+                continue
+            resolved_str = str(entry.resolve())
+            if resolved_str in protected_paths:
+                continue
+            try:
+                age_hours = (now_ts - entry.stat().st_mtime) / 3600.0
+            except Exception:
+                age_hours = max_age_hours + 1.0
+            if age_hours >= max_age_hours:
+                shutil.rmtree(entry, ignore_errors=True)
+                removed.append(entry.name)
+
+    for repo_path_str in state.get("repos", {}).keys():
+        rp = Path(repo_path_str)
+        if rp.exists():
+            run_git(rp, ["worktree", "prune"])
+
+    return {"ok": True, "removed": removed, "count": len(removed)}
 
 
 def ensure_git_exclude(repo_root: Path) -> None:
@@ -2912,6 +3001,7 @@ def prepare_worktree(repo_root: Path, sha: str) -> Tuple[Path, str, Path]:
         rc, _, _ = run_git(worktree_path, ["rev-parse", "--is-inside-work-tree"])
         if rc != 0:
             shutil.rmtree(worktree_path, ignore_errors=True)
+            run_git(repo_root, ["worktree", "prune"])
         else:
             # Reset existing worktree to clean full_sha on fix_branch
             run_git(worktree_path, ["checkout", "-B", fix_branch, full_sha])
@@ -2925,13 +3015,21 @@ def prepare_worktree(repo_root: Path, sha: str) -> Tuple[Path, str, Path]:
             timeout=30,
         )
         if rc != 0:
-            rc2, _, err2 = run_git(
+            # If fix_branch is locked by a stale worktree, prune and retry once before falling back
+            run_git(repo_root, ["worktree", "prune"])
+            rc_retry, _, _ = run_git(
                 repo_root,
-                ["worktree", "add", "--detach", str(worktree_path), full_sha],
+                ["worktree", "add", "--force", "-B", fix_branch, str(worktree_path), full_sha],
                 timeout=30,
             )
-            if rc2 != 0:
-                raise RuntimeError(f"Failed to create git worktree: {err} / {err2}")
+            if rc_retry != 0:
+                rc2, _, err2 = run_git(
+                    repo_root,
+                    ["worktree", "add", "--detach", str(worktree_path), full_sha],
+                    timeout=30,
+                )
+                if rc2 != 0:
+                    raise RuntimeError(f"Failed to create git worktree: {err} / {err2}")
 
     primary_nm = repo_root / "node_modules"
     wt_nm = worktree_path / "node_modules"
@@ -2957,7 +3055,7 @@ def build_watchdog_prompt(job: Dict[str, Any]) -> str:
     repo_path = job["repo_path"]
     sha = job["sha"]
     short_sha = job["short_sha"]
-    base_sha = job.get("base_sha") or f"{sha}~1"
+    base_sha = resolve_base_sha(Path(repo_path), sha, job.get("base_sha") or "")
     commit_msg = job.get("commit_msg", "")
     worktree_path = job["worktree_path"]
     fix_branch = job["fix_branch"]
@@ -2990,6 +3088,7 @@ First, read your operating skill instructions using `view_file`:
 1. **Code & Diff Audit (in `{worktree_path}`)**:
    - Inspect `git show --stat {sha}` and `git diff {base_sha}..{sha}` inside `{worktree_path}`.
    - Run applicable static checks (typecheck, linter, unit tests) inside `{worktree_path}`.
+   - Do NOT run package installation commands (`npm install`, `pnpm install`, `yarn`, `pip install`) inside `{worktree_path}`, as `node_modules` and `.venv` are symlinked to the primary repository.
    - Evaluate correctness, edge cases, security, architecture, performance, functionality, and scalability.
 
 2. **Live Visual & Functional Verification (Playwright MCP)**:
@@ -3134,11 +3233,14 @@ def queue_commit(
                 break
 
         if running_job:
-            state.setdefault("repos", {})[repo_key] = {
-                "name": repo_root.name,
-                "baseline_sha": full_sha,
-                "updated_at": now_iso(),
-            }
+            repo_meta = state.setdefault("repos", {}).setdefault(
+                repo_key,
+                {"name": repo_root.name, "baseline_sha": running_job.get("sha") or full_sha},
+            )
+            if running_job.get("sha") and running_job.get("sha") != full_sha:
+                repo_meta["pending_sha"] = full_sha
+                repo_meta["pending_base_sha"] = running_job.get("sha")
+            repo_meta["updated_at"] = now_iso()
             save_state(state)
 
             comment_to_send = user_comment.strip()
@@ -3173,6 +3275,7 @@ def queue_commit(
             return state["jobs"][existing_idx]
 
         worktree_path, fix_branch, report_path = prepare_worktree(repo_root, full_sha)
+        resolved_base = resolve_base_sha(repo_root, full_sha, base_sha or info.get("parent_sha", ""))
 
         job: Dict[str, Any] = {
             "id": job_id,
@@ -3180,7 +3283,7 @@ def queue_commit(
             "repo_name": repo_root.name,
             "sha": full_sha,
             "short_sha": short_sha,
-            "base_sha": base_sha or info.get("parent_sha") or f"{full_sha}~1",
+            "base_sha": resolved_base,
             "commit_msg": info["subject"],
             "user_comment": user_comment.strip() if user_comment else None,
             "author": info["author"],
@@ -3249,9 +3352,17 @@ def complete_job(
     report_json = audits_dir / f"review-{short_sha}.json"
 
     has_branch_commits = fixes_committed
+    if worktree_path.exists():
+        rc_wt, wt_ahead, _ = run_git(worktree_path, ["rev-list", "--count", f"{full_sha}..HEAD"])
+        if rc_wt == 0 and wt_ahead.isdigit() and int(wt_ahead) > 0:
+            has_branch_commits = True
+            _, wt_head_sha, _ = run_git(worktree_path, ["rev-parse", "HEAD"])
+            if wt_head_sha.strip():
+                run_git(repo_root, ["branch", "-f", fix_branch, wt_head_sha.strip()])
+
     rc, ahead_out, _ = run_git(repo_root, ["rev-list", "--count", f"{full_sha}..{fix_branch}"])
-    if rc == 0 and ahead_out.isdigit():
-        has_branch_commits = int(ahead_out) > 0
+    if rc == 0 and ahead_out.isdigit() and int(ahead_out) > 0:
+        has_branch_commits = True
 
     if has_branch_commits and verdict == "PASS":
         verdict = "FIXED_ON_BRANCH"
@@ -3279,6 +3390,8 @@ def complete_job(
     }
     report_json.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
 
+    next_pending_sha = ""
+    next_pending_base = ""
     with StateLock():
         state = load_state()
         matched = False
@@ -3309,7 +3422,25 @@ def complete_job(
                     "worktree_path": str(worktree_path),
                 },
             )
+        repo_meta = state.get("repos", {}).get(str(repo_root))
+        if isinstance(repo_meta, dict) and repo_meta.get("pending_sha"):
+            cand_sha = str(repo_meta.pop("pending_sha", "")).strip()
+            cand_base = str(repo_meta.pop("pending_base_sha", "")).strip()
+            if cand_sha and cand_sha != full_sha:
+                next_pending_sha = cand_sha
+                next_pending_base = cand_base or full_sha
         save_state(state)
+
+    try:
+        prune_stale_worktrees(max_age_hours=48.0)
+    except Exception:
+        pass
+
+    if next_pending_sha:
+        try:
+            queue_commit(repo_root, sha=next_pending_sha, base_sha=next_pending_base, dispatch_now=True)
+        except Exception:
+            pass
 
     return result_payload
 
@@ -3712,8 +3843,8 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
     full_sha = info["sha"] if info else sha
     fix_branch = f"fix/watchdog-{short_sha}"
 
-    # 1. Check if the active working tree has uncommitted modifications
-    rc_st, st_out, _ = run_git(repo_root, ["status", "--porcelain"])
+    # 1. Check if the active working tree has uncommitted tracked modifications
+    rc_st, st_out, _ = run_git(repo_root, ["status", "--porcelain", "--untracked-files=no"])
     if rc_st == 0 and st_out.strip():
         dirty_lines = [l for l in st_out.splitlines() if not l.strip().endswith(".antigravity/") and ".antigravity/" not in l]
         if dirty_lines:
@@ -3735,9 +3866,14 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
 
     commits = [c.strip() for c in commits_out.splitlines() if c.strip()]
 
-    # 4. Get active branch name
+    # 4. Get active branch name and guard against detached HEAD
     _, current_branch, _ = run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
     current_branch = current_branch.strip() or "HEAD"
+    if current_branch == "HEAD":
+        return {
+            "ok": False,
+            "error": "Repository is in detached HEAD state. Please checkout a branch before applying fixes.",
+        }
 
     # Check if changes on fix_branch are already present in current_branch
     rc_d, diff_out, _ = run_git(repo_root, ["diff", f"{current_branch}..{fix_branch}"])
@@ -3923,6 +4059,10 @@ def main() -> int:
     p_exec = sub.add_parser("execute-plan", help="Launch or prepare agent prompt for an approved next step plan", parents=[p_common])
     p_exec.add_argument("--repo", required=True)
     p_exec.add_argument("--plan-id", required=True)
+    p_exec.add_argument("--no-spawn", action="store_true", help="Do not spawn a background worker when called from an active foreground chat")
+
+    p_prune = sub.add_parser("prune", help="Prune abandoned Git worktrees older than max-age-hours", parents=[p_common])
+    p_prune.add_argument("--max-age-hours", type=float, default=48.0)
 
     p_cancel_exec = sub.add_parser("cancel-execution", help="Cancel / stop an ongoing next step plan execution", parents=[p_common])
     p_cancel_exec.add_argument("--repo", required=True)
@@ -4203,7 +4343,12 @@ def main() -> int:
 
     if args.cmd == "execute-plan":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve()
-        res = execute_plan_in_agent(root, args.plan_id)
+        res = execute_plan_in_agent(root, args.plan_id, spawn_agent=not getattr(args, "no_spawn", False))
+        print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "prune":
+        res = prune_stale_worktrees(max_age_hours=float(getattr(args, "max_age_hours", 48.0)))
         print(json.dumps(res, indent=2))
         return 0
 
