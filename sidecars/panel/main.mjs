@@ -11,6 +11,11 @@ const WATCHDOG_CTL_SCRIPT = join(PLUGIN_ROOT, 'scripts', 'watchdog_ctl.py');
 const WATCHDOG_DIR = join(homedir(), '.gemini', 'antigravity', 'watchdog');
 const STATE_FILE = join(WATCHDOG_DIR, 'state.json');
 const CLAUDE_SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
+const isStandaloneMode = Boolean(
+  process.env.CLAUDE_PLUGIN_ROOT ||
+  process.env.CLAUDECODE === '1' ||
+  process.env.WATCHDOG_HOST === 'claude'
+);
 
 const app = new SidecarApp();
 

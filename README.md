@@ -6,7 +6,7 @@ Watchdog operates non-intrusively in isolated Git worktrees. It verifies code co
 
 Supported environments:
 - **Google Antigravity**: Native plugin with visual companion panel, lifecycle hooks, and skills.
-- **Claude Code**: Native plugin (`.claude-plugin/plugin.json`) with live Sidepanel UI (`sidecars/panel/`), automatic `SessionStart` & `Stop` hooks, subagents, slash commands (`/panel`, `/watchdog`, `/next-steps`, `/apply-fix`, `/goal`), and MCP server — 100% shared codebase with Antigravity.
+- **Claude Code**: Native plugin (`.claude-plugin/plugin.json`) with a `Stop` hook, subagents, slash commands (`/watchdog`, `/next-steps`, `/apply-fix`, `/goal`), and MCP server.
 - **OpenCode Desktop**: Native plugin with chat commands and agent tools (backwards-compatible).
 - **Cursor & Windsurf**: Standard stdio MCP integration.
 - **OpenAI Codex & Custom Agents**: Structured CLI tools and agent rules.
@@ -35,9 +35,9 @@ git clone git@github.com:sefatlmn/antigravity-watchdog.git ~/.gemini/config/plug
 To enable:
 1. Open Antigravity Settings -> Plugins.
 2. Ensure Watchdog is enabled.
-3. The companion panel opens from the side pane or runs as a sidecar dashboard.
+3. Open the Watchdog view from the side pane. Antigravity manages the bundled sidecar.
 
-The repository root is a native Antigravity plugin containing lifecycle hooks (`hooks.json`), agent rules (`rules/AGENTS.md`), agent skills (`skills/`), and the webview panel (`sidecars/panel/`).
+The repository root is a native Antigravity plugin containing lifecycle hooks (`hooks.json`), agent rules (`rules/AGENTS.md`), agent skills (`skills/`), and the sidecar-backed panel (`sidecars/panel/`).
 
 ---
 
@@ -63,9 +63,9 @@ node ~/.gemini/config/plugins/watchdog/packages/universal/bin/watchdog.js setup 
 
 ### Editor Integrations
 
-#### 1. Claude Code (Native Plugin + Sidepanel UI)
+#### 1. Claude Code (Native Plugin)
 
-The repository root is a native Claude Code plugin sharing the exact same codebase, skills, hooks, controller, and live Sidepanel UI (`sidecars/panel/`) as Antigravity.
+The repository root is a native Claude Code plugin with bundled skills, agents, slash commands, a `Stop` hook, and an MCP server. The Antigravity sidecar panel is not launched by the Claude Code plugin.
 
 **Option A — Launch directly with `--plugin-dir`:**
 
@@ -79,13 +79,12 @@ Inside Claude Code, run:
 
 ```text
 /plugin marketplace add ~/.gemini/config/plugins/watchdog
-/plugin install watchdog@watchdog-local
+/plugin install watchdog@watchdog-marketplace
 ```
 
-When a Claude Code session starts (`SessionStart` hook), Watchdog automatically launches the shared Sidepanel UI daemon on `http://127.0.0.1:4891` and opens a right-docked companion window synced to your active repository. When a turn finishes (`Stop` hook), Watchdog inspects new commits and dispatches isolated Git worktree audits and Next Steps synthesis automatically.
+When a Claude Code turn finishes, the plugin's `Stop` hook checks for new commits and can dispatch isolated Git worktree audits and Next Steps synthesis. The plugin does not currently register a `SessionStart` hook or launch the Antigravity sidecar panel in Claude Code.
 
 Commands available in Claude Code:
-- `/panel` (or `/watchdog:panel`): Launch or focus the live Watchdog Sidepanel UI window.
 - `/watchdog` (or `/watchdog:watchdog`): Review status, trigger audits, forward notes to active auditors, or apply fixes.
 - `/next-steps` (or `/watchdog:next-steps`): Synthesize 4 `/plan`-compliant proposals or execute a plan.
 - `/apply-fix` (or `/watchdog:apply-fix`): Cherry-pick verified fixes from an isolated `fix/watchdog-<sha>` branch.
@@ -107,7 +106,7 @@ Add the server to `.cursor/mcp.json` or your Windsurf MCP configuration:
     "watchdog": {
       "command": "node",
       "args": [
-        "/Users/sefa/.gemini/config/plugins/watchdog/packages/universal/dist/mcp.js"
+        "/absolute/path/to/antigravity-watchdog/packages/universal/dist/mcp.js"
       ]
     }
   }
@@ -121,12 +120,12 @@ Add the package path to `~/.config/opencode/opencode.json` (or project-level `op
 ```json
 {
   "plugins": [
-    "/Users/sefa/.gemini/config/plugins/watchdog/packages/universal"
+    "/absolute/path/to/antigravity-watchdog/packages/universal"
   ]
 }
 ```
 
-Existing configurations pointing to `/Users/sefa/.gemini/config/plugins/watchdog/packages/opencode` continue to resolve through the backwards-compatible symlink.
+Replace the example path with the absolute path to your checkout. The legacy `packages/opencode` path is a symlink to `packages/universal`.
 
 #### 4. OpenAI Codex & Agent Rules
 
@@ -149,7 +148,6 @@ When connected via MCP, the following tools are available to agents:
 | `watchdog_comment` | Send guidance or focus notes to an in-progress Watchdog audit |
 | `watchdog_continue` | Resume an interrupted audit or check completed audit report |
 | `watchdog_cancel_synthesis` | Cancel an ongoing next-steps synthesis turn |
-| `watchdog_open_panel` | Launch and open the live Watchdog Sidepanel UI for the current repository |
 
 MCP Prompts exposed:
 - `watchdog_audit`: Instructions and testing guidelines for reviewing commits.
@@ -182,9 +180,6 @@ You can execute Watchdog directly from the command line or scripts:
 
 # Inspect or set project milestone goal
 ./packages/universal/bin/watchdog.js goal --set "Ship production v2 release"
-
-# Open the live Watchdog Sidepanel UI
-./packages/universal/bin/watchdog.js panel
 
 # Start the MCP stdio server
 ./packages/universal/bin/watchdog.js mcp
