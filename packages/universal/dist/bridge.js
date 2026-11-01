@@ -24,7 +24,6 @@ function findPluginRoot(startDir) {
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const PLUGIN_ROOT = findPluginRoot(HERE);
 export const WATCHDOG_CTL_SCRIPT = join(PLUGIN_ROOT, "scripts", "watchdog_ctl.py");
-export const WATCHDOG_STOP_HOOK_SCRIPT = join(PLUGIN_ROOT, "scripts", "watchdog_stop_hook.py");
 let resolvedPythonBin = null;
 export function getPythonBin() {
     if (resolvedPythonBin)
@@ -192,28 +191,6 @@ export async function cancelPlanExecution(repo, planId) {
     const targetRepo = resolveRepo(repo);
     const id = planId || "1";
     return runCtlJson(["cancel-execution", "--repo", targetRepo, "--plan-id", id]);
-}
-export async function triggerStopHook(payload) {
-    const py = getPythonBin();
-    const jsonStr = JSON.stringify(payload);
-    try {
-        const child = execFile(py, [WATCHDOG_STOP_HOOK_SCRIPT], {
-            cwd: PLUGIN_ROOT,
-            timeout: 30000,
-            env: { ...process.env, WATCHDOG_HOST: process.env.WATCHDOG_HOST || "claude" },
-        });
-        if (child.stdin) {
-            child.stdin.write(jsonStr);
-            child.stdin.end();
-        }
-        await new Promise((resolvePromise) => {
-            child.on("close", () => resolvePromise());
-            child.on("error", () => resolvePromise());
-        });
-    }
-    catch {
-        // Non-blocking background trigger
-    }
 }
 export function readReportMarkdown(reportPath) {
     if (existsSync(reportPath)) {

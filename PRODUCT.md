@@ -17,7 +17,7 @@ Autonomous post-commit code review, visual verification, and sequential next-ste
 ## Positioning
 
 Zero-friction assurance and intelligent momentum. Unlike static linters, detached external CI dashboards, or intrusive modal blockers, Watchdog:
-- Listens to coding agent stop events and audits committed snapshots in isolated Git worktrees using Playwright MCP.
+- Audits committed snapshots on request in isolated Git worktrees using Playwright MCP.
 - Commits verified bug fixes directly to isolated `fix/watchdog-<short_sha>` branches for one-click application to the active branch.
 - Inspects repository state, commit history, and linked conversations to synthesize 4 structured Next Steps proposals adhering to the official `/plan` standard.
 
@@ -42,9 +42,9 @@ Zero-friction assurance and intelligent momentum. Unlike static linters, detache
 
 ## Evidence on Hand
 
-- **Core Plugin Codebase:** `plugin.json`, `hooks.json`, `scripts/watchdog_ctl.py`, `scripts/watchdog_stop_hook.py`.
+- **Core Plugin Codebase:** `plugin.json`, `scripts/watchdog_ctl.py`.
 - **Sidecar Web Panel:** `sidecars/panel/main.mjs`, `index.html`, `app.js`, `styles.css`.
-- **Skills & Rules:** `skills/watchdog/SKILL.md`, `skills/next-steps/SKILL.md`, `rules/AGENTS.md`.
+- **Skills & Rules:** `skills/watchdog-auditor/SKILL.md`, `skills/next-steps-synthesizer/SKILL.md`, `rules/AGENTS.md`.
 - **Active Repositories & Audits:** Validated in live environments including `elegant-bose` and `halftone` with verified Playwright test suites and audit records in `.antigravity/audits/`.
 
 ## Product Principles

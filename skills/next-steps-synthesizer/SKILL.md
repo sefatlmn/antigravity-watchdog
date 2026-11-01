@@ -1,5 +1,5 @@
 ---
-name: next-steps
+name: next-steps-synthesizer
 description: Autonomous post-commit planning and next-step proposer. Ingests project handoffs, specifications, package manifests, full codebase trees, AST symbols, and all Antigravity chat transcripts to formulate 4 project-grounded implementation plans adhering to the /plan methodology.
 ---
 

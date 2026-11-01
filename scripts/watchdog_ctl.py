@@ -39,8 +39,24 @@ CLAUDE_SESSIONS_DIR = CLAUDE_DIR / "sessions"
 NEXT_STEPS_DIR_NAME = "next_steps"
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
-SKILL_PATH = PLUGIN_DIR / "skills" / "watchdog" / "SKILL.md"
+SKILL_PATH = PLUGIN_DIR / "skills" / "watchdog-auditor" / "SKILL.md"
 AGENTAPI_DEFAULT = HOME / ".gemini" / "antigravity" / "bin" / "agentapi"
+
+# Conversation ids of agents the plugin starts inside a Claude Code session, and how long
+# (seconds) a queued job, a claim and an in-session audit may go before they count as stopped.
+IN_SESSION_PREFIXES = ("claude-agent-", "claude-claiming")
+QUEUED_TIMEOUT = 600
+CLAIM_TIMEOUT = 600
+IN_SESSION_TIMEOUT = 3600
+
+
+def in_claude_session() -> bool:
+    """
+    True when called from inside a Claude Code session: its MCP server, the Watchdog
+    pane's panel server, or the Stop handling the pane runs. Agents are then started
+    by the plugin in that session (hooks/register.tsx), never as background `claude -p`.
+    """
+    return os.environ.get("WATCHDOG_IN_SESSION") == "1"
 
 
 def resolve_host(preferred_host: str = "") -> str:
@@ -1913,6 +1929,10 @@ def is_conversation_active(conv_id: str, max_age_seconds: int = 900) -> bool:
         return False
     if conv_id == "foreground-agent":
         return True
+    if conv_id.startswith(IN_SESSION_PREFIXES):
+        # Started by the plugin inside a Claude Code session; the plugin reports when it ends
+        # (agent-done), and reconcile_job times out one that never does.
+        return True
     if conv_id.startswith("claude-pid-"):
         try:
             pid = int(conv_id.split("claude-pid-", 1)[1].strip())
@@ -2370,8 +2390,22 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
                 active.append(conv_id)
                 save_state(st)
 
+    if not dispatched and in_claude_session():
+        return {
+            "ok": True,
+            "status": "synthesizing",
+            "dispatched": False,
+            "inSession": True,
+            "prompt": prompt,
+            "ctl": str(Path(__file__).resolve()),
+            "startedAt": state_data["startedAt"],
+        }
+
     if not dispatched and host_mode in ("claude", "auto"):
-        claude_conv_id = spawn_claude_cli_agent(prompt, repo_root, LOGS_DIR / f"synthesis-{repo_slug(repo_root)}.log")
+        claude_conv_id = spawn_claude_cli_agent(
+            prompt, repo_root, claude_permission_args("synthesis", repo_root),
+            LOGS_DIR / f"synthesis-{repo_slug(repo_root)}.log",
+        )
         if claude_conv_id:
             dispatched = True
             conv_id = claude_conv_id
@@ -2405,6 +2439,8 @@ def find_claude_bin() -> Optional[str]:
         return None
     candidates = [
         os.environ.get("CLAUDE_BIN", ""),
+        # The running Claude Code's own binary; the desktop app's is not on PATH.
+        os.environ.get("CLAUDE_CODE_EXECPATH", ""),
         shutil.which("claude") or "",
         str(HOME / ".claude" / "local" / "claude"),
         str(HOME / ".local" / "bin" / "claude"),
@@ -2417,10 +2453,55 @@ def find_claude_bin() -> Optional[str]:
     return None
 
 
-def spawn_claude_cli_agent(prompt: str, cwd: Path, log_file: Optional[Path] = None) -> Optional[str]:
+GIT_READ_RULES = [
+    f"Bash(git {cmd}:*)"
+    for cmd in ("status", "diff", "show", "log", "ls-files", "rev-parse", "rev-list", "blame")
+]
+CHECK_RULES = (
+    [f"Bash({pm} {verb}:*)" for pm in ("npm run", "pnpm run", "pnpm", "yarn")
+     for verb in ("test", "lint", "typecheck", "build", "dev", "preview", "start")]
+    + [f"Bash({cmd}:*)" for cmd in (
+        "npm test", "npx tsc", "npx vitest", "npx jest", "npx eslint", "npx vite", "node --check",
+        "pytest", "python3 -m pytest", "python3 -m py_compile", "python3 -m http.server",
+        "cargo check", "cargo test", "go vet", "go test",
+    )]
+)
+
+
+def claude_permission_args(task: str, repo_root: Path, worktree: Optional[Path] = None) -> List[str]:
+    """
+    What a background `claude -p` session may do without asking, for each kind of task.
+    Nothing else is allowed: a headless session has nobody to ask, so the rest is denied.
+    Edit rules cover every file-writing tool; `//` starts an absolute path.
+    """
+    ctl = f'Bash(python3 "{Path(__file__).resolve()}"'
+    if task == "audit":
+        # Fixes go in the isolated worktree, the report in the repository's audits folder.
+        audits = repo_root / ".antigravity" / "audits"
+        audits.mkdir(parents=True, exist_ok=True)
+        edits = [f"Edit(/{audits}/**)"] + ([f"Edit(/{worktree}/**)"] if worktree else [])
+        allowed = GIT_READ_RULES + CHECK_RULES + edits + [
+            "Bash(git add:*)", "Bash(git commit:*)", f"{ctl} complete:*)",
+            f"Read(/{SKILL_PATH.parent}/**)", "mcp__playwright",
+        ]
+        return ["--add-dir", str(audits), "--allowedTools", *allowed]
+    if task == "synthesis":
+        # Reads the repository; writes only the Next Steps plans.
+        plans = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+        allowed = GIT_READ_RULES + [f"Edit(/{plans}/**)", f"{ctl} complete-synthesis:*)"]
+        return ["--allowedTools", *allowed]
+    # "plan": the person chose to execute a plan in this repository, so it may edit and commit there.
+    allowed = GIT_READ_RULES + CHECK_RULES + [f"Edit(/{repo_root}/**)", "Bash(git add:*)", "Bash(git commit:*)"]
+    return ["--allowedTools", *allowed]
+
+
+def spawn_claude_cli_agent(
+    prompt: str, cwd: Path, permission_args: List[str], log_file: Optional[Path] = None
+) -> Optional[str]:
     """
     Launch a detached background Claude Code CLI session (`claude -p`) when running
     outside Antigravity so the shared Sidepanel UI and hooks dispatch autonomous workers natively.
+    `permission_args` (from claude_permission_args) say what it may do without asking.
     """
     claude_bin = find_claude_bin()
     if not claude_bin:
@@ -2436,7 +2517,7 @@ def spawn_claude_cli_agent(prompt: str, cwd: Path, log_file: Optional[Path] = No
         with open(target_log, "a", encoding="utf-8") as lf:
             lf.write(f"\n[{now_iso()}] Spawning detached Claude Code agent ({session_tag}) in {cwd}\n")
             proc = subprocess.Popen(
-                [claude_bin, "-p", prompt, "--dangerously-skip-permissions"],
+                [claude_bin, "-p", prompt, *permission_args],
                 cwd=str(cwd),
                 env=env,
                 stdout=lf,
@@ -2492,8 +2573,10 @@ Execute this plan step by step, adhering to the plan specifications, writing nec
         except Exception:
             pass
 
-    if host_mode in ("claude", "auto"):
-        return spawn_claude_cli_agent(prompt, repo_root, LOGS_DIR / f"plan-{repo_slug(repo_root)}.log")
+    if host_mode in ("claude", "auto") and not in_claude_session():
+        return spawn_claude_cli_agent(
+            prompt, repo_root, claude_permission_args("plan", repo_root), LOGS_DIR / f"plan-{repo_slug(repo_root)}.log"
+        )
     return None
 
 
@@ -3317,8 +3400,12 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
             except Exception:
                 pass
 
+    if host_mode in ("claude", "auto") and in_claude_session():
+        return False
     if host_mode in ("claude", "auto"):
-        claude_conv_id = spawn_claude_cli_agent(prompt, target_cwd, log_file)
+        worktree = Path(job["worktree_path"])
+        permissions = claude_permission_args("audit", Path(job["repo_path"]), worktree if worktree.exists() else None)
+        claude_conv_id = spawn_claude_cli_agent(prompt, target_cwd, permissions, log_file)
         if claude_conv_id:
             job["conversation_id"] = claude_conv_id
             track_active_conversation(claude_conv_id)
@@ -3353,6 +3440,7 @@ def queue_commit(
     full_sha = info["sha"]
     short_sha = info["short_sha"]
     msg_full = f"{info['subject']}\n{info.get('body', '')}"
+    reconcile_jobs(repo_root)
 
     if any(tag in msg_full for tag in SKIP_TAGS):
         return None
@@ -3431,6 +3519,8 @@ def queue_commit(
             "started_at": None,
             "completed_at": None,
             "status": "queued",
+            # A Claude Code session starts the audits it queued itself (see `claim`).
+            "queued_by": "claude-session" if in_claude_session() else resolve_host(),
             "verdict": "PENDING",
             "summary": "Queued for code & visual Watchdog review.",
             "bugs_count": 0,
@@ -3716,8 +3806,29 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
         except Exception:
             pass
 
-    # 3. No report exists. Check if conversation has stopped or been interrupted
+    # 3. No report exists. A queued job nobody started, or an in-session agent that never
+    # reported, would otherwise block every later audit of the repository.
     conv_id = j.get("conversation_id")
+    stale_after = None
+    if curr_status == "queued" and not conv_id:
+        stale_after, why = QUEUED_TIMEOUT, "The audit never started. Click Continue Audit to start it."
+    elif curr_status == "running" and conv_id == "claude-claiming":
+        stale_after, why = CLAIM_TIMEOUT, "The audit request was not sent. Click Continue Audit to try again."
+    elif curr_status == "running" and conv_id and conv_id.startswith(IN_SESSION_PREFIXES):
+        stale_after, why = IN_SESSION_TIMEOUT, "The audit agent stopped before finishing. Click Continue Audit to resume."
+    if stale_after is not None:
+        since = j.get("started_at") if curr_status == "running" else j.get("queued_at")
+        try:
+            age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(since)).total_seconds()
+        except Exception:
+            age = 0
+        if age > stale_after:
+            j["status"] = "interrupted"
+            j["summary"] = why
+            return True
+        return False
+
+    # 4. Check if conversation has stopped or been interrupted
     if not conv_id:
         found_id = find_watchdog_conversation_for_job(j)
         if found_id:
@@ -3959,6 +4070,15 @@ python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{
             except Exception:
                 pass
 
+        if not resumed_chat and in_claude_session():
+            target_job["status"] = "queued"
+            target_job["queued_by"] = "claude-session"
+            target_job["conversation_id"] = None
+            target_job["queued_at"] = now_iso()
+            target_job["summary"] = "Waiting for Claude Code to resume the audit…"
+            save_state(st)
+            return {"ok": True, "resumed": True, "queued": True, "shortSha": target_job.get("short_sha")}
+
         if not resumed_chat:
             spawn_detached_agent(target_job)
 
@@ -4128,6 +4248,18 @@ def main() -> int:
     p_status = sub.add_parser("status", help="Show Watchdog status and jobs", parents=[p_common])
     p_status.add_argument("--repo", default="", help="Optional repository path filter")
 
+    p_claim = sub.add_parser("claim", help="Take queued audits for the Claude Code session to start", parents=[p_common])
+    p_claim.add_argument("--repo", default="")
+
+    p_mark = sub.add_parser("mark-running", help="Record the agent running a claimed audit", parents=[p_common])
+    p_mark.add_argument("--job-id", required=True)
+    p_mark.add_argument("--conversation-id", default="")
+    p_mark.add_argument("--failed", default="", help="Why the agent could not start; marks the audit interrupted")
+
+    p_done = sub.add_parser("agent-done", help="An in-session audit agent ended; interrupt its audit if unfinished", parents=[p_common])
+    p_done.add_argument("--conversation-id", required=True)
+
+
     p_sync = sub.add_parser(
         "sync",
         help="Scan git history across workspace & nested repos and resolve the youngest commit",
@@ -4254,6 +4386,54 @@ def main() -> int:
     if args.cmd == "sync":
         res = sync_git_history(args.repo or [])
         print(json.dumps(res, indent=2))
+        return 0
+
+    if args.cmd == "claim":
+        root = resolve_git_root(args.repo) if args.repo else None
+        reconcile_jobs(root)
+        claimed = []
+        with StateLock():
+            state = load_state()
+            for j in state.get("jobs", []):
+                if j.get("status") != "queued" or j.get("queued_by") != "claude-session":
+                    continue
+                if root and j.get("repo_path") != str(root):
+                    continue
+                j["status"] = "running"
+                j["started_at"] = now_iso()
+                j["conversation_id"] = "claude-claiming"
+                j["summary"] = "Waiting for you to send the audit request in the Claude Code chat…"
+                claimed.append(dict(j, prompt=build_watchdog_prompt(j)))
+            if claimed:
+                save_state(state)
+        print(json.dumps({"ok": True, "ctl": str(Path(__file__).resolve()), "jobs": claimed}, indent=2))
+        return 0
+
+    if args.cmd == "mark-running":
+        with StateLock():
+            state = load_state()
+            job = next((j for j in state.get("jobs", []) if j.get("id") == args.job_id), None)
+            if job:
+                if args.failed:
+                    job["status"] = "interrupted"
+                    job["summary"] = f"The audit agent could not start: {args.failed}"
+                else:
+                    job["conversation_id"] = args.conversation_id
+                    job["summary"] = "Autonomous Watchdog review in progress…"
+                save_state(state)
+        print(json.dumps({"ok": bool(job)}, indent=2))
+        return 0 if job else 1
+
+    if args.cmd == "agent-done":
+        reconcile_jobs()
+        with StateLock():
+            state = load_state()
+            for j in state.get("jobs", []):
+                if j.get("conversation_id") == args.conversation_id and j.get("status") in ("running", "queued"):
+                    j["status"] = "interrupted"
+                    j["summary"] = "The audit agent stopped before finishing. Click Continue Audit to resume."
+            save_state(state)
+        print(json.dumps({"ok": True}, indent=2))
         return 0
 
     if args.cmd == "status" or not args.cmd:

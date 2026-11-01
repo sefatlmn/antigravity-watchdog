@@ -1,11 +1,9 @@
 # Watchdog & Next Steps Rules
 
-The **Watchdog** plugin monitors completed coding tasks, dispatches independent post-commit code & visual reviews in isolated Git worktrees, and formulates up to 4 structured Next Steps implementation plans adhering to the official `/plan` standard.
+The **Watchdog** plugin runs independent code & visual reviews of commits in isolated Git worktrees when the user asks for one, and formulates up to 4 structured Next Steps implementation plans adhering to the official `/plan` standard.
 
 ## Guidelines for Coding Conversations
-- **Never manually trigger recursive reviews or plans**:
-  - Commits containing `[auto-review]`, `[watchdog]`, or `[skip-watchdog]` in the commit message are ignored by the Watchdog hook.
-  - Conversations containing `[NEXT-STEPS-SESSION]`, `[NEXT-STEPS-SYNTHESIZER-SESSION]`, or `[WATCHDOG-SESSION]` do not trigger recursive cycles.
+- **Audits and plans run only when the user asks**: never start a Watchdog audit or Next Steps synthesis on your own. Watchdog does not audit commits containing `[auto-review]`, `[watchdog]`, or `[skip-watchdog]`.
 - **Audit Reports & Fix Branches**:
   - Completed audit reports are saved to `.antigravity/audits/review-<short_sha>.md` (and `.json`).
   - When Watchdog fixes reproducible bugs, it commits them to an isolated branch named `fix/watchdog-<short_sha>` without modifying your active working tree or current branch.

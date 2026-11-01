@@ -3,19 +3,20 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SidecarApp, Response } from 'sidecar_sdk';
+// Antigravity launches sidecars with ANTIGRAVITY_SIDECAR_WEB_PORT and provides `sidecar_sdk`;
+// anywhere else (Claude Code, a plain browser) the bundled stand-in serves the same routes.
+const isStandaloneMode = !process.env.ANTIGRAVITY_SIDECAR_WEB_PORT;
+const { SidecarApp, Response } = isStandaloneMode
+  ? await import('./standalone_sdk.mjs')
+  : await import('sidecar_sdk');
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = resolve(HERE, '..', '..');
 const WATCHDOG_CTL_SCRIPT = join(PLUGIN_ROOT, 'scripts', 'watchdog_ctl.py');
-const WATCHDOG_DIR = join(homedir(), '.gemini', 'antigravity', 'watchdog');
+// Same data directory as watchdog_ctl.py, so both hosts read one state file.
+const WATCHDOG_DIR = join(process.env.ANTIGRAVITY_APP_DATA_DIR || join(homedir(), '.gemini', 'antigravity'), 'watchdog');
 const STATE_FILE = join(WATCHDOG_DIR, 'state.json');
 const CLAUDE_SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
-const isStandaloneMode = Boolean(
-  process.env.CLAUDE_PLUGIN_ROOT ||
-  process.env.CLAUDECODE === '1' ||
-  process.env.WATCHDOG_HOST === 'claude'
-);
 
 const app = new SidecarApp();
 
@@ -131,6 +132,7 @@ function discoverActiveClaudeWorkspaces() {
 
 app.page('/', () => readLocal('index.html'));
 app.page('/app.js', () => readLocal('app.js'));
+app.page('/view-model.js', () => readLocal('view-model.js'));
 if (isStandaloneMode) {
   app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
 }
@@ -805,7 +807,10 @@ function inspectSingleRepo(topLevel) {
   }
 }
 
-function collectActiveRepos(uris, state) {
+function collectActiveRepos(uris, state, exact = false) {
+  // The Claude Code pane passes its project's Git root itself: show exactly that repository.
+  if (exact) return uris.map((u) => inspectSingleRepo(u)).filter(Boolean);
+
   const roots = [];
   const seen = new Set();
 
@@ -891,18 +896,19 @@ function collectActiveRepos(uris, state) {
   return repos;
 }
 
-// POST /api/dashboard { workspaceUris }
+// POST /api/dashboard { workspaceUris, exact? }: `exact` shows only those repositories and their audits
 app.api('/api/dashboard', (data) => {
   try {
     const state = loadState();
     const uris = Array.isArray(data?.workspaceUris) ? data.workspaceUris : [];
-    const activeRepos = collectActiveRepos(uris, state);
+    const activeRepos = collectActiveRepos(uris, state, Boolean(data?.exact));
+    const jobs = Array.isArray(state.jobs) ? state.jobs : [];
 
     return {
       auto_dispatch: state.auto_dispatch !== false,
       skip_docs_only: state.skip_docs_only !== false,
       activeRepos,
-      jobs: Array.isArray(state.jobs) ? state.jobs : [],
+      jobs: data?.exact ? jobs.filter((j) => uris.includes(j.repo_path)) : jobs,
     };
   } catch (err) {
     console.error('Error in /api/dashboard:', err);
@@ -947,7 +953,7 @@ app.api('/api/sync', (data) => {
       console.warn('Python ctl sync warning:', pythonErr.message);
     }
     const state = loadState();
-    const activeRepos = collectActiveRepos(uris, state);
+    const activeRepos = collectActiveRepos(uris, state, Boolean(data?.exact));
 
     return {
       ok: true,

@@ -2,7 +2,8 @@
   "mcpServers": {
     "watchdog": {
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/packages/universal/dist/mcp.js"]
+      "args": ["${CLAUDE_PLUGIN_ROOT}/packages/universal/dist/mcp.js"],
+      "env": { "WATCHDOG_IN_SESSION": "1" }
     }
   }
 }
