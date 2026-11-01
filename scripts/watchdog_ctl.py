@@ -4229,21 +4229,9 @@ def main() -> int:
     p_sc.add_argument("--comment", required=True)
     p_sc.add_argument("--job-id", default="")
 
-    p_panel = sub.add_parser("panel", help="Start and optionally open the Watchdog Sidepanel UI", parents=[p_common])
-    p_panel.add_argument("--repo", default="")
-    p_panel.add_argument("--open", action="store_true", help="Open the sidepanel window")
-
     args, _ = parser.parse_known_args()
     if getattr(args, "host", "") in ("antigravity", "claude"):
         os.environ["WATCHDOG_HOST"] = args.host
-
-    if args.cmd == "panel":
-        import panel_launcher
-        repo_arg = getattr(args, "repo", "").strip() or os.getcwd()
-        root = resolve_git_root(repo_arg) or Path(repo_arg).resolve()
-        res = panel_launcher.ensure_panel(repo_path=str(root), open_window=bool(getattr(args, "open", False)))
-        print(json.dumps(res, indent=2))
-        return 0
 
     if args.cmd == "send-comment":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve() if getattr(args, "repo", "") else None

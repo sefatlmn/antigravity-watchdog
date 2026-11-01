@@ -1,17 +1,6 @@
 {
-  "description": "Watchdog sidepanel launcher and post-commit isolated worktree audit hook",
+  "description": "Watchdog post-commit isolated worktree audit and next-steps synthesis hook",
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/watchdog_stop_hook.py\"",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
     "Stop": [
       {
         "hooks": [

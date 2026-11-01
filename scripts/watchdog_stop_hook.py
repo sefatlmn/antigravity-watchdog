@@ -23,7 +23,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 import watchdog_ctl  # noqa: E402
-import panel_launcher  # noqa: E402
 
 
 def is_claude_payload(payload: Dict[str, Any]) -> bool:
@@ -94,17 +93,6 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
     if os.environ.get("WATCHDOG_SESSION") == "1":
         return
 
-    hook_event = payload.get("hook_event_name", "")
-    if hook_event == "SessionStart":
-        os.environ["WATCHDOG_HOST"] = "claude"
-        cwd = payload.get("cwd") or os.getcwd()
-        auto_open = os.environ.get("WATCHDOG_AUTO_OPEN_PANEL", "1") != "0"
-        try:
-            panel_launcher.ensure_panel(repo_path=cwd, open_window=auto_open)
-        except Exception:
-            pass
-        return
-
     if is_claude_payload(payload):
         os.environ["WATCHDOG_HOST"] = "claude"
         if payload.get("stop_hook_active"):
@@ -118,10 +106,6 @@ def handle_stop_event(payload: Dict[str, Any]) -> None:
             payload["transcriptPath"] = payload["transcript_path"]
         if not payload.get("workspacePaths") and payload.get("cwd"):
             payload["workspacePaths"] = [payload["cwd"]]
-        try:
-            panel_launcher.start_panel_server(payload.get("cwd"))
-        except Exception:
-            pass
     else:
         os.environ["WATCHDOG_HOST"] = "antigravity"
 
