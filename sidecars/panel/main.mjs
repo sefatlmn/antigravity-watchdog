@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 // Antigravity launches sidecars with ANTIGRAVITY_SIDECAR_WEB_PORT and provides `sidecar_sdk`;
-// anywhere else (Claude Code, a plain browser) the bundled stand-in serves the same routes.
+// anywhere else (a plain browser) the bundled stand-in serves the same routes.
 const isStandaloneMode = !process.env.ANTIGRAVITY_SIDECAR_WEB_PORT;
 const { SidecarApp, Response } = isStandaloneMode
   ? await import('./standalone_sdk.mjs')
@@ -807,10 +807,7 @@ function inspectSingleRepo(topLevel) {
   }
 }
 
-function collectActiveRepos(uris, state, exact = false) {
-  // The Claude Code pane passes its project's Git root itself: show exactly that repository.
-  if (exact) return uris.map((u) => inspectSingleRepo(u)).filter(Boolean);
-
+function collectActiveRepos(uris, state) {
   const roots = [];
   const seen = new Set();
 
@@ -896,19 +893,18 @@ function collectActiveRepos(uris, state, exact = false) {
   return repos;
 }
 
-// POST /api/dashboard { workspaceUris, exact? }: `exact` shows only those repositories and their audits
+// POST /api/dashboard { workspaceUris }
 app.api('/api/dashboard', (data) => {
   try {
     const state = loadState();
     const uris = Array.isArray(data?.workspaceUris) ? data.workspaceUris : [];
-    const activeRepos = collectActiveRepos(uris, state, Boolean(data?.exact));
-    const jobs = Array.isArray(state.jobs) ? state.jobs : [];
+    const activeRepos = collectActiveRepos(uris, state);
 
     return {
       auto_dispatch: state.auto_dispatch !== false,
       skip_docs_only: state.skip_docs_only !== false,
       activeRepos,
-      jobs: data?.exact ? jobs.filter((j) => uris.includes(j.repo_path)) : jobs,
+      jobs: Array.isArray(state.jobs) ? state.jobs : [],
     };
   } catch (err) {
     console.error('Error in /api/dashboard:', err);
@@ -953,7 +949,7 @@ app.api('/api/sync', (data) => {
       console.warn('Python ctl sync warning:', pythonErr.message);
     }
     const state = loadState();
-    const activeRepos = collectActiveRepos(uris, state, Boolean(data?.exact));
+    const activeRepos = collectActiveRepos(uris, state);
 
     return {
       ok: true,

@@ -41,7 +41,7 @@ test('a Watchdog audit agent may do only what an audit needs', async ($, on) => 
   // The grant launchQueuedAudits stores for a started auditor.
   on('state.get', (_, e, next) =>
     e.plugin === 'watchdog' && e.key === 'agents'
-      ? { value: { value: { 'agent-1': { kind: 'audit', roots: [WORKTREE, `${REPO}/.antigravity/audits`], ctl: CTL, jobId: 'app-abc1234' } }, version: 1 } }
+      ? { value: { value: { 'agent-1': { roots: [WORKTREE, `${REPO}/.antigravity/audits`], ctl: CTL, jobId: 'app-abc1234' } }, version: 1 } }
       : next(e),
   )
   on('tool.check', () => ({ decision: 'ask' as const }))

@@ -1,4 +1,4 @@
 {
-  "description": "Watchdog pane, and in-session audit agents with their permissions",
-  "modules": ["./register.tsx"]
+  "description": "Watchdog audit agents in the Claude Code session, and their permissions",
+  "modules": ["./agents.ts"]
 }

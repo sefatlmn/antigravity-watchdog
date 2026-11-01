@@ -2390,17 +2390,6 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
                 active.append(conv_id)
                 save_state(st)
 
-    if not dispatched and in_claude_session():
-        return {
-            "ok": True,
-            "status": "synthesizing",
-            "dispatched": False,
-            "inSession": True,
-            "prompt": prompt,
-            "ctl": str(Path(__file__).resolve()),
-            "startedAt": state_data["startedAt"],
-        }
-
     if not dispatched and host_mode in ("claude", "auto"):
         claude_conv_id = spawn_claude_cli_agent(
             prompt, repo_root, claude_permission_args("synthesis", repo_root),

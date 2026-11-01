@@ -1,19 +1,17 @@
-// Watchdog's agents inside a Claude Code session. Audits and Next Steps syntheses run as
+// Watchdog's agents inside a Claude Code session. Audits run as
 // background subagents of the session (the plugin's agent types in agents/), on the
-// session's own sign-in. Claude starts them at the person's request: a panel click puts the
-// request in their chat box for them to send, and `/watchdog audit` carries it alongside
-// the tool's result. Once one starts, it may only do what its task needs: this module
+// session's own sign-in. Claude starts them at the person's request: `/watchdog audit`
+// (or the MCP tool) carries the request alongside the tool's result. Once one starts, it may only do what its task needs: this module
 // answers every tool call it makes, allowing its rules and denying the rest, without
 // touching the person's own permission settings. The rules match claude_permission_args in
 // scripts/watchdog_ctl.py, which applies them to background `claude -p` outside Claude Code.
 
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { AgentGrant } from '../types'
 
 const AUDITOR = 'watchdog:watchdog-auditor'
-const SYNTHESIZER = 'watchdog:next-steps-synthesizer'
 
 export const agents = atom({ plugin: 'watchdog', key: 'agents' } as const, {} as Record<string, AgentGrant>)
 
@@ -22,8 +20,6 @@ const ctlPath = ($: EngineInterface) => `${$.plugin.root}/scripts/watchdog_ctl.p
 // Starts waiting for Claude to launch them, keyed by their task file: when an agent starts
 // whose prompt names that file, it gets the grant.
 export const pending = atom({ plugin: 'watchdog', key: 'pending' } as const, {} as Record<string, AgentGrant>)
-
-const AGENT_TYPES = [AUDITOR, SYNTHESIZER]
 
 // Saves a task where Git ignores it (.antigravity/ is excluded) and returns the short request
 // that asks Claude to start it.
@@ -64,7 +60,6 @@ export async function requestQueuedAudits($: EngineInterface, repo?: string): Pr
   const requests: string[] = []
   for (const job of claimed.jobs ?? []) {
     const grant: AgentGrant = {
-      kind: 'audit',
       roots: [String(job.worktree_path), `${job.repo_path}/.antigravity/audits`],
       ctl: claimed.ctl,
       jobId: job.id,
@@ -73,18 +68,6 @@ export async function requestQueuedAudits($: EngineInterface, repo?: string): Pr
     requests.push(await request($, AUDITOR, `audit commit ${job.short_sha}`, taskFile, String(job.prompt), grant))
   }
   return requests
-}
-
-// The request that starts the Next Steps synthesizer with the prompt the controller handed back.
-export async function requestSynthesis($: EngineInterface, repo: string, prompt: string, ctlFile: string): Promise<string> {
-  const plans = `${repo}/.antigravity/next_steps`
-  const grant: AgentGrant = { kind: 'synthesis', roots: [plans], ctl: ctlFile, jobId: '' }
-  return request($, SYNTHESIZER, 'refresh Next Steps', `${repo}/.antigravity/tasks/next-steps.md`, prompt, grant)
-}
-
-// A click in the panel: the request goes into the person's chat box, for them to send.
-export async function fillChatBox($: EngineInterface, requests: string[]) {
-  if (requests.length > 0) await $.prompt.fill({ text: requests.join('\n\n') })
 }
 
 const GIT_READ = ['status', 'diff', 'show', 'log', 'ls-files', 'rev-parse', 'rev-list', 'blame']
@@ -108,7 +91,6 @@ const startsWithWord = (s: string, prefix: string) => s === prefix || s.startsWi
 // Whether every part of a shell command is one the grant allows. `cd` moves where `git add`
 // and `git commit` would act; those are allowed only inside the grant's first folder.
 function commandAllowed(grant: AgentGrant, command: string): string | null {
-  const ctlCommands = grant.kind === 'audit' ? ['complete'] : ['complete-synthesis']
   const cleaned = command.replace(/\\\n/g, ' ').replace(/\d?>&\d|\d?>\s*\/dev\/null/g, '')
   if (/[<>`]|\$\(/.test(cleaned)) return 'redirects and command substitution are not allowed'
   let dir = ''
@@ -123,14 +105,14 @@ function commandAllowed(grant: AgentGrant, command: string): string | null {
     if (gitDir?.[1]) part = `git ${part.slice(gitDir[0].length)}`
     const at = gitDir?.[1] ? unquote(gitDir[1]) : dir
     if (GIT_READ.some(sub => startsWithWord(part, `git ${sub}`))) continue
-    if (grant.kind === 'audit' && (startsWithWord(part, 'git add') || startsWithWord(part, 'git commit'))) {
+    if (startsWithWord(part, 'git add') || startsWithWord(part, 'git commit')) {
       if (at && isInside(at, grant.roots.slice(0, 1))) continue
       return 'git add and git commit are only allowed in the audit worktree'
     }
-    if (ctlCommands.some(sub => startsWithWord(part, `python3 "${grant.ctl}" ${sub}`) || startsWithWord(part, `python3 ${grant.ctl} ${sub}`))) continue
-    if (grant.kind === 'audit' && CHECKS.some(prefix => startsWithWord(part, prefix))) continue
+    if (startsWithWord(part, `python3 "${grant.ctl}" complete`) || startsWithWord(part, `python3 ${grant.ctl} complete`)) continue
+    if (CHECKS.some(prefix => startsWithWord(part, prefix))) continue
     if (LOOK.some(prefix => startsWithWord(part, prefix)) && !/\s-(delete|exec|execdir|ok)\b/.test(part)) continue
-    return `\`${part.split(/\s+/).slice(0, 3).join(' ')}\` is not one of the commands a Watchdog ${grant.kind} may run`
+    return `\`${part.split(/\s+/).slice(0, 3).join(' ')}\` is not one of the commands a Watchdog audit may run`
   }
   return null
 }
@@ -140,31 +122,31 @@ function decide(grant: AgentGrant, tool: string, input: any): { decision: 'allow
   if (READ_ONLY_TOOLS.includes(tool)) return { decision: 'allow' }
   if (FILE_TOOLS.includes(tool)) {
     const path = String(input?.file_path ?? input?.notebook_path ?? '')
-    return isInside(path, grant.roots) ? { decision: 'allow' } : deny(`a ${grant.kind} may only write in ${grant.roots.join(' and ')}`)
+    return isInside(path, grant.roots) ? { decision: 'allow' } : deny(`an audit may only write in ${grant.roots.join(' and ')}`)
   }
   if (tool === 'Bash') {
     const why = commandAllowed(grant, String(input?.command ?? ''))
     return why ? deny(why) : { decision: 'allow' }
   }
-  if (grant.kind === 'audit' && tool.startsWith('mcp__playwright__')) return { decision: 'allow' }
-  return deny(`a ${grant.kind} may not use ${tool}`)
+  if (tool.startsWith('mcp__playwright__')) return { decision: 'allow' }
+  return deny(`an audit may not use ${tool}`)
 }
 
-export function registerAgentHooks(on: On) {
+export const register: Register = on => {
   // When Claude starts a Watchdog agent whose prompt names a waiting task file, the agent
   // gets that task's grant, and an audit is recorded as running.
   on('agent.spawn', async ($, e, next) => {
     const result = await next(e)
     const spec = e as unknown as { subagentType?: string; subagent_type?: string; prompt?: string }
     const agentId = result.agentId
-    if (!agentId || !AGENT_TYPES.includes(spec.subagentType ?? spec.subagent_type ?? '')) return result
+    if (!agentId || (spec.subagentType ?? spec.subagent_type) !== AUDITOR) return result
     const waiting = await read($, pending)
     const taskFile = Object.keys(waiting).find(file => String(spec.prompt ?? '').includes(file))
     const grant = taskFile ? waiting[taskFile] : undefined
     if (!taskFile || !grant) return result
     await update($, pending, all => Object.fromEntries(Object.entries(all).filter(([file]) => file !== taskFile)))
     await update($, agents, all => ({ ...all, [agentId]: grant }))
-    if (grant.kind === 'audit') await ctl($, ['mark-running', '--job-id', grant.jobId, '--conversation-id', `claude-agent-${agentId}`])
+    await ctl($, ['mark-running', '--job-id', grant.jobId, '--conversation-id', `claude-agent-${agentId}`])
     return result
   }).catch(($, e, next) => next(e))
 
@@ -184,7 +166,7 @@ export function registerAgentHooks(on: On) {
     const grant = e.agentId ? (await read($, agents))[e.agentId] : undefined
     if (e.agentId && grant) {
       const agentId = e.agentId
-      if (grant.kind === 'audit') await ctl($, ['agent-done', '--conversation-id', `claude-agent-${agentId}`])
+      await ctl($, ['agent-done', '--conversation-id', `claude-agent-${agentId}`])
       await update($, agents, all => Object.fromEntries(Object.entries(all).filter(([id]) => id !== agentId)))
     }
     return result

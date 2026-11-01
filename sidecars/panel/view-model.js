@@ -1,7 +1,6 @@
-// Watchdog panel view model: the decisions both GUIs make from the panel server's
-// data (which repo is active, what each audit card and button shows). Pure functions
-// with no DOM, shared by the Antigravity web panel (app.js) and the Claude Code pane
-// (hooks/register.tsx), so the two stay in step.
+// Watchdog panel view model: the decisions the web panel (app.js) makes from the panel
+// server's data (which repo is active, what each audit card and button shows). Pure
+// functions with no DOM.
 
 /** @typedef {import('../../types/index.d.ts').Dashboard} Dashboard */
 /** @typedef {import('../../types/index.d.ts').Repo} Repo */
@@ -13,11 +12,13 @@ export const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
 
 /** @param {unknown} str @returns {string} */
 export function stripEmojis(str) {
+  return stripEmojiChars(str).replace(/\s+/g, ' ').trim();
+}
+
+/** Removes emoji but keeps line breaks, for Markdown. @param {unknown} str @returns {string} */
+export function stripEmojiChars(str) {
   if (!str) return '';
-  return String(str)
-    .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{25A0}-\u{25FF}\u{2B50}-\u{2B55}\u{2300}-\u{23FF}]/gu, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return String(str).replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{25A0}-\u{25FF}\u{2B50}-\u{2B55}\u{2300}-\u{23FF}]/gu, '');
 }
 
 /** @param {string} iso @param {number} [now] @returns {string} */

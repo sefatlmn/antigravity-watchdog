@@ -1,5 +1,5 @@
 // Minimal stand-in for Antigravity's `sidecar_sdk`, used when the panel server
-// runs outside Antigravity (Claude Code, a plain browser). It implements the
+// runs outside Antigravity (in a plain browser). It implements the
 // subset main.mjs uses: page(), api(), run() and Response. Agent API calls are
 // Antigravity-only and are not provided here.
 
@@ -93,7 +93,7 @@ export class SidecarApp {
     return new Promise((resolve) => {
       server.listen(this.#port, BIND_HOST, () => {
         const { port } = server.address();
-        // One line the launcher (the Claude Code pane, or a person) reads to reach the panel.
+        // The line a person opens in a browser to reach the panel.
         console.log(`WATCHDOG_PANEL_URL=http://${BIND_HOST}:${port}/?token=${this.#token}`);
         resolve(server);
       });

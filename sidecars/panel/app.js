@@ -8,6 +8,7 @@ import {
   partitionJobs,
   proposalView,
   selectActiveRepo,
+  stripEmojiChars,
   stripEmojis,
   timeAgo,
 } from '/view-model.js';
@@ -970,7 +971,7 @@ async function openPlanModal(planPath, planFile, planId, title, badge) {
 
     $('modal-plan-title').textContent = title || 'Implementation Plan';
     $('modal-category-badge').textContent = stripEmojis(badge) || 'Feature';
-    $('modal-plan-content').innerHTML = renderMarkdown(stripEmojis(res.content));
+    $('modal-plan-content').innerHTML = renderMarkdown(stripEmojiChars(res.content));
 
     const proposal = (activeRepo.proposals || []).find((p) => p.id === planId);
     const execution = proposal?.execution || (activeRepo.executions && activeRepo.executions[planId]) || null;
@@ -1296,7 +1297,7 @@ async function openReport(reportPath, shortSha) {
     const rContent = $('report-content');
     const rCard = $('report-card');
     if (rTitle) rTitle.textContent = `Report — ${shortSha}`;
-    if (rContent) rContent.innerHTML = renderMarkdown(stripEmojis(res.content));
+    if (rContent) rContent.innerHTML = renderMarkdown(stripEmojiChars(res.content));
     if (rCard) {
       rCard.hidden = false;
       rCard.scrollIntoView({ behavior: 'smooth' });
