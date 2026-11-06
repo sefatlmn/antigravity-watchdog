@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getStatus, syncRepo, prepareWorktree, queueAudit, applyFix, continueAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, resolveRepo, PLUGIN_ROOT, } from "./bridge.js";
+import { getStatus, syncRepo, queueAudit, applyFix, continueAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, resolveRepo, PLUGIN_ROOT, } from "./bridge.js";
 import { startMcpServer } from "./mcp.js";
 function printHelp() {
     const help = `
@@ -20,6 +20,7 @@ Commands:
   plan <id>                Display approved plan prompt specification for agent execution
   goal                     Inspect current milestone goal
   goal --set "<goal>"      Set project milestone goal
+  goal --refresh           Refresh project milestone goal
   goal --clear             Clear current milestone goal
   mcp                      Start the Model Context Protocol stdio server
   setup [editor]           Configure integration for claude, cursor, opencode, or codex
@@ -188,14 +189,16 @@ async function main() {
             case "audit": {
                 const targetSha = typeof flags.sha === "string" ? flags.sha : undefined;
                 const comment = positionals.join(" ").trim() || undefined;
-                await prepareWorktree(repo, targetSha);
-                const res = await queueAudit(repo, targetSha, comment);
+                const res = await queueAudit(repo, targetSha, comment, true);
                 if (isJson) {
                     console.log(JSON.stringify(res, null, 2));
                 }
                 else {
                     const shortSha = res?.job?.short_sha || targetSha || "HEAD";
-                    if (res?.already_running) {
+                    if (res?.skipped || res?.ok === false) {
+                        console.log(`Audit skipped: ${res?.reason || res?.error || "Commit was skipped."}`);
+                    }
+                    else if (res?.already_running) {
                         console.log(`Audit for commit ${shortSha} is already running.`);
                     }
                     else {
@@ -266,7 +269,7 @@ async function main() {
             case "plan":
             case "execute": {
                 const planId = positionals[0] || "1";
-                const res = await executePlan(repo, planId);
+                const res = await executePlan(repo, planId, true);
                 if (isJson) {
                     console.log(JSON.stringify(res, null, 2));
                 }
@@ -293,8 +296,14 @@ async function main() {
             }
             case "goal": {
                 const clear = Boolean(flags.clear);
+                const refresh = Boolean(flags.refresh);
                 const setGoal = typeof flags.set === "string" ? flags.set : positionals.join(" ").trim();
-                if (clear) {
+                if (refresh) {
+                    const res = await manageGoal(repo, undefined, false, true);
+                    const goalStr = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");
+                    console.log(isJson ? JSON.stringify(res, null, 2) : (goalStr ? `Milestone goal refreshed: "${goalStr}"` : "Milestone goal refreshed."));
+                }
+                else if (clear) {
                     const res = await manageGoal(repo, undefined, true);
                     console.log(isJson ? JSON.stringify(res, null, 2) : "Milestone goal cleared.");
                 }
@@ -304,7 +313,8 @@ async function main() {
                 }
                 else {
                     const res = await manageGoal(repo);
-                    console.log(isJson ? JSON.stringify(res, null, 2) : (res?.goal ? `Milestone goal: "${res.goal}"` : "No goal set."));
+                    const goalStr = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");
+                    console.log(isJson ? JSON.stringify(res, null, 2) : (goalStr ? `Milestone goal: "${goalStr}"` : "No goal set."));
                 }
                 break;
             }

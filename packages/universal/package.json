@@ -1,7 +1,7 @@
 {
   "name": "watchdog-universal",
   "displayName": "Watchdog Universal Agentic Edition",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "description": "Universal Agentic Edition: Autonomous post-commit watchdog and next-step synthesis for Claude Code, OpenCode, Codex, Cursor, and MCP clients",
   "type": "module",
   "main": "./dist/index.js",

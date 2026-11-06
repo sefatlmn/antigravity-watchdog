@@ -6,7 +6,7 @@ export declare function runCtlJson<T = any>(args: string[]): Promise<T>;
 export declare function getStatus(repo?: string): Promise<any>;
 export declare function syncRepo(repo?: string): Promise<any>;
 export declare function prepareWorktree(repo?: string, sha?: string): Promise<any>;
-export declare function queueAudit(repo?: string, sha?: string, userComment?: string): Promise<any>;
+export declare function queueAudit(repo?: string, sha?: string, userComment?: string, force?: boolean): Promise<any>;
 export declare function applyFix(repo?: string, sha?: string): Promise<any>;
 export declare function continueAudit(repo?: string, sha?: string, jobId?: string): Promise<any>;
 export declare function sendAuditComment(repo?: string, comment?: string, jobId?: string): Promise<any>;
@@ -14,7 +14,7 @@ export declare function synthesizeNextSteps(repo?: string, force?: boolean): Pro
 export declare function checkSynthesis(repo?: string): Promise<any>;
 export declare function dispatchSynthesis(repo?: string): Promise<any>;
 export declare function cancelSynthesis(repo?: string): Promise<any>;
-export declare function manageGoal(repo?: string, goal?: string, clear?: boolean): Promise<any>;
+export declare function manageGoal(repo?: string, goal?: string, clear?: boolean, refresh?: boolean): Promise<any>;
 export declare function executePlan(repo?: string, planId?: string, noSpawn?: boolean): Promise<any>;
 export declare function cancelPlanExecution(repo?: string, planId?: string): Promise<any>;
 export declare function readReportMarkdown(reportPath: string): string;

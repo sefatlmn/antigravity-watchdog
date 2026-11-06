@@ -1,6 +1,6 @@
 import { Plugin } from "@opencode/plugin";
 import { Schema } from "effect";
-import { getStatus, prepareWorktree, queueAudit, continueAudit, sendAuditComment, applyFix, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, syncRepo, } from "./bridge.js";
+import { getStatus, queueAudit, continueAudit, sendAuditComment, applyFix, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, syncRepo, formatNextStepsReport, } from "./bridge.js";
 export default Plugin.define({
     id: "watchdog",
     async setup(ctx) {
@@ -39,13 +39,20 @@ export default Plugin.define({
                                     return;
                                 }
                                 const sync = await syncRepo(dir);
-                                const sha = sync.bestRepo?.headSha || "HEAD";
-                                await prepareWorktree(dir, sha);
-                                await queueAudit(dir, sha, comment || undefined);
-                                await ctx.session.synthetic({
-                                    sessionID,
-                                    text: `Queued Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
-                                });
+                                const sha = sync.bestRepo?.head?.sha || sync.bestRepo?.headSha || "HEAD";
+                                const res = await queueAudit(dir, sha, comment || undefined, true);
+                                if (res?.skipped || res?.ok === false) {
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `Watchdog audit skipped: ${res?.reason || res?.error || "Commit was skipped."}`,
+                                    });
+                                }
+                                else {
+                                    await ctx.session.synthetic({
+                                        sessionID,
+                                        text: `Queued Watchdog audit for commit \`${sha.slice(0, 7)}\` in an isolated Git worktree.\nRun \`/watchdog\` to check progress once completed.`,
+                                    });
+                                }
                             }
                             catch (err) {
                                 await ctx.session.synthetic({
@@ -121,7 +128,11 @@ export default Plugin.define({
                         if (sub === "apply-fix" || sub === "apply") {
                             const targetSha = args[1];
                             const sync = await syncRepo(dir);
-                            const sha = targetSha || sync.bestRepo?.lastFixSha || sync.bestRepo?.headSha;
+                            const firstFix = sync.bestRepo?.fixBranches?.[0];
+                            const fixSha = firstFix?.shortSha ||
+                                (typeof firstFix === "string" ? firstFix.replace(/^fix\/watchdog-/, "") : "") ||
+                                sync.bestRepo?.lastFixSha;
+                            const sha = targetSha || fixSha || sync.bestRepo?.head?.sha || sync.bestRepo?.headSha;
                             if (!sha) {
                                 await ctx.session.synthetic({
                                     sessionID,
@@ -152,7 +163,9 @@ export default Plugin.define({
                         const latestJob = jobs[0];
                         let output = `## Watchdog Status: ACTIVE\n\n`;
                         output += `- **Repository**: \`${repoInfo.repoName || dir}\` (\`${repoInfo.branch || "main"}\`)\n`;
-                        output += `- **Head Commit**: \`${(repoInfo.headSha || "").slice(0, 7)}\` - ${repoInfo.headSubject || "No commits"}\n`;
+                        const headSha = repoInfo.head?.sha || repoInfo.headSha || "";
+                        const headSubject = repoInfo.head?.subject || repoInfo.headSubject || "No commits";
+                        output += `- **Head Commit**: \`${headSha.slice(0, 7)}\` - ${headSubject}\n`;
                         if (latestJob) {
                             const shortSha = latestJob.shortSha || latestJob.sha?.slice(0, 7);
                             output += `\n### Latest Audit (\`${shortSha}\`)\n`;
@@ -205,12 +218,22 @@ export default Plugin.define({
                             return;
                         }
                         if (sub === "goal") {
-                            const goalText = args.slice(1).join(" ");
-                            if (goalText.toLowerCase() === "clear") {
+                            const goalText = args.slice(1).join(" ").trim();
+                            const lower = goalText.toLowerCase();
+                            if (lower === "clear" || lower === "--clear") {
                                 await manageGoal(dir, undefined, true);
                                 await ctx.session.synthetic({
                                     sessionID,
                                     text: "Repository goal cleared.",
+                                });
+                                return;
+                            }
+                            if (lower === "refresh" || lower === "--refresh") {
+                                const res = await manageGoal(dir, undefined, false, true);
+                                const goalStr = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");
+                                await ctx.session.synthetic({
+                                    sessionID,
+                                    text: goalStr ? `Refreshed repository goal: "${goalStr}"` : "Repository goal refreshed.",
                                 });
                                 return;
                             }
@@ -223,15 +246,16 @@ export default Plugin.define({
                                 return;
                             }
                             const res = await manageGoal(dir);
+                            const currentGoal = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");
                             await ctx.session.synthetic({
                                 sessionID,
-                                text: res.goal ? `Current milestone goal: "${res.goal}"` : "No goal currently set. Usage: `/next-steps goal <text>`",
+                                text: currentGoal ? `Current milestone goal: "${currentGoal}"` : "No goal currently set. Usage: `/next-steps goal <text>`",
                             });
                             return;
                         }
                         if (sub === "execute" || sub === "plan") {
                             const planId = args[1] || "1";
-                            const planRes = await executePlan(dir, planId);
+                            const planRes = await executePlan(dir, planId, true);
                             if (!planRes.ok || !planRes.prompt) {
                                 await ctx.session.synthetic({
                                     sessionID,
@@ -248,37 +272,8 @@ export default Plugin.define({
                         // Default: synthesize and display proposals in chat
                         const force = sub === "refresh" || sub === "force";
                         const proposalsRes = await synthesizeNextSteps(dir, force);
-                        const proposals = proposalsRes.proposals || [];
-                        const goal = proposalsRes.goal || proposalsRes.projectGoal;
-                        let output = `## Proposed Next Steps\n\n`;
-                        if (goal) {
-                            output += `**Milestone Goal**: "${goal}"\n\n`;
-                        }
-                        if (proposals.length === 0) {
-                            output += `No proposals available. Run \`/next-steps refresh\` to analyze repository context and synthesize proposals.\n`;
-                        }
-                        else {
-                            proposals.forEach((p, idx) => {
-                                const num = p.id || idx + 1;
-                                const tag = p.category || p.tag || "Feature";
-                                const diff = p.difficulty ? ` · ${p.difficulty}` : "";
-                                const dur = p.estimatedDuration ? ` · ~${p.estimatedDuration}` : "";
-                                output += `### ${num}. [${tag}] ${p.title}${diff}${dur}\n`;
-                                if (p.summary || p.description) {
-                                    output += `${p.summary || p.description}\n`;
-                                }
-                                if (Array.isArray(p.objectives) && p.objectives.length > 0) {
-                                    p.objectives.slice(0, 3).forEach((obj) => {
-                                        output += `- ${obj}\n`;
-                                    });
-                                }
-                                if (Array.isArray(p.affectedFiles) && p.affectedFiles.length > 0) {
-                                    output += `*Files*: ${p.affectedFiles.map((f) => `\`${f}\``).join(", ")}\n`;
-                                }
-                                output += `*Execute*: \`/next-steps execute ${num}\`\n\n`;
-                            });
-                        }
-                        output += `---\n**Available Commands**:\n`;
+                        let output = formatNextStepsReport(proposalsRes);
+                        output += `\n---\n**Available Commands**:\n`;
                         output += `- \`/next-steps execute <id>\`: View approved plan and begin implementation\n`;
                         output += `- \`/next-steps refresh\`: Re-analyze project and generate fresh proposals\n`;
                         output += `- \`/next-steps cancel\`: Cancel active synthesis turn\n`;
@@ -309,23 +304,28 @@ export default Plugin.define({
                     };
                 });
                 registerTool("watchdog_audit", "Prepare an isolated worktree and trigger a Watchdog review for a commit", Schema.Struct({
-                    repo: Schema.String,
-                    sha: Schema.String,
+                    repo: Schema.optional(Schema.String),
+                    sha: Schema.optional(Schema.String),
                     comment: Schema.optional(Schema.String),
+                    force: Schema.optional(Schema.Boolean),
                 }), async (input) => {
-                    await prepareWorktree(input.repo, input.sha);
-                    await queueAudit(input.repo, input.sha, input.comment);
-                    const status = await getStatus(input.repo);
+                    const targetRepo = input.repo || ctx.location.directory;
+                    const res = await queueAudit(targetRepo, input.sha, input.comment, input.force ?? true);
+                    const shortSha = res?.job?.short_sha || (input.sha ? String(input.sha).slice(0, 7) : "HEAD");
+                    const status = await getStatus(targetRepo);
                     return {
-                        output: status,
-                        content: `Prepared isolated worktree and queued audit for commit ${input.sha}`,
+                        output: { status, queue: res },
+                        content: res?.skipped
+                            ? `Audit skipped: ${res?.reason || "Commit was skipped."}`
+                            : `Queued audit for commit ${shortSha} in an isolated Git worktree`,
                     };
                 });
                 registerTool("watchdog_apply_fix", "Apply confirmed bug fixes from an isolated fix branch onto the active branch", Schema.Struct({
-                    repo: Schema.String,
-                    sha: Schema.String,
+                    repo: Schema.optional(Schema.String),
+                    sha: Schema.optional(Schema.String),
                 }), async (input) => {
-                    const result = await applyFix(input.repo, input.sha);
+                    const targetRepo = input.repo || ctx.location.directory;
+                    const result = await applyFix(targetRepo, input.sha);
                     return {
                         output: result,
                         content: JSON.stringify(result, null, 2),
@@ -343,18 +343,24 @@ export default Plugin.define({
                         content: JSON.stringify(result, null, 2),
                     };
                 });
-                registerTool("watchdog_send_comment", "Send a comment or guidance message to an in-progress Watchdog audit", Schema.Struct({
-                    comment: Schema.String,
-                    repo: Schema.optional(Schema.String),
-                    jobId: Schema.optional(Schema.String),
-                }), async (input) => {
+                const commentHandler = async (input) => {
                     const targetRepo = input.repo || ctx.location.directory;
                     const result = await sendAuditComment(targetRepo, input.comment, input.jobId);
                     return {
                         output: result,
                         content: JSON.stringify(result, null, 2),
                     };
-                });
+                };
+                registerTool("watchdog_comment", "Send a comment or guidance message to an in-progress Watchdog audit", Schema.Struct({
+                    comment: Schema.String,
+                    repo: Schema.optional(Schema.String),
+                    jobId: Schema.optional(Schema.String),
+                }), commentHandler);
+                registerTool("watchdog_send_comment", "Send a comment or guidance message to an in-progress Watchdog audit", Schema.Struct({
+                    comment: Schema.String,
+                    repo: Schema.optional(Schema.String),
+                    jobId: Schema.optional(Schema.String),
+                }), commentHandler);
                 registerTool("watchdog_next_steps", "Synthesize 4 project-grounded next-step implementation plans adhering to /plan standard", Schema.Struct({
                     repo: Schema.optional(Schema.String),
                     force: Schema.optional(Schema.Boolean),
@@ -371,7 +377,7 @@ export default Plugin.define({
                     planId: Schema.String,
                 }), async (input) => {
                     const targetRepo = input.repo || ctx.location.directory;
-                    const result = await executePlan(targetRepo, input.planId);
+                    const result = await executePlan(targetRepo, input.planId, true);
                     return {
                         output: result,
                         content: JSON.stringify(result, null, 2),
@@ -399,12 +405,27 @@ export default Plugin.define({
                     repo: Schema.optional(Schema.String),
                     goal: Schema.optional(Schema.String),
                     clear: Schema.optional(Schema.Boolean),
+                    refresh: Schema.optional(Schema.Boolean),
                 }), async (input) => {
                     const targetRepo = input.repo || ctx.location.directory;
-                    const result = await manageGoal(targetRepo, input.goal, Boolean(input.clear));
+                    const result = await manageGoal(targetRepo, input.goal, Boolean(input.clear), Boolean(input.refresh));
+                    const goalStr = typeof result?.goal === "object" ? (result.goal?.goal || "") : (result?.goal || "");
+                    let text = "No goal currently set.";
+                    if (input.clear) {
+                        text = "Repository milestone goal cleared.";
+                    }
+                    else if (input.refresh) {
+                        text = goalStr ? `Refreshed repository milestone goal: "${goalStr}"` : "Milestone goal refreshed.";
+                    }
+                    else if (input.goal) {
+                        text = `Repository milestone goal set to: "${input.goal}"`;
+                    }
+                    else if (goalStr) {
+                        text = `Current milestone goal: "${goalStr}"`;
+                    }
                     return {
                         output: result,
-                        content: JSON.stringify(result, null, 2),
+                        content: text,
                     };
                 });
             });

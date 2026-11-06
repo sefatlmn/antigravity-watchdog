@@ -65,6 +65,10 @@ const PRIMARY_TOOLS = [
           type: "string",
           description: "Optional guidance note or focus area for the auditor.",
         },
+        force: {
+          type: "boolean",
+          description: "Force audit even if commit has skip tags or is docs-only.",
+        },
       },
     },
   },
@@ -138,6 +142,10 @@ const PRIMARY_TOOLS = [
           type: "boolean",
           description: "Set true to clear existing goal override.",
         },
+        refresh: {
+          type: "boolean",
+          description: "Review codebase and generate a refreshed project goal.",
+        },
       },
     },
   },
@@ -199,7 +207,31 @@ const PRIMARY_TOOLS = [
   },
 ];
 
-const ALL_TOOLS = PRIMARY_TOOLS;
+const ALL_TOOLS = [
+  ...PRIMARY_TOOLS,
+  {
+    name: "watchdog_send_comment",
+    description: "Send guidance or focus notes to an in-progress Watchdog audit (backwards compatibility alias for watchdog_comment).",
+    inputSchema: PRIMARY_TOOLS.find((t) => t.name === "watchdog_comment")?.inputSchema || {
+      type: "object",
+      properties: {
+        comment: {
+          type: "string",
+          description: "Guidance message to forward to the active auditor.",
+        },
+        repo: {
+          type: "string",
+          description: "Path to git repository (defaults to working directory).",
+        },
+        jobId: {
+          type: "string",
+          description: "Optional specific job ID to message.",
+        },
+      },
+      required: ["comment"],
+    },
+  },
+];
 
 const PROMPTS = [
   {
@@ -242,9 +274,11 @@ async function handleToolCall(name: string, args: Record<string, any> = {}): Pro
       }
 
       case "watchdog_audit": {
-        await prepareWorktree(args.repo, args.sha);
-        const res = await queueAudit(args.repo, args.sha, args.comment);
+        const res = await queueAudit(args.repo, args.sha, args.comment, args.force ?? true);
         const shortSha = res?.job?.short_sha || (args.sha ? String(args.sha).slice(0, 7) : "HEAD");
+        if (res?.skipped || res?.ok === false) {
+          return { text: `Audit skipped: ${res?.reason || res?.error || "Commit was skipped."}` };
+        }
         if (res?.already_running) {
           return { text: `Audit for commit \`${shortSha}\` is already running. Double auditing prevented.` };
         }
@@ -281,15 +315,19 @@ async function handleToolCall(name: string, args: Record<string, any> = {}): Pro
       }
 
       case "watchdog_goal": {
-        const res = await manageGoal(args.repo, args.goal, Boolean(args.clear));
+        const res = await manageGoal(args.repo, args.goal, Boolean(args.clear), Boolean(args.refresh));
         if (args.clear) {
           return { text: "Repository milestone goal cleared." };
+        }
+        const goalStr = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");
+        if (args.refresh) {
+          return { text: goalStr ? `Refreshed repository milestone goal: "${goalStr}"` : "Milestone goal refreshed." };
         }
         if (args.goal) {
           return { text: `Repository milestone goal set to: "${args.goal}"` };
         }
         return {
-          text: res?.goal ? `Current milestone goal: "${res.goal}"` : "No goal currently set.",
+          text: goalStr ? `Current milestone goal: "${goalStr}"` : "No goal currently set.",
         };
       }
 
@@ -382,7 +420,7 @@ export function startMcpServer(): void {
               },
               serverInfo: {
                 name: "watchdog",
-                version: "1.1.0",
+                version: "1.3.0",
               },
             },
           });

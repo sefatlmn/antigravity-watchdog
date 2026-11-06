@@ -88,13 +88,120 @@ const isInside = (path: string, roots: string[]) =>
   !/(^|\/)\.\.(\/|$)/.test(path) && roots.some(root => path === root || path.startsWith(`${root.replace(/\/+$/, '')}/`))
 const startsWithWord = (s: string, prefix: string) => s === prefix || s.startsWith(`${prefix} `)
 
+function parseShellCommand(command: string): { subcommands: string[]; error: string | null } {
+  const input = command.replace(/\\\n/g, ' ')
+
+  const subcommands: string[] = []
+  let current = ''
+  let inSingle = false
+  let inDouble = false
+  let i = 0
+
+  while (i < input.length) {
+    const ch = input[i]
+
+    if (inSingle) {
+      if (ch === "'") {
+        inSingle = false
+      }
+      current += ch
+      i++
+      continue
+    }
+
+    if (inDouble) {
+      if (ch === '\\' && i + 1 < input.length) {
+        current += ch + input[i + 1]
+        i += 2
+        continue
+      }
+      if (ch === '"') {
+        inDouble = false
+      } else if (ch === '$' && i + 1 < input.length && input[i + 1] === '(') {
+        return { subcommands: [], error: 'redirects and command substitution are not allowed' }
+      }
+      current += ch
+      i++
+      continue
+    }
+
+    if (ch === "'") {
+      inSingle = true
+      current += ch
+      i++
+      continue
+    }
+
+    if (ch === '"') {
+      inDouble = true
+      current += ch
+      i++
+      continue
+    }
+
+    if (ch === '\\' && i + 1 < input.length) {
+      current += ch + input[i + 1]
+      i += 2
+      continue
+    }
+
+    if (ch === '$' && i + 1 < input.length && input[i + 1] === '(') {
+      return { subcommands: [], error: 'redirects and command substitution are not allowed' }
+    }
+
+    if (ch === '`') {
+      return { subcommands: [], error: 'redirects and command substitution are not allowed' }
+    }
+
+    const remainder = input.slice(i)
+    const allowedRedirect = /^(\d?>&\d|\d?>\s*\/dev\/null)/.exec(remainder)
+    if (allowedRedirect) {
+      current += ' '
+      i += allowedRedirect[0].length
+      continue
+    }
+
+    if (ch === '<' || ch === '>') {
+      return { subcommands: [], error: 'redirects and command substitution are not allowed' }
+    }
+
+    if (remainder.startsWith('&&') || remainder.startsWith('||')) {
+      subcommands.push(current)
+      current = ''
+      i += 2
+      continue
+    }
+
+    if (ch === ';' || ch === '&' || ch === '|' || ch === '\n') {
+      subcommands.push(current)
+      current = ''
+      i++
+      continue
+    }
+
+    current += ch
+    i++
+  }
+
+  if (inSingle || inDouble) {
+    return { subcommands: [], error: 'unclosed quote in command' }
+  }
+
+  if (current) {
+    subcommands.push(current)
+  }
+
+  return { subcommands, error: null }
+}
+
 // Whether every part of a shell command is one the grant allows. `cd` moves where `git add`
 // and `git commit` would act; those are allowed only inside the grant's first folder.
-function commandAllowed(grant: AgentGrant, command: string): string | null {
-  const cleaned = command.replace(/\\\n/g, ' ').replace(/\d?>&\d|\d?>\s*\/dev\/null/g, '')
-  if (/[<>`]|\$\(/.test(cleaned)) return 'redirects and command substitution are not allowed'
+export function commandAllowed(grant: AgentGrant, command: string): string | null {
+  const { subcommands, error } = parseShellCommand(command)
+  if (error) return error
+
   let dir = ''
-  for (const raw of cleaned.split(/&&|\|\||;|\||&|\n/)) {
+  for (const raw of subcommands) {
     let part = raw.trim()
     if (!part) continue
     if (startsWithWord(part, 'cd')) {
@@ -109,7 +216,11 @@ function commandAllowed(grant: AgentGrant, command: string): string | null {
       if (at && isInside(at, grant.roots.slice(0, 1))) continue
       return 'git add and git commit are only allowed in the audit worktree'
     }
-    if (startsWithWord(part, `python3 "${grant.ctl}" complete`) || startsWithWord(part, `python3 ${grant.ctl} complete`)) continue
+    if (
+      startsWithWord(part, `python3 "${grant.ctl}" complete`) ||
+      startsWithWord(part, `python3 '${grant.ctl}' complete`) ||
+      startsWithWord(part, `python3 ${grant.ctl} complete`)
+    ) continue
     if (CHECKS.some(prefix => startsWithWord(part, prefix))) continue
     if (LOOK.some(prefix => startsWithWord(part, prefix)) && !/\s-(delete|exec|execdir|ok)\b/.test(part)) continue
     return `\`${part.split(/\s+/).slice(0, 3).join(' ')}\` is not one of the commands a Watchdog audit may run`

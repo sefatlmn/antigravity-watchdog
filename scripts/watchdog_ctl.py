@@ -9,7 +9,6 @@ fix-branch application, and cleanup for the global Antigravity Watchdog plugin.
 
 import argparse
 import datetime
-import fcntl
 import hashlib
 import json
 import os
@@ -18,8 +17,14 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore
 
 HOME = Path.home()
 APP_DATA_DIR = Path(os.environ.get("ANTIGRAVITY_APP_DATA_DIR", str(HOME / ".gemini" / "antigravity")))
@@ -48,6 +53,7 @@ IN_SESSION_PREFIXES = ("claude-agent-", "claude-claiming")
 QUEUED_TIMEOUT = 600
 CLAIM_TIMEOUT = 600
 IN_SESSION_TIMEOUT = 3600
+TODO_COMMENT_RE = re.compile(r'(?:^\s*(?://|#|/\*|\*|<!--)|(?<=\s)(?://|#)).*?\b(TODO|FIXME|BUG|HACK)\b')
 
 
 def in_claude_session() -> bool:
@@ -117,8 +123,19 @@ class StateLock:
     def __enter__(self) -> "StateLock":
         if StateLock._depth == 0:
             ensure_dirs()
-            StateLock._fp = open(LOCK_FILE, "w")
-            fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_EX)
+            StateLock._fp = open(LOCK_FILE, "a+")
+            if fcntl is not None:
+                fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_EX)
+            else:
+                try:
+                    import msvcrt
+                    if StateLock._fp.tell() == 0:
+                        StateLock._fp.write("0")
+                        StateLock._fp.flush()
+                    StateLock._fp.seek(0)
+                    msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_LOCK, 1)
+                except Exception:
+                    pass
         StateLock._depth += 1
         return self
 
@@ -126,7 +143,15 @@ class StateLock:
         StateLock._depth = max(0, StateLock._depth - 1)
         if StateLock._depth == 0 and StateLock._fp is not None:
             try:
-                fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
+                else:
+                    try:
+                        import msvcrt
+                        StateLock._fp.seek(0)
+                        msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_UNLCK, 1)
+                    except Exception:
+                        pass
             finally:
                 try:
                     StateLock._fp.close()
@@ -1093,15 +1118,16 @@ def deep_analyze_codebase(repo_root: Path, head_sha: str = "HEAD") -> Dict[str, 
                 elif ext == ".go":
                     codebase["languages"].add("Go")
 
-                # Scan for TODO/FIXME markers
+                # Scan for debt markers in source comments
                 if p.stat().st_size < 250000 and len(codebase["todos"]) < 30:
                     try:
                         for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-                            if any(k in line for k in ("TODO", "FIXME", "BUG", "HACK")) and len(line.strip()) < 140:
+                            stripped = line.strip()
+                            if TODO_COMMENT_RE.search(stripped) and len(stripped) < 140:
                                 codebase["todos"].append({
                                     "file": rel_str,
                                     "line": i,
-                                    "text": line.strip(),
+                                    "text": stripped,
                                 })
                                 if len(codebase["todos"]) >= 30:
                                     break

@@ -224,7 +224,7 @@ One codebase serves every host:
 - `plugin.json`, `rules/`: the Antigravity plugin. `.claude-plugin/`, `hooks/hooks.json`, `.mcp.json`, `commands/`, `agents/`: the Claude Code plugin. `skills/` serves both.
 - `packages/universal/`: MCP server, CLI, and OpenCode plugin.
 
-To run the Claude Code plugin's tests: `claude plugin test .`
+To run the tests and typecheck: `npm test && npm run typecheck` (or `claude plugin test .` inside Claude Code).
 
 ---
 

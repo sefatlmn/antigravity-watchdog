@@ -101,29 +101,52 @@ export async function prepareWorktree(repo, sha) {
     const targetRepo = resolveRepo(repo);
     let targetSha = sha || "";
     if (!targetSha) {
-        const sync = await syncRepo(targetRepo);
-        targetSha = String(sync?.bestRepo?.headSha || "HEAD");
+        try {
+            const sync = await syncRepo(targetRepo);
+            targetSha = String(sync?.bestRepo?.head?.sha || sync?.bestRepo?.headSha || "HEAD");
+        }
+        catch {
+            targetSha = "HEAD";
+        }
     }
     return runCtlJson(["prepare", "--repo", targetRepo, "--sha", targetSha]);
 }
-export async function queueAudit(repo, sha, userComment) {
+export async function queueAudit(repo, sha, userComment, force = false) {
     const targetRepo = resolveRepo(repo);
     let targetSha = sha || "";
     if (!targetSha) {
-        const sync = await syncRepo(targetRepo);
-        targetSha = String(sync?.bestRepo?.headSha || "HEAD");
+        try {
+            const sync = await syncRepo(targetRepo);
+            targetSha = String(sync?.bestRepo?.head?.sha || sync?.bestRepo?.headSha || "HEAD");
+        }
+        catch {
+            targetSha = "HEAD";
+        }
     }
     const args = ["queue", "--repo", targetRepo, "--sha", targetSha];
     if (userComment && userComment.trim())
         args.push("--comment", userComment.trim());
+    if (force)
+        args.push("--force");
     return runCtlJson(args);
 }
 export async function applyFix(repo, sha) {
     const targetRepo = resolveRepo(repo);
     let targetSha = sha || "";
     if (!targetSha) {
-        const sync = await syncRepo(targetRepo);
-        targetSha = String(sync?.bestRepo?.lastFixSha || sync?.bestRepo?.headSha || "");
+        try {
+            const sync = await syncRepo(targetRepo);
+            const firstFix = sync?.bestRepo?.fixBranches?.[0];
+            targetSha = String(firstFix?.shortSha ||
+                (typeof firstFix === "string" ? firstFix.replace(/^fix\/watchdog-/, "") : "") ||
+                sync?.bestRepo?.lastFixSha ||
+                sync?.bestRepo?.head?.sha ||
+                sync?.bestRepo?.headSha ||
+                "");
+        }
+        catch {
+            // ignore sync failure and throw error below if no sha
+        }
     }
     if (!targetSha) {
         throw new Error("No fix branch or commit SHA specified.");
@@ -167,18 +190,25 @@ export async function cancelSynthesis(repo) {
     const targetRepo = resolveRepo(repo);
     return runCtlJson(["cancel-synthesis", "--repo", targetRepo]);
 }
-export async function manageGoal(repo, goal, clear = false) {
+export async function manageGoal(repo, goal, clear = false, refresh = false) {
     const targetRepo = resolveRepo(repo);
     const args = ["goal", "--repo", targetRepo];
-    if (clear) {
+    if (refresh) {
+        args.push("--refresh");
+    }
+    else if (clear) {
         args.push("--clear");
     }
     else if (goal) {
         args.push("--set", goal.trim());
     }
-    return runCtlJson(args);
+    const res = await runCtlJson(args);
+    if (res && typeof res.goal === "object" && res.goal !== null) {
+        res.goal = res.goal.goal || res.goal;
+    }
+    return res;
 }
-export async function executePlan(repo, planId, noSpawn = false) {
+export async function executePlan(repo, planId, noSpawn = true) {
     const targetRepo = resolveRepo(repo);
     const id = planId || "1";
     const args = ["execute-plan", "--repo", targetRepo, "--plan-id", id];
@@ -200,14 +230,19 @@ export function readReportMarkdown(reportPath) {
 }
 export function formatStatusReport(status, syncInfo) {
     const repoInfo = syncInfo?.bestRepo || {};
-    const jobs = status.jobs || [];
+    const jobs = status?.jobs || [];
     const latestJob = jobs[0];
     let output = `## Watchdog Status: ACTIVE\n\n`;
+    if (status?.error && jobs.length === 0) {
+        output += `Status notice: ${status.error}\n\n`;
+    }
     if (repoInfo.repoName || repoInfo.branch) {
         output += `- **Repository**: \`${repoInfo.repoName || "active"}\` (\`${repoInfo.branch || "main"}\`)\n`;
     }
-    if (repoInfo.headSha) {
-        output += `- **Head Commit**: \`${repoInfo.headSha.slice(0, 7)}\` - ${repoInfo.headSubject || "No commit message"}\n`;
+    const headSha = repoInfo.head?.sha || repoInfo.headSha;
+    const headSubject = repoInfo.head?.subject || repoInfo.headSubject;
+    if (headSha) {
+        output += `- **Head Commit**: \`${headSha.slice(0, 7)}\` - ${headSubject || "No commit message"}\n`;
     }
     if (latestJob) {
         const shortSha = latestJob.short_sha || latestJob.shortSha || latestJob.sha?.slice(0, 7);
@@ -228,6 +263,9 @@ export function formatStatusReport(status, syncInfo) {
     return output;
 }
 export function formatNextStepsReport(proposalsRes) {
+    if (!proposalsRes) {
+        return "## Proposed Next Steps\n\nNo proposals available. Refresh to synthesize proposals.\n";
+    }
     const proposals = proposalsRes.proposals || [];
     const rawGoal = proposalsRes.goal || proposalsRes.projectGoal;
     const goalStr = typeof rawGoal === "string"
@@ -237,7 +275,10 @@ export function formatNextStepsReport(proposalsRes) {
     if (goalStr && goalStr.trim()) {
         output += `**Milestone Goal**: "${goalStr.trim()}"\n\n`;
     }
-    if (proposals.length === 0) {
+    if (proposalsRes.error && proposals.length === 0) {
+        output += `Could not load proposals: ${proposalsRes.error}\n`;
+    }
+    else if (proposals.length === 0) {
         output += `No proposals available. Refresh to synthesize proposals.\n`;
     }
     else {
