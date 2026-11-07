@@ -52,7 +52,19 @@ Options:
   console.log(help.trim());
 }
 
-function parseArgs(args: string[]): {
+export const VALUE_FLAGS = new Set([
+  "repo",
+  "sha",
+  "set",
+  "comment",
+  "job-id",
+  "plan-id",
+  "editor",
+  "limit",
+  "conversation-id",
+]);
+
+export function parseArgs(args: string[]): {
   cmd: string;
   flags: Record<string, string | boolean>;
   positionals: string[];
@@ -68,7 +80,7 @@ function parseArgs(args: string[]): {
       if (key.includes("=")) {
         const [k, v] = key.split("=", 2);
         flags[k] = v;
-      } else if (i + 1 < args.length && !args[i + 1].startsWith("-")) {
+      } else if (VALUE_FLAGS.has(key) && i + 1 < args.length && !args[i + 1].startsWith("-")) {
         flags[key] = args[i + 1];
         i++;
       } else {
@@ -255,6 +267,10 @@ async function main(): Promise<void> {
         if (isJson) {
           console.log(JSON.stringify(res, null, 2));
         } else {
+          if (res?.ok === false || res?.error) {
+            console.error(`Error applying fix: ${res.error || "Unknown error"}`);
+            process.exit(1);
+          }
           console.log(res?.message || "Successfully applied fix branch.");
         }
         break;
@@ -268,6 +284,10 @@ async function main(): Promise<void> {
         if (isJson) {
           console.log(JSON.stringify(res, null, 2));
         } else {
+          if (res?.ok === false || res?.error) {
+            console.error(`Error: ${res.error || "Could not continue audit."}`);
+            process.exit(1);
+          }
           if (res?.completed) {
             console.log(`Audit completed: ${res.verdict || "PASS"}\n${res.summary || ""}`);
           } else {
@@ -289,6 +309,10 @@ async function main(): Promise<void> {
         if (isJson) {
           console.log(JSON.stringify(res, null, 2));
         } else {
+          if (res?.ok === false || res?.error) {
+            console.error(`Error: ${res.error || "No in-progress audit found."}`);
+            process.exit(1);
+          }
           console.log(`Comment forwarded: "${comment}"`);
         }
         break;
@@ -296,7 +320,23 @@ async function main(): Promise<void> {
 
       case "next-steps":
       case "proposals": {
-        const force = Boolean(flags.refresh || flags.force);
+        const sub = positionals[0]?.toLowerCase();
+        if (sub === "execute" || sub === "plan" || (sub && /^#?[1-4]$/.test(sub))) {
+          const planId = (sub === "execute" || sub === "plan" ? (positionals[1] || "1") : sub).replace(/^#/, "");
+          const res = await executePlan(repo, planId, true);
+          if (isJson) {
+            console.log(JSON.stringify(res, null, 2));
+          } else {
+            if (res?.ok && res?.prompt) {
+              console.log(`### Approved Plan #${planId}: ${res.title || ""}\n\n${res.prompt}`);
+            } else {
+              console.error(`Could not load plan #${planId}: ${res?.error || "Plan not found"}`);
+              process.exit(1);
+            }
+          }
+          break;
+        }
+        const force = Boolean(flags.refresh || flags.force || sub === "refresh");
         const res = await synthesizeNextSteps(repo, force);
         if (isJson) {
           console.log(JSON.stringify(res, null, 2));
@@ -308,7 +348,7 @@ async function main(): Promise<void> {
 
       case "plan":
       case "execute": {
-        const planId = positionals[0] || "1";
+        const planId = (positionals[0] || "1").replace(/^#/, "");
         const res = await executePlan(repo, planId, true);
         if (isJson) {
           console.log(JSON.stringify(res, null, 2));
@@ -334,9 +374,10 @@ async function main(): Promise<void> {
       }
 
       case "goal": {
-        const clear = Boolean(flags.clear);
-        const refresh = Boolean(flags.refresh);
-        const setGoal = typeof flags.set === "string" ? flags.set : positionals.join(" ").trim();
+        const rawPos = positionals.join(" ").trim();
+        const clear = Boolean(flags.clear) || positionals[0]?.toLowerCase() === "clear";
+        const refresh = Boolean(flags.refresh) || positionals[0]?.toLowerCase() === "refresh";
+        const setGoal = typeof flags.set === "string" ? flags.set : (!clear && !refresh ? rawPos : "");
         if (refresh) {
           const res = await manageGoal(repo, undefined, false, true);
           const goalStr = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");

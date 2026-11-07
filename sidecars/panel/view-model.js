@@ -63,7 +63,11 @@ export function goalText(repo) {
 }
 
 /** @param {Job} job @param {Repo} repo */
-const sameRepo = (job, repo) => !(job.repo_path || '').trim() || job.repo_path.trim() === repo.repoPath;
+const sameRepo = (job, repo) => {
+  const jp = (job?.repo_path || '').trim().replace(/\/+$/, '');
+  const rp = (repo?.repoPath || '').trim().replace(/\/+$/, '');
+  return !jp || !rp || jp === rp;
+};
 
 // What one audit card shows. `badge` is the corner tag: null, or { kind: 'fix' | 'warn' | 'plain', label }.
 /** @param {Job} job */
@@ -148,9 +152,11 @@ export function partitionJobs(data) {
 /** @param {Proposal & Record<string, any>} p @param {Repo | null | undefined} repo */
 export function proposalView(p, repo) {
   const files = Array.isArray(p.affectedFiles) ? p.affectedFiles : (Array.isArray(p.affected_files) ? p.affected_files : []);
-  const goals = (Array.isArray(p.goals) ? p.goals : []).map(stripEmojis);
+  const rawGoals = Array.isArray(p.goals) ? p.goals : (Array.isArray(p.objectives) ? p.objectives : []);
+  const goals = rawGoals.map(stripEmojis);
   const badge = stripEmojis(p.badge || p.tag || p.category || 'Feature') || 'Feature';
   const difficulty = p.difficulty || p.archetype || 'Medium';
+  const estimatedTime = p.estimatedTime || p.estimatedDuration || '';
   const title = stripEmojis(p.title || 'Next Step Plan');
   const subtitle = stripEmojis(p.subtitle || '');
   const summary = stripEmojis(p.summary || '');
@@ -175,7 +181,7 @@ export function proposalView(p, repo) {
         : { kind: 'execute-plan', label: 'Execute in Agent', tone: 'primary' };
 
   return {
-    id, badge, difficulty, title, description, goals, files,
+    id, badge, difficulty, estimatedTime, title, description, goals, files,
     planPath: p.planPath || p.plan_absolute_path || '',
     planFile: p.planFile || p.plan_file || '',
     execSummary: execution?.summary || '',

@@ -133,9 +133,7 @@ function discoverActiveClaudeWorkspaces() {
 app.page('/', () => readLocal('index.html'));
 app.page('/app.js', () => readLocal('app.js'));
 app.page('/view-model.js', () => readLocal('view-model.js'));
-if (isStandaloneMode) {
-  app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
-}
+app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
 app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, host: isStandaloneMode ? 'claude' : 'antigravity', pid: process.pid }), 'GET');
 app.api('/api/active-workspace', (data, req) => {
@@ -175,9 +173,12 @@ let resolvedPythonBin = null;
 function runPythonCtl(args, hostOverride = '') {
   const candidates = resolvedPythonBin
     ? [resolvedPythonBin]
-    : ['/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', 'python3'];
+    : [process.env.PYTHON_BIN, '/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', 'python3', 'python'].filter(Boolean);
   const effectiveHost = String(hostOverride || process.env.WATCHDOG_HOST || (isStandaloneMode ? 'claude' : 'antigravity')).trim();
   const fullArgs = [WATCHDOG_CTL_SCRIPT, ...args];
+  if (!fullArgs.includes('--json')) {
+    fullArgs.push('--json');
+  }
   if (effectiveHost && !fullArgs.includes('--host')) {
     fullArgs.push('--host', effectiveHost);
   }
@@ -187,7 +188,7 @@ function runPythonCtl(args, hostOverride = '') {
     try {
       const out = execFileSync(bin, fullArgs, {
         encoding: 'utf8',
-        timeout: 25000,
+        timeout: 60000,
         env: childEnv,
       });
       resolvedPythonBin = bin;
@@ -207,7 +208,7 @@ function runPythonCtl(args, hostOverride = '') {
       throw new Error(err.stderr ? String(err.stderr).trim() : err.message);
     }
   }
-  throw lastErr || new Error('python3 not found');
+  throw lastErr || new Error('Python not found');
 }
 
 function runGit(repoPath, args) {
@@ -1004,9 +1005,10 @@ app.api('/api/trigger', (data) => {
   }
 
   // Prevent double auditing if an audit is already running for this repo
+  const samePath = (a, b) => !a || !b || a === b || resolve(String(a)) === resolve(String(b));
   const state = loadState();
   const running = (state.jobs || []).find(
-    (j) => (!j.repo_path || j.repo_path === repoPath) && (j.status === 'running' || j.status === 'queued')
+    (j) => (!j.repo_path || samePath(j.repo_path, repoPath)) && (j.status === 'running' || j.status === 'queued')
   );
 
   if (running) {
@@ -1113,7 +1115,9 @@ function isAllowedArtifactPath(filePath) {
   if (!resolved.endsWith('.md') && !resolved.endsWith('.json')) {
     return false;
   }
-  return resolved.includes('/.antigravity/') || resolved.startsWith(WATCHDOG_DIR);
+  const normResolved = resolved.replace(/\\/g, '/');
+  const normWatchdog = WATCHDOG_DIR.replace(/\\/g, '/');
+  return normResolved.includes('/.antigravity/') || normResolved.startsWith(normWatchdog);
 }
 
 // POST /api/report { reportPath }

@@ -132,7 +132,7 @@ export async function queueAudit(repo, sha, userComment, force = false) {
 }
 export async function applyFix(repo, sha) {
     const targetRepo = resolveRepo(repo);
-    let targetSha = sha || "";
+    let targetSha = (sha || "").replace(/^fix\/watchdog-/, "");
     if (!targetSha) {
         try {
             const sync = await syncRepo(targetRepo);
@@ -142,7 +142,7 @@ export async function applyFix(repo, sha) {
                 sync?.bestRepo?.lastFixSha ||
                 sync?.bestRepo?.head?.sha ||
                 sync?.bestRepo?.headSha ||
-                "");
+                "").replace(/^fix\/watchdog-/, "");
         }
         catch {
             // ignore sync failure and throw error below if no sha
@@ -210,7 +210,7 @@ export async function manageGoal(repo, goal, clear = false, refresh = false) {
 }
 export async function executePlan(repo, planId, noSpawn = true) {
     const targetRepo = resolveRepo(repo);
-    const id = planId || "1";
+    const id = String(planId || "1").trim().replace(/^#/, "");
     const args = ["execute-plan", "--repo", targetRepo, "--plan-id", id];
     if (noSpawn) {
         args.push("--no-spawn");
@@ -219,7 +219,7 @@ export async function executePlan(repo, planId, noSpawn = true) {
 }
 export async function cancelPlanExecution(repo, planId) {
     const targetRepo = resolveRepo(repo);
-    const id = planId || "1";
+    const id = String(planId || "1").trim().replace(/^#/, "");
     return runCtlJson(["cancel-execution", "--repo", targetRepo, "--plan-id", id]);
 }
 export function readReportMarkdown(reportPath) {

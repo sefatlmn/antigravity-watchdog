@@ -262,10 +262,11 @@ async function handleToolCall(name: string, args: Record<string, any> = {}): Pro
   try {
     switch (name) {
       case "watchdog_status": {
-        const status = await getStatus(args.repo);
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const status = await getStatus(repo);
         let syncInfo: any = null;
         try {
-          syncInfo = await syncRepo(args.repo);
+          syncInfo = await syncRepo(repo);
         } catch {
           // ignore sync failure
         }
@@ -274,7 +275,9 @@ async function handleToolCall(name: string, args: Record<string, any> = {}): Pro
       }
 
       case "watchdog_audit": {
-        const res = await queueAudit(args.repo, args.sha, args.comment, args.force ?? true);
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const comment = args.comment || args.notes || args.message;
+        const res = await queueAudit(repo, args.sha, comment, args.force ?? true);
         const shortSha = res?.job?.short_sha || (args.sha ? String(args.sha).slice(0, 7) : "HEAD");
         if (res?.skipped || res?.ok === false) {
           return { text: `Audit skipped: ${res?.reason || res?.error || "Commit was skipped."}` };
@@ -289,42 +292,57 @@ async function handleToolCall(name: string, args: Record<string, any> = {}): Pro
       }
 
       case "watchdog_apply_fix": {
-        const res = await applyFix(args.repo, args.sha);
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const res = await applyFix(repo, args.sha);
+        if (res?.ok === false || res?.error) {
+          return {
+            text: `Failed to apply fixes: ${res.error || "Unknown error"}`,
+            isError: true,
+          };
+        }
         return {
           text: `Applied fixes to working branch.\n${res?.message || JSON.stringify(res, null, 2)}`,
         };
       }
 
       case "watchdog_next_steps": {
-        const res = await synthesizeNextSteps(args.repo, Boolean(args.force));
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const force = Boolean(args.force || args.refresh);
+        const res = await synthesizeNextSteps(repo, force);
         const text = formatNextStepsReport(res);
         return { text };
       }
 
       case "watchdog_execute_plan": {
-        if (!args.planId) {
+        const planId = String(args.planId || args.plan_id || args.plan || args.id || "").replace(/^#/, "");
+        if (!planId) {
           return { text: "Error: planId is required (e.g. '1', '2', '3', '4').", isError: true };
         }
-        const res = await executePlan(args.repo, String(args.planId), true);
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const res = await executePlan(repo, planId, true);
         if (!res?.ok || !res?.prompt) {
-          return { text: `Could not load plan #${args.planId}: ${res?.error || "Plan file not found."}`, isError: true };
+          return { text: `Could not load plan #${planId}: ${res?.error || "Plan file not found."}`, isError: true };
         }
         return {
-          text: `### Approved Plan #${args.planId}: ${res.title || "Implementation"}\n\n${res.prompt}`,
+          text: `### Approved Plan #${planId}: ${res.title || "Implementation"}\n\n${res.prompt}`,
         };
       }
 
       case "watchdog_goal": {
-        const res = await manageGoal(args.repo, args.goal, Boolean(args.clear), Boolean(args.refresh));
-        if (args.clear) {
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const isClear = Boolean(args.clear) || (typeof args.goal === "string" && args.goal.trim().toLowerCase() === "clear");
+        const isRefresh = Boolean(args.refresh) || (typeof args.goal === "string" && args.goal.trim().toLowerCase() === "refresh");
+        const goalVal = (isClear || isRefresh) ? undefined : args.goal;
+        const res = await manageGoal(repo, goalVal, isClear, isRefresh);
+        if (isClear) {
           return { text: "Repository milestone goal cleared." };
         }
         const goalStr = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");
-        if (args.refresh) {
+        if (isRefresh) {
           return { text: goalStr ? `Refreshed repository milestone goal: "${goalStr}"` : "Milestone goal refreshed." };
         }
-        if (args.goal) {
-          return { text: `Repository milestone goal set to: "${args.goal}"` };
+        if (goalVal) {
+          return { text: `Repository milestone goal set to: "${goalVal}"` };
         }
         return {
           text: goalStr ? `Current milestone goal: "${goalStr}"` : "No goal currently set.",
@@ -333,18 +351,23 @@ async function handleToolCall(name: string, args: Record<string, any> = {}): Pro
 
       case "watchdog_send_comment":
       case "watchdog_comment": {
-        if (!args.comment) {
+        const comment = args.comment || args.notes || args.message;
+        if (!comment) {
           return { text: "Error: comment is required.", isError: true };
         }
-        const res = await sendAuditComment(args.repo, String(args.comment), args.jobId);
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const jobId = args.jobId || args.job_id;
+        const res = await sendAuditComment(repo, String(comment), jobId);
         if (res?.ok) {
-          return { text: `Sent guidance to in-progress audit for commit \`${res.short_sha || "active"}\`:\n> "${args.comment}"` };
+          return { text: `Sent guidance to in-progress audit for commit \`${res.short_sha || "active"}\`:\n> "${comment}"` };
         }
         return { text: `Could not send comment: ${res?.error || "No in-progress audit found."}`, isError: true };
       }
 
       case "watchdog_continue": {
-        const res = await continueAudit(args.repo, args.sha, args.jobId);
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const jobId = args.jobId || args.job_id;
+        const res = await continueAudit(repo, args.sha, jobId);
         if (res?.completed) {
           return {
             text: `Audit for commit \`${res.shortSha || "HEAD"}\` has completed.\n` +

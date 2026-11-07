@@ -137,7 +137,7 @@ export async function queueAudit(repo?: string, sha?: string, userComment?: stri
 
 export async function applyFix(repo?: string, sha?: string): Promise<any> {
   const targetRepo = resolveRepo(repo);
-  let targetSha = sha || "";
+  let targetSha = (sha || "").replace(/^fix\/watchdog-/, "");
   if (!targetSha) {
     try {
       const sync = await syncRepo(targetRepo);
@@ -149,7 +149,7 @@ export async function applyFix(repo?: string, sha?: string): Promise<any> {
         sync?.bestRepo?.head?.sha ||
         sync?.bestRepo?.headSha ||
         ""
-      );
+      ).replace(/^fix\/watchdog-/, "");
     } catch {
       // ignore sync failure and throw error below if no sha
     }
@@ -217,7 +217,7 @@ export async function manageGoal(repo?: string, goal?: string, clear = false, re
 
 export async function executePlan(repo?: string, planId?: string, noSpawn = true): Promise<any> {
   const targetRepo = resolveRepo(repo);
-  const id = planId || "1";
+  const id = String(planId || "1").trim().replace(/^#/, "");
   const args = ["execute-plan", "--repo", targetRepo, "--plan-id", id];
   if (noSpawn) {
     args.push("--no-spawn");
@@ -227,7 +227,7 @@ export async function executePlan(repo?: string, planId?: string, noSpawn = true
 
 export async function cancelPlanExecution(repo?: string, planId?: string): Promise<any> {
   const targetRepo = resolveRepo(repo);
-  const id = planId || "1";
+  const id = String(planId || "1").trim().replace(/^#/, "");
   return runCtlJson(["cancel-execution", "--repo", targetRepo, "--plan-id", id]);
 }
 

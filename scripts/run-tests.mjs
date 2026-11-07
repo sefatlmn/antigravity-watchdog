@@ -557,7 +557,31 @@ async function main() {
     })
     assert.equal(unquotedRedirect.decision, 'deny')
 
-    console.log('✓ hooks/agents.ts edge cases (fail-closed, backticks, prefix boundary, playwright MCP, quote-aware commands)')
+    // Bun runners allowed in worktree
+    const bunTest = await $.tool.check({
+      tool: 'Bash',
+      input: { command: 'cd /data/worktrees/app-abc1234 && bun test' },
+      agentId: 'agent-1',
+    })
+    assert.equal(bunTest.decision, 'allow')
+
+    // python3 -m pytest check allowed in worktree
+    const pytestCmd = await $.tool.check({
+      tool: 'Bash',
+      input: { command: 'cd /data/worktrees/app-abc1234 && python3 -m pytest' },
+      agentId: 'agent-1',
+    })
+    assert.equal(pytestCmd.decision, 'allow')
+
+    // Windows backslash path normalization in isInside
+    const backslashPath = await $.tool.check({
+      tool: 'Write',
+      input: { file_path: '\\data\\worktrees\\app-abc1234\\src\\fix.ts' },
+      agentId: 'agent-1',
+    })
+    assert.equal(backslashPath.decision, 'allow')
+
+    console.log('✓ hooks/agents.ts edge cases (fail-closed, backticks, prefix boundary, playwright MCP, quote-aware commands, bun/pytest, backslashes)')
     passed++
   } catch (err) {
     console.error('✗ hooks/agents.ts edge cases test')
@@ -639,7 +663,14 @@ async function main() {
     const queueRes = await bridge.queueAudit(rootDir, 'HEAD', 'test note', true)
     assert.ok(queueRes !== null && typeof queueRes === 'object')
 
-    console.log('✓ universal package: goal unwrap, queueAudit without pre-prepare, formatters, null-safety')
+    // 5. applyFix prefix stripping: strips fix/watchdog- before passing sha to controller
+    try {
+      await bridge.applyFix(rootDir, 'fix/watchdog-0000000')
+    } catch (err) {
+      assert.ok(err.message.includes('0000000') && !err.message.includes('fix/watchdog-fix/watchdog-'))
+    }
+
+    console.log('✓ universal package: goal unwrap, queueAudit, applyFix prefix stripping, formatters, null-safety')
     passed++
   } catch (err) {
     console.error('✗ universal package tests')
@@ -669,6 +700,243 @@ print("OK")
     passed++
   } catch (err) {
     console.error('✗ python controller TODO scanner test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    const cliUrl = pathToFileURL(path.join(rootDir, 'packages/universal/dist/cli.js')).href
+    const cli = await import(cliUrl)
+    assert.equal(typeof cli.parseArgs, 'function')
+
+    const p1 = cli.parseArgs(['--json', 'status'])
+    assert.equal(p1.cmd, 'status')
+    assert.equal(p1.flags.json, true)
+    assert.deepEqual(p1.positionals, [])
+
+    const p2 = cli.parseArgs(['next-steps', '--refresh'])
+    assert.equal(p2.cmd, 'next-steps')
+    assert.equal(p2.flags.refresh, true)
+
+    const p3 = cli.parseArgs(['next-steps', '1'])
+    assert.equal(p3.cmd, 'next-steps')
+    assert.deepEqual(p3.positionals, ['1'])
+
+    const p4 = cli.parseArgs(['goal', 'clear'])
+    assert.equal(p4.cmd, 'goal')
+    assert.deepEqual(p4.positionals, ['clear'])
+
+    const p5 = cli.parseArgs(['--repo', '/some/path', 'status'])
+    assert.equal(p5.cmd, 'status')
+    assert.equal(p5.flags.repo, '/some/path')
+
+    console.log('✓ universal CLI: parseArgs non-consuming boolean flags and positionals')
+    passed++
+  } catch (err) {
+    console.error('✗ universal CLI parseArgs test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    const { execFileSync } = await import('node:child_process')
+    const pyOutput = execFileSync('python3', [
+      '-c',
+      `
+import sys
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(rootDir)})
+import scripts.watchdog_ctl as ctl
+
+assert ctl.is_same_repo_path("/path/to/repo/", "/path/to/repo") == True
+assert ctl.is_same_repo_path("C:\\\\repo\\\\sub", "C:/repo/sub") == True
+assert ctl.is_same_repo_path(None, "/path") == False
+assert ctl.is_same_repo_path("/path", None) == False
+
+tmp1 = Path("/tmp").resolve()
+tmp2 = Path("/tmp")
+assert ctl.is_same_repo_path(str(tmp1), str(tmp2)) == True
+print("OK")
+      `,
+    ], { encoding: 'utf8' })
+    assert.ok(pyOutput.includes('OK'))
+    console.log('✓ python controller: is_same_repo_path handles symlinks, trailing slashes, and backslashes')
+    passed++
+  } catch (err) {
+    console.error('✗ python controller is_same_repo_path test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    const { $, on } = createHarness(pluginRegister)
+    const mockRun = (stdout) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    let claimedRepo = null
+    on('session.cwd', () => ({ value: '/default/repo' }))
+    on('process.run', (_, e) => {
+      const argv = [...e.argv]
+      if (argv[0] === 'git') {
+        const repo = e.cwd || '/default/repo'
+        return mockRun(`${repo}\n`)
+      }
+      if (argv[2] === 'claim') {
+        const repoIdx = argv.indexOf('--repo')
+        if (repoIdx !== -1) claimedRepo = argv[repoIdx + 1]
+        return mockRun(JSON.stringify({
+          ok: true,
+          ctl: '/plugin/scripts/watchdog_ctl.py',
+          jobs: [{ id: 'app-abc1234', short_sha: 'abc1234', repo_path: claimedRepo || '/default/repo', worktree_path: '/data/worktrees/app-abc1234', prompt: 'Audit abc1234.' }],
+        }))
+      }
+      return mockRun(JSON.stringify({ ok: true }))
+    })
+    on('fs.write', () => ({ value: undefined }))
+    on('tool.call', () => ({ result: { text: 'ok' } }))
+
+    await $.tool.call({
+      tool: 'mcp__plugin_watchdog_watchdog__watchdog_audit',
+      input: { repo: '/custom/repo' },
+    })
+    assert.equal(claimedRepo, '/custom/repo')
+    console.log('✓ hooks/agents.ts tool.call resolves e.input.repo for target repository override')
+    passed++
+  } catch (err) {
+    console.error('✗ hooks/agents.ts tool.call repo resolution test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    const { $, on } = createHarness(pluginRegister)
+    const mockRun = (stdout) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    let directCalled = false
+    const ctlArgsLogged = []
+    on('session.cwd', () => ({ value: '/default/repo' }))
+    on('process.run', (_, e) => {
+      const argv = [...e.argv]
+      if (argv[0] === 'git') return mockRun('/default/repo\n')
+      ctlArgsLogged.push(argv.slice(2))
+      if (argv[2] === 'claim') {
+        directCalled = true
+        return mockRun(JSON.stringify({
+          ok: true,
+          ctl: 'C:\\plugin\\scripts\\watchdog_ctl.py',
+          jobs: [{ id: 'app-direct1', short_sha: 'direct1', repo_path: '/default/repo', worktree_path: '/data/worktrees/app-direct1', prompt: 'Audit direct1.' }],
+        }))
+      }
+      return mockRun(JSON.stringify({ ok: true }))
+    })
+    on('fs.write', () => ({ value: undefined }))
+    on('tool.call', () => ({ result: { text: 'ok' } }))
+
+    // 1. Direct tool call without mcp__ prefix must trigger queued audit request
+    const directResult = await $.tool.call({
+      tool: 'watchdog_audit',
+      input: {},
+    })
+    assert.equal(directCalled, true)
+    assert.ok(Array.isArray(directResult?.context) && directResult.context.length > 0)
+
+    // 2. Playwright tool call from plugin installation allowed
+    const { commandAllowed } = await import(agentsModuleUrl)
+    const grant = {
+      roots: ['/data/worktrees/app-direct1', '/default/repo/.antigravity/audits'],
+      ctl: 'C:\\plugin\\scripts\\watchdog_ctl.py',
+      jobId: 'app-direct1',
+    }
+
+    // Windows backslash normalization in grant.ctl matches forward-slash invocation
+    const winCtlCmd = commandAllowed(grant, 'python3 "C:/plugin/scripts/watchdog_ctl.py" complete --repo /default/repo --sha direct1')
+    assert.equal(winCtlCmd, null)
+
+    // 3. Plugin playwright tool allowed
+    on('state.get', async (_, e, next) => {
+      const res = await next(e)
+      if (e.plugin === 'watchdog' && e.key === 'agents') {
+        const current = (res && res.value && res.value.value) || {}
+        return { value: { value: { ...current, 'agent-win': grant }, version: (res?.value?.version || 0) + 1 } }
+      }
+      return res
+    })
+    const pwPluginCheck = await $.tool.check({
+      tool: 'mcp__plugin_playwright_playwright__browser_click',
+      input: {},
+      agentId: 'agent-win',
+    })
+    assert.equal(pwPluginCheck.decision, 'allow')
+
+    // 4. agent.spawn and turn.complete lifecycle with agent_id snake_case
+    on('agent.spawn', () => ({ agent_id: 'snake-agent-1' }))
+    on('turn.complete', () => ({}))
+
+    await $.agent.spawn({ subagent_type: 'watchdog:watchdog-auditor', prompt: 'Read your task in /default/repo/.antigravity/tasks/audit-direct1.md and follow it.' })
+    await $.turn.complete({ agent_id: 'snake-agent-1' })
+    assert.ok(ctlArgsLogged.some(args => args[0] === 'mark-running' && args.includes('claude-agent-snake-agent-1')))
+    assert.ok(ctlArgsLogged.some(args => args[0] === 'agent-done' && args.includes('claude-agent-snake-agent-1')))
+
+    console.log('✓ hooks/agents.ts direct tool matching, playwright plugin prefix, Windows ctl paths, snake_case agent_id')
+    passed++
+  } catch (err) {
+    console.error('✗ hooks/agents.ts direct matching and cross-platform test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    const { execFileSync } = await import('node:child_process')
+    const pyOutput = execFileSync('python3', [
+      '-c',
+      `
+import sys, threading, time
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(rootDir)})
+import scripts.watchdog_ctl as ctl
+
+# 1. Test multi-threaded StateLock concurrency
+errors = []
+def worker(w_id):
+    try:
+        for _ in range(5):
+            with ctl.StateLock():
+                st = ctl.load_state()
+                st["__test_counter__"] = st.get("__test_counter__", 0) + 1
+                ctl.save_state(st)
+                time.sleep(0.002)
+    except Exception as ex:
+        errors.append(str(ex))
+
+threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+for t in threads: t.start()
+for t in threads: t.join()
+
+if errors:
+    print(f"FAILED StateLock concurrency: {errors}", file=sys.stderr)
+    sys.exit(1)
+
+with ctl.StateLock():
+    final_st = ctl.load_state()
+    final_st.pop("__test_counter__", None)
+    ctl.save_state(final_st)
+
+# 2. Test CHECK_RULES contains bun and python -m pytest
+assert any("bun" in r for r in ctl.CHECK_RULES), "bun not in CHECK_RULES"
+assert any("python -m pytest" in r for r in ctl.CHECK_RULES), "python -m pytest not in CHECK_RULES"
+
+# 3. Test plan ID '#' stripping in mark_execution_running & cancel_execution
+repo_path = Path(${JSON.stringify(rootDir)})
+rec = ctl.mark_execution_running(repo_path, "#2", "test-conv", "Test Title")
+assert rec["planId"] == "2", f"Expected planId '2', got {rec['planId']}"
+cancelled = ctl.cancel_execution(repo_path, "#2")
+assert cancelled["ok"] == True, f"Cancel execution failed: {cancelled}"
+
+print("OK")
+      `,
+    ], { encoding: 'utf8' })
+    assert.ok(pyOutput.includes('OK'))
+    console.log('✓ python controller: StateLock multi-threaded concurrency, CHECK_RULES runners, and # plan-id normalization')
+    passed++
+  } catch (err) {
+    console.error('✗ python controller concurrency & plan-id test')
     console.error(err)
     failed++
   }

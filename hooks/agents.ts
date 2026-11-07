@@ -32,11 +32,20 @@ async function request($: EngineInterface, type: string, what: string, taskFile:
 // Runs the controller as the session's own (WATCHDOG_IN_SESSION: it queues, and never
 // starts background `claude -p`).
 async function ctl($: EngineInterface, args: string[], stdin?: string): Promise<any> {
-  const ran = await $.process.run(['python3', ctlPath($), ...args, '--json', '--host', 'claude'], {
+  let ran = await $.process.run(['python3', ctlPath($), ...args, '--json', '--host', 'claude'], {
     env: { WATCHDOG_IN_SESSION: '1', WATCHDOG_HOST: 'claude' },
     timeoutMs: 60_000,
     stdin,
-  })
+  }).catch(() => null)
+  if (!ran || (ran.exitCode !== 0 && !ran.stdout?.trim())) {
+    const fallback = await $.process.run(['python', ctlPath($), ...args, '--json', '--host', 'claude'], {
+      env: { WATCHDOG_IN_SESSION: '1', WATCHDOG_HOST: 'claude' },
+      timeoutMs: 60_000,
+      stdin,
+    }).catch(() => null)
+    if (fallback) ran = fallback
+  }
+  if (!ran) return { ok: false, error: 'Failed to run python controller' }
   try {
     return JSON.parse(ran.stdout || '{}')
   } catch {
@@ -48,7 +57,7 @@ async function ctl($: EngineInterface, args: string[], stdin?: string): Promise<
 export async function repoRoot($: EngineInterface, dir?: string): Promise<string> {
   const cwd = dir ?? (await $.session.cwd())
   const ran = await $.process.run(['git', 'rev-parse', '--show-toplevel'], { cwd }).catch(() => null)
-  return ran?.exitCode === 0 ? ran.stdout.trim() : ''
+  return ran?.exitCode === 0 ? ran.stdout.trim() : (dir ?? '')
 }
 
 // Claims every audit this session queued for the repository (for any repository, when the
@@ -71,12 +80,13 @@ export async function requestQueuedAudits($: EngineInterface, repo?: string): Pr
 }
 
 const GIT_READ = ['status', 'diff', 'show', 'log', 'ls-files', 'rev-parse', 'rev-list', 'blame']
-const RUNNERS = ['npm run', 'pnpm run', 'pnpm', 'yarn']
+const RUNNERS = ['npm run', 'pnpm run', 'pnpm', 'yarn', 'bun run', 'bun']
 const VERBS = ['test', 'lint', 'typecheck', 'build', 'dev', 'preview', 'start']
 const CHECKS = [
   ...RUNNERS.flatMap(pm => VERBS.map(verb => `${pm} ${verb}`)),
   'npm test', 'npx tsc', 'npx vitest', 'npx jest', 'npx eslint', 'npx vite', 'node --check',
   'pytest', 'python3 -m pytest', 'python3 -m py_compile', 'python3 -m http.server',
+  'python -m pytest', 'python -m py_compile', 'python -m http.server',
   'cargo check', 'cargo test', 'go vet', 'go test',
 ]
 const LOOK = ['ls', 'pwd', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'find', 'echo', 'which', 'sleep']
@@ -84,8 +94,14 @@ const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob', 'LS', 'TodoWrite']
 const FILE_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
 
 const unquote = (s: string) => s.trim().replace(/^(['"])(.*)\1$/, '$2')
-const isInside = (path: string, roots: string[]) =>
-  !/(^|\/)\.\.(\/|$)/.test(path) && roots.some(root => path === root || path.startsWith(`${root.replace(/\/+$/, '')}/`))
+const normPath = (p: string) => p.replace(/\\/g, '/')
+const isInside = (path: string, roots: string[]) => {
+  const np = normPath(path)
+  return !/(^|\/)\.\.(\/|$)/.test(np) && roots.some(root => {
+    const nr = normPath(root).replace(/\/+$/, '')
+    return np === nr || np.startsWith(`${nr}/`)
+  })
+}
 const startsWithWord = (s: string, prefix: string) => s === prefix || s.startsWith(`${prefix} `)
 
 function parseShellCommand(command: string): { subcommands: string[]; error: string | null } {
@@ -216,10 +232,21 @@ export function commandAllowed(grant: AgentGrant, command: string): string | nul
       if (at && isInside(at, grant.roots.slice(0, 1))) continue
       return 'git add and git commit are only allowed in the audit worktree'
     }
+    const normPart = normPath(part)
+    const normCtl = normPath(grant.ctl)
     if (
+      startsWithWord(normPart, `python3 "${normCtl}" complete`) ||
+      startsWithWord(normPart, `python3 '${normCtl}' complete`) ||
+      startsWithWord(normPart, `python3 ${normCtl} complete`) ||
+      startsWithWord(normPart, `python "${normCtl}" complete`) ||
+      startsWithWord(normPart, `python '${normCtl}' complete`) ||
+      startsWithWord(normPart, `python ${normCtl} complete`) ||
       startsWithWord(part, `python3 "${grant.ctl}" complete`) ||
       startsWithWord(part, `python3 '${grant.ctl}' complete`) ||
-      startsWithWord(part, `python3 ${grant.ctl} complete`)
+      startsWithWord(part, `python3 ${grant.ctl} complete`) ||
+      startsWithWord(part, `python "${grant.ctl}" complete`) ||
+      startsWithWord(part, `python '${grant.ctl}' complete`) ||
+      startsWithWord(part, `python ${grant.ctl} complete`)
     ) continue
     if (CHECKS.some(prefix => startsWithWord(part, prefix))) continue
     if (LOOK.some(prefix => startsWithWord(part, prefix)) && !/\s-(delete|exec|execdir|ok)\b/.test(part)) continue
@@ -239,7 +266,7 @@ function decide(grant: AgentGrant, tool: string, input: any): { decision: 'allow
     const why = commandAllowed(grant, String(input?.command ?? ''))
     return why ? deny(why) : { decision: 'allow' }
   }
-  if (tool.startsWith('mcp__playwright__')) return { decision: 'allow' }
+  if (tool.startsWith('mcp__playwright__') || /mcp__.*playwright.*__/.test(tool)) return { decision: 'allow' }
   return deny(`an audit may not use ${tool}`)
 }
 
@@ -249,10 +276,11 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     const result = await next(e)
     const spec = e as unknown as { subagentType?: string; subagent_type?: string; prompt?: string }
-    const agentId = result.agentId
+    const agentId = result?.agentId ?? (result as any)?.agent_id
     if (!agentId || (spec.subagentType ?? spec.subagent_type) !== AUDITOR) return result
     const waiting = await read($, pending)
-    const taskFile = Object.keys(waiting).find(file => String(spec.prompt ?? '').includes(file))
+    const normPrompt = normPath(String(spec.prompt ?? ''))
+    const taskFile = Object.keys(waiting).find(file => normPrompt.includes(normPath(file)))
     const grant = taskFile ? waiting[taskFile] : undefined
     if (!taskFile || !grant) return result
     await update($, pending, all => Object.fromEntries(Object.entries(all).filter(([file]) => file !== taskFile)))
@@ -263,32 +291,33 @@ export const register: Register = on => {
 
   // Every tool call a Watchdog agent makes is decided here; everyone else's goes on as usual.
   on('tool.check', async ($, e, next) => {
-    const grant = e.agentId ? (await read($, agents))[e.agentId] : undefined
+    const aid = e.agentId ?? (e as any)?.agent_id
+    const grant = aid ? (await read($, agents))[aid] : undefined
     return grant ? decide(grant, e.tool, e.input) : next(e)
   }).catch(($, e, next) =>
     // Failing closed for subagents: a Watchdog agent's call must never fall through to wider rules.
-    next.called || !e.agentId ? next(e) : { decision: 'deny' as const, reason: 'Watchdog could not check this call.' },
+    next.called || !(e.agentId ?? (e as any)?.agent_id) ? next(e) : { decision: 'deny' as const, reason: 'Watchdog could not check this call.' },
   )
 
   // An audit agent that ends without reporting is marked interrupted at once, so the
   // panel offers Continue Audit instead of waiting out the timeout.
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
-    const grant = e.agentId ? (await read($, agents))[e.agentId] : undefined
-    if (e.agentId && grant) {
-      const agentId = e.agentId
-      await ctl($, ['agent-done', '--conversation-id', `claude-agent-${agentId}`])
-      await update($, agents, all => Object.fromEntries(Object.entries(all).filter(([id]) => id !== agentId)))
+    const aid = e.agentId ?? (e as any)?.agent_id
+    const grant = aid ? (await read($, agents))[aid] : undefined
+    if (aid && grant) {
+      await ctl($, ['agent-done', '--conversation-id', `claude-agent-${aid}`])
+      await update($, agents, all => Object.fromEntries(Object.entries(all).filter(([id]) => id !== aid)))
     }
     return result
-  })
+  }).catch(($, e, next) => next(e))
 
   // `/watchdog audit`, `/watchdog continue` and the MCP tools queue an audit; the request
   // that starts it goes to Claude with the tool's result, in the turn the person asked in.
   on('tool.call', async ($, e, next) => {
     const result = await next(e)
-    if (!/__watchdog_(audit|continue)$/.test(e.tool) || 'deny' in result) return result
-    const asked = (e as unknown as { repo?: unknown }).repo
+    if (!/(?:^|__)watchdog_(audit|continue)$/.test(e.tool) || 'deny' in result) return result
+    const asked = (e as any)?.input?.repo ?? (e as any)?.repo
     const requests = await requestQueuedAudits($, typeof asked === 'string' && asked ? await repoRoot($, asked) : undefined)
     return requests.length > 0 ? { ...result, context: [...(result.context ?? []), ...requests] } : result
   }).catch(($, e, next) => next(e))

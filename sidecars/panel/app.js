@@ -187,7 +187,8 @@ function escapeHtml(str) {
 function parseInlineMd(text) {
   let s = escapeHtml(text);
   s = s.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/`([^`]+)`/g, '<code>$1</strong>'.replace('strong', 'code'));
+  s = s.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, rawUrl) => {
     const cleanUrl = String(rawUrl || '').trim();
     if (/^(https?:\/\/|#|\/)/i.test(cleanUrl)) {
@@ -227,6 +228,14 @@ function renderMarkdown(md) {
 
     const trimmed = line.trim();
 
+    // Horizontal rule
+    if (trimmed === '---' || trimmed === '***' || trimmed === '___') {
+      if (inList) { html += '</ul>\n'; inList = false; }
+      if (inTable) { html += '</tbody></table>\n'; inTable = false; }
+      html += '<hr class="md-hr">\n';
+      continue;
+    }
+
     // Table rows
     if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2) {
       if (inList) { html += '</ul>\n'; inList = false; }
@@ -246,7 +255,7 @@ function renderMarkdown(md) {
     }
 
     // List items
-    if (line.startsWith('- [ ] ') || line.startsWith('- [x] ') || line.startsWith('- ')) {
+    if (line.startsWith('- [ ] ') || line.startsWith('- [x] ') || line.startsWith('- ') || line.startsWith('* ')) {
       if (!inList) {
         html += '<ul class="md-list">\n';
         inList = true;
@@ -262,13 +271,15 @@ function renderMarkdown(md) {
     }
 
     if (line.startsWith('# ')) {
-      html += `<h1>${escapeHtml(line.slice(2))}</h1>\n`;
+      html += `<h1>${parseInlineMd(line.slice(2))}</h1>\n`;
     } else if (line.startsWith('## ')) {
-      html += `<h2>${escapeHtml(line.slice(3))}</h2>\n`;
+      html += `<h2>${parseInlineMd(line.slice(3))}</h2>\n`;
     } else if (line.startsWith('### ')) {
-      html += `<h3>${escapeHtml(line.slice(4))}</h3>\n`;
+      html += `<h3>${parseInlineMd(line.slice(4))}</h3>\n`;
+    } else if (line.startsWith('#### ')) {
+      html += `<h4>${parseInlineMd(line.slice(5))}</h4>\n`;
     } else if (line.startsWith('> ')) {
-      html += `<blockquote>${escapeHtml(line.slice(2))}</blockquote>\n`;
+      html += `<blockquote>${parseInlineMd(line.slice(2))}</blockquote>\n`;
     } else if (!trimmed) {
       html += '<br>\n';
     } else {

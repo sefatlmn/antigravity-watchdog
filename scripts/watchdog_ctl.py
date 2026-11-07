@@ -17,6 +17,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -119,44 +120,58 @@ def default_state() -> Dict[str, Any]:
 class StateLock:
     _depth: int = 0
     _fp: Optional[Any] = None
+    _thread_lock = threading.RLock()
 
     def __enter__(self) -> "StateLock":
-        if StateLock._depth == 0:
-            ensure_dirs()
-            StateLock._fp = open(LOCK_FILE, "a+")
-            if fcntl is not None:
-                fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_EX)
-            else:
+        StateLock._thread_lock.acquire()
+        try:
+            if StateLock._depth == 0:
+                ensure_dirs()
+                fp = open(LOCK_FILE, "a+")
                 try:
-                    import msvcrt
-                    if StateLock._fp.tell() == 0:
-                        StateLock._fp.write("0")
-                        StateLock._fp.flush()
-                    StateLock._fp.seek(0)
-                    msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_LOCK, 1)
+                    if fcntl is not None:
+                        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
+                    else:
+                        try:
+                            import msvcrt
+                            if fp.tell() == 0:
+                                fp.write("0")
+                                fp.flush()
+                            fp.seek(0)
+                            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+                        except Exception:
+                            pass
+                    StateLock._fp = fp
                 except Exception:
-                    pass
-        StateLock._depth += 1
-        return self
+                    fp.close()
+                    raise
+            StateLock._depth += 1
+            return self
+        except Exception:
+            StateLock._thread_lock.release()
+            raise
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        StateLock._depth = max(0, StateLock._depth - 1)
-        if StateLock._depth == 0 and StateLock._fp is not None:
-            try:
-                if fcntl is not None:
-                    fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
-                else:
-                    try:
-                        import msvcrt
-                        StateLock._fp.seek(0)
-                        msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_UNLCK, 1)
-                    except Exception:
-                        pass
-            finally:
+        try:
+            StateLock._depth = max(0, StateLock._depth - 1)
+            if StateLock._depth == 0 and StateLock._fp is not None:
                 try:
-                    StateLock._fp.close()
+                    if fcntl is not None:
+                        fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
+                    else:
+                        try:
+                            import msvcrt
+                            StateLock._fp.seek(0)
+                            msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_UNLCK, 1)
+                        except Exception:
+                            pass
                 finally:
-                    StateLock._fp = None
+                    try:
+                        StateLock._fp.close()
+                    finally:
+                        StateLock._fp = None
+        finally:
+            StateLock._thread_lock.release()
 
 
 def load_state() -> Dict[str, Any]:
@@ -176,7 +191,7 @@ def save_state(state: Dict[str, Any]) -> None:
     ensure_dirs()
     if len(state.get("jobs", [])) > 100:
         state["jobs"] = state["jobs"][:100]
-    tmp_file = STATE_FILE.with_name(f"state.{os.getpid()}.tmp")
+    tmp_file = STATE_FILE.with_name(f"state.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
     tmp_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp_file.replace(STATE_FILE)
 
@@ -403,6 +418,25 @@ def discover_git_roots(path_str: str) -> List[Path]:
 def resolve_git_root(path_str: str) -> Optional[Path]:
     roots = discover_git_roots(path_str)
     return roots[0] if roots else None
+
+
+def is_same_repo_path(p1: Any, p2: Any) -> bool:
+    if not p1 or not p2:
+        return False
+    s1 = str(p1).strip().replace("\\", "/").rstrip("/")
+    s2 = str(p2).strip().replace("\\", "/").rstrip("/")
+    if s1 == s2 or s1.lower() == s2.lower():
+        return True
+    try:
+        r1 = Path(s1).resolve()
+        r2 = Path(s2).resolve()
+        if r1 == r2:
+            return True
+        norm1 = str(r1).replace("\\", "/").rstrip("/")
+        norm2 = str(r2).replace("\\", "/").rstrip("/")
+        return norm1 == norm2 or norm1.lower() == norm2.lower()
+    except Exception:
+        return False
 
 
 # -----------------------------------------------------------------------------
@@ -1610,13 +1644,30 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
         test_cmd = manifest["test_command"]
     elif codebase["has_tests"] and "Python" in codebase["languages"]:
         test_cmd = "pytest"
+    elif codebase["has_tests"]:
+        test_cmd = manifest.get("test_command") or "npm test"
+    elif manifest.get("test_command"):
+        test_cmd = manifest["test_command"]
+    elif manifest.get("build_command"):
+        test_cmd = manifest["build_command"]
     elif "Python" in codebase["languages"] and ("JavaScript" in codebase["languages"] or "TypeScript" in codebase["languages"]):
-        test_cmd = "python3 -m py_compile scripts/watchdog_ctl.py && node -c sidecars/panel/main.mjs && node --check sidecars/panel/app.js"
+        if (repo_root / "scripts" / "watchdog_ctl.py").exists() and (repo_root / "sidecars" / "panel" / "main.mjs").exists():
+            test_cmd = "python3 -m py_compile scripts/watchdog_ctl.py && node -c sidecars/panel/main.mjs && node --check sidecars/panel/app.js"
+        else:
+            py_entry = codebase["entry_points"][0] if codebase["entry_points"] else (codebase["logic_files"][0] if codebase["logic_files"] else "")
+            js_entry = codebase["entry_points"][1] if len(codebase["entry_points"]) > 1 else (codebase["all_source_files"][0] if codebase["all_source_files"] else "")
+            parts = []
+            if py_entry:
+                parts.append(f"python3 -m py_compile {py_entry}")
+            if js_entry:
+                parts.append(f"node --check {js_entry}")
+            test_cmd = " && ".join(parts) if parts else "git status"
     elif "Python" in codebase["languages"]:
-        main_py = codebase["entry_points"][0] if codebase["entry_points"] else "scripts/watchdog_ctl.py"
-        test_cmd = f"python3 -m py_compile {main_py}"
+        main_py = codebase["entry_points"][0] if codebase["entry_points"] else (codebase["logic_files"][0] if codebase["logic_files"] else "")
+        test_cmd = f"python3 -m py_compile {main_py}" if main_py else "pytest"
     elif "JavaScript" in codebase["languages"] or "TypeScript" in codebase["languages"]:
-        test_cmd = manifest.get("test_command") or "node -c sidecars/panel/main.mjs"
+        main_js = codebase["entry_points"][0] if codebase["entry_points"] else (codebase["all_source_files"][0] if codebase["all_source_files"] else "")
+        test_cmd = f"node --check {main_js}" if main_js else (manifest.get("test_command") or "git status")
     else:
         test_cmd = manifest.get("test_command") or "git status"
 
@@ -2473,11 +2524,12 @@ GIT_READ_RULES = [
     for cmd in ("status", "diff", "show", "log", "ls-files", "rev-parse", "rev-list", "blame")
 ]
 CHECK_RULES = (
-    [f"Bash({pm} {verb}:*)" for pm in ("npm run", "pnpm run", "pnpm", "yarn")
+    [f"Bash({pm} {verb}:*)" for pm in ("npm run", "pnpm run", "pnpm", "yarn", "bun run", "bun")
      for verb in ("test", "lint", "typecheck", "build", "dev", "preview", "start")]
     + [f"Bash({cmd}:*)" for cmd in (
         "npm test", "npx tsc", "npx vitest", "npx jest", "npx eslint", "npx vite", "node --check",
         "pytest", "python3 -m pytest", "python3 -m py_compile", "python3 -m http.server",
+        "python -m pytest", "python -m py_compile", "python -m http.server",
         "cargo check", "cargo test", "go vet", "go test",
     )]
 )
@@ -2489,21 +2541,27 @@ def claude_permission_args(task: str, repo_root: Path, worktree: Optional[Path] 
     Nothing else is allowed: a headless session has nobody to ask, so the rest is denied.
     Edit rules cover every file-writing tool; `//` starts an absolute path.
     """
-    ctl = f'Bash(python3 "{Path(__file__).resolve()}"'
+    ctl_py3 = f'Bash(python3 "{Path(__file__).resolve()}"'
+    ctl_py = f'Bash(python "{Path(__file__).resolve()}"'
     if task == "audit":
         # Fixes go in the isolated worktree, the report in the repository's audits folder.
         audits = repo_root / ".antigravity" / "audits"
         audits.mkdir(parents=True, exist_ok=True)
         edits = [f"Edit(/{audits}/**)"] + ([f"Edit(/{worktree}/**)"] if worktree else [])
         allowed = GIT_READ_RULES + CHECK_RULES + edits + [
-            "Bash(git add:*)", "Bash(git commit:*)", f"{ctl} complete:*)",
-            f"Read(/{SKILL_PATH.parent}/**)", "mcp__playwright",
+            "Bash(git add:*)", "Bash(git commit:*)",
+            f"{ctl_py3} complete:*)", f"{ctl_py} complete:*)",
+            f"Read(/{SKILL_PATH.parent}/**)", "mcp__playwright", "mcp__playwright:*",
         ]
         return ["--add-dir", str(audits), "--allowedTools", *allowed]
     if task == "synthesis":
         # Reads the repository; writes only the Next Steps plans.
         plans = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
-        allowed = GIT_READ_RULES + [f"Edit(/{plans}/**)", f"{ctl} complete-synthesis:*)"]
+        allowed = GIT_READ_RULES + [
+            f"Edit(/{plans}/**)",
+            f"{ctl_py3} complete-synthesis:*)",
+            f"{ctl_py} complete-synthesis:*)",
+        ]
         return ["--allowedTools", *allowed]
     # "plan": the person chose to execute a plan in this repository, so it may edit and commit there.
     allowed = GIT_READ_RULES + CHECK_RULES + [f"Edit(/{repo_root}/**)", "Bash(git add:*)", "Bash(git commit:*)"]
@@ -2650,7 +2708,7 @@ def mark_execution_running(
     conversation_id: Optional[str] = None,
     title: str = "",
 ) -> Dict[str, Any]:
-    clean_id = str(plan_id).strip()
+    clean_id = str(plan_id).strip().lstrip("#")
     state = load_execution_state(repo_root)
     executions = state.setdefault("executions", {})
 
@@ -2687,7 +2745,7 @@ def mark_execution_running(
 
 
 def cancel_execution(repo_root: Path, plan_id: str) -> Dict[str, Any]:
-    clean_id = str(plan_id).strip()
+    clean_id = str(plan_id).strip().lstrip("#")
     state = load_execution_state(repo_root)
     executions = state.setdefault("executions", {})
 
@@ -2835,7 +2893,7 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = Tru
         data = json.loads(proposals_file.read_text(encoding="utf-8"))
         proposals = data.get("proposals", [])
         matched = None
-        clean_id = str(plan_id).strip()
+        clean_id = str(plan_id).strip().lstrip("#")
         for idx, p in enumerate(proposals):
             p_id = str(p.get("id", ""))
             if (
@@ -2850,11 +2908,12 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = Tru
         if not matched:
             return {"ok": False, "error": f"Proposal '{plan_id}' not found."}
 
-        plan_path = Path(matched["planPath"])
+        raw_plan_path = matched.get("planPath") or ""
+        plan_path = Path(raw_plan_path) if raw_plan_path else (repo_root / (matched.get("planFile") or ""))
+        if not plan_path.exists() or not str(raw_plan_path).strip():
+            plan_path = repo_root / (matched.get("planFile") or "")
         if not plan_path.exists():
-            plan_path = repo_root / matched["planFile"]
-        if not plan_path.exists():
-            return {"ok": False, "error": f"Plan file not found: {matched.get('planFile')}"}
+            return {"ok": False, "error": f"Plan file not found: {matched.get('planFile') or matched.get('planPath')}"}
 
         plan_content = plan_path.read_text(encoding="utf-8")
         title = matched["title"]
@@ -3000,9 +3059,12 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
         empty_wrapper_paths = set()
         for d in repo_details:
             rpath = d["repoPath"]
+            norm_rpath = str(rpath).replace("\\", "/").rstrip("/")
             yc = d["youngestCommit"]
             has_nested_child = any(
-                other["repoPath"] != rpath and other["repoPath"].startswith(rpath + "/")
+                other["repoPath"] != rpath and (
+                    str(other["repoPath"]).replace("\\", "/").rstrip("/").startswith(norm_rpath + "/")
+                )
                 for other in repo_details
             )
             if yc.get("is_empty_tree") and has_nested_child:
@@ -3019,8 +3081,11 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
 
         # Also check any previous state["repos"] entries that were empty wrappers of discovered repos
         for old_rpath in list(state.get("repos", {}).keys()):
+            norm_old = str(old_rpath).replace("\\", "/").rstrip("/")
             if any(
-                d["repoPath"] != old_rpath and d["repoPath"].startswith(old_rpath + "/")
+                d["repoPath"] != old_rpath and (
+                    str(d["repoPath"]).replace("\\", "/").rstrip("/").startswith(norm_old + "/")
+                )
                 for d in repo_details
             ):
                 info = get_commit_info(Path(old_rpath), "HEAD")
@@ -3029,9 +3094,13 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
 
         # Filter out empty wrapper repos from repo_details and state["jobs"]
         if empty_wrapper_paths:
-            repo_details = [d for d in repo_details if d["repoPath"] not in empty_wrapper_paths]
+            repo_details = [
+                d for d in repo_details
+                if not any(is_same_repo_path(d["repoPath"], ep) for ep in empty_wrapper_paths)
+            ]
             state["jobs"] = [
-                j for j in state.get("jobs", []) if j.get("repo_path") not in empty_wrapper_paths
+                j for j in state.get("jobs", [])
+                if not any(is_same_repo_path(j.get("repo_path"), ep) for ep in empty_wrapper_paths)
             ]
 
         # Reconcile any running, queued, or interrupted jobs against disk reports or conversation state
@@ -3268,20 +3337,34 @@ def prepare_worktree(repo_root: Path, sha: str) -> Tuple[Path, str, Path]:
 
     primary_nm = repo_root / "node_modules"
     wt_nm = worktree_path / "node_modules"
-    if primary_nm.is_dir() and not wt_nm.exists():
-        try:
-            os.symlink(str(primary_nm), str(wt_nm))
-        except Exception:
-            pass
+    if primary_nm.is_dir():
+        if wt_nm.is_symlink():
+            try:
+                if not wt_nm.exists() or wt_nm.resolve() != primary_nm.resolve():
+                    wt_nm.unlink()
+            except Exception:
+                pass
+        if not wt_nm.exists() and not wt_nm.is_symlink():
+            try:
+                os.symlink(str(primary_nm), str(wt_nm), target_is_directory=True)
+            except Exception:
+                pass
 
     for venv_name in (".venv", "venv"):
         primary_venv = repo_root / venv_name
         wt_venv = worktree_path / venv_name
-        if primary_venv.is_dir() and not wt_venv.exists():
-            try:
-                os.symlink(str(primary_venv), str(wt_venv))
-            except Exception:
-                pass
+        if primary_venv.is_dir():
+            if wt_venv.is_symlink():
+                try:
+                    if not wt_venv.exists() or wt_venv.resolve() != primary_venv.resolve():
+                        wt_venv.unlink()
+                except Exception:
+                    pass
+            if not wt_venv.exists() and not wt_venv.is_symlink():
+                try:
+                    os.symlink(str(primary_venv), str(wt_venv), target_is_directory=True)
+                except Exception:
+                    pass
 
     return worktree_path, fix_branch, report_path
 
@@ -3470,7 +3553,7 @@ def queue_commit(
         # Check if an audit is already in progress for this repository to prevent double auditing
         running_job = None
         for j in state.get("jobs", []):
-            if j.get("repo_path") == repo_key and j.get("status") in ("running", "queued"):
+            if is_same_repo_path(j.get("repo_path"), repo_key) and j.get("status") in ("running", "queued"):
                 running_job = j
                 break
 
@@ -3640,7 +3723,7 @@ def complete_job(
         state = load_state()
         matched = False
         for j in state["jobs"]:
-            if j["id"] == job_id or j.get("short_sha") == short_sha:
+            if j["id"] == job_id or (j.get("short_sha") == short_sha and is_same_repo_path(j.get("repo_path"), repo_root)):
                 j["status"] = "completed"
                 j["completed_at"] = result_payload["completed_at"]
                 j["verdict"] = verdict
@@ -3666,7 +3749,7 @@ def complete_job(
                     "worktree_path": str(worktree_path),
                 },
             )
-        repo_meta = state.get("repos", {}).get(str(repo_root))
+        repo_meta = next((v for k, v in state.get("repos", {}).items() if is_same_repo_path(k, repo_root)), None)
         if isinstance(repo_meta, dict) and repo_meta.get("pending_sha"):
             cand_sha = str(repo_meta.pop("pending_sha", "")).strip()
             cand_base = str(repo_meta.pop("pending_base_sha", "")).strip()
@@ -3882,7 +3965,7 @@ def reconcile_jobs(repo_filter: Optional[Path] = None) -> List[Dict[str, Any]]:
         for j in st.get("jobs", []):
             if repo_filter:
                 jr_path = j.get("repo_path")
-                if jr_path and Path(jr_path).resolve() != repo_filter.resolve():
+                if jr_path and not is_same_repo_path(jr_path, repo_filter):
                     continue
             if reconcile_job(j):
                 modified = True
@@ -3907,7 +3990,7 @@ def get_running_job(repo_root: Optional[Path] = None, exclude_job_id: str = "") 
                 if not repo_str:
                     return j
                 jr = j.get("repo_path")
-                if jr and Path(jr).resolve() == Path(repo_str).resolve():
+                if jr and is_same_repo_path(jr, repo_str):
                     return j
     return None
 
@@ -3929,7 +4012,7 @@ def send_comment_to_job(job: Dict[str, Any], comment: str) -> Dict[str, Any]:
         st = load_state()
         target_j = None
         for j in st.get("jobs", []):
-            if (job_id and j.get("id") == job_id) or (repo_path and j.get("repo_path") == repo_path and j.get("status") in ("running", "queued")):
+            if (job_id and j.get("id") == job_id) or (repo_path and is_same_repo_path(j.get("repo_path"), repo_path) and j.get("status") in ("running", "queued")):
                 target_j = j
                 break
 
@@ -4024,13 +4107,13 @@ def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = 
                 target_job = j
                 break
             if repo_root and sha:
-                if j.get("repo_path") == str(repo_root) and (j.get("sha") == sha or j.get("short_sha") == sha[:7]):
+                if is_same_repo_path(j.get("repo_path"), repo_root) and (j.get("sha") == sha or j.get("short_sha") == sha[:7]):
                     target_job = j
                     break
 
         if not target_job and repo_root:
             for j in st.get("jobs", []):
-                if j.get("repo_path") == str(repo_root):
+                if is_same_repo_path(j.get("repo_path"), repo_root):
                     target_job = j
                     break
 
@@ -4112,6 +4195,8 @@ python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{
 
 
 def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Dict[str, Any]:
+    if sha.startswith("fix/watchdog-"):
+        sha = sha[len("fix/watchdog-"):]
     info = get_commit_info(repo_root, sha)
     short_sha = info["short_sha"] if info else sha[:7]
     full_sha = info["sha"] if info else sha
@@ -4167,7 +4252,7 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
         with StateLock():
             state = load_state()
             for j in state["jobs"]:
-                if j.get("id") == job_id or j.get("short_sha") == short_sha:
+                if j.get("id") == job_id or (j.get("short_sha") == short_sha and is_same_repo_path(j.get("repo_path"), repo_root)):
                     j["fixes_applied"] = True
                     j["fixes_committed"] = False
                     j["fix_branch"] = None
@@ -4175,11 +4260,11 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
                         j["applied_commit_sha"] = new_head_sha
                         j["applied_short_sha"] = new_short_sha
                     break
-            repo_key = str(repo_root)
-            if repo_key in state.get("repos", {}) and new_head_sha:
-                state["repos"][repo_key]["baseline_sha"] = new_head_sha
-                state["repos"][repo_key]["youngest_short_sha"] = new_short_sha
-                state["repos"][repo_key]["updated_at"] = now_iso()
+            matched_repo_key = next((k for k in state.get("repos", {}) if is_same_repo_path(k, repo_root)), None)
+            if matched_repo_key and new_head_sha:
+                state["repos"][matched_repo_key]["baseline_sha"] = new_head_sha
+                state["repos"][matched_repo_key]["youngest_short_sha"] = new_short_sha
+                state["repos"][matched_repo_key]["updated_at"] = now_iso()
             save_state(state)
 
         return {
@@ -4226,7 +4311,7 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
     with StateLock():
         state = load_state()
         for j in state["jobs"]:
-            if j.get("id") == job_id or j.get("short_sha") == short_sha:
+            if j.get("id") == job_id or (j.get("short_sha") == short_sha and is_same_repo_path(j.get("repo_path"), repo_root)):
                 j["fixes_applied"] = True
                 j["fixes_committed"] = False
                 j["fix_branch"] = None
@@ -4234,11 +4319,11 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
                     j["applied_commit_sha"] = new_head_sha
                     j["applied_short_sha"] = new_short_sha
                 break
-        repo_key = str(repo_root)
-        if repo_key in state.get("repos", {}) and new_head_sha:
-            state["repos"][repo_key]["baseline_sha"] = new_head_sha
-            state["repos"][repo_key]["youngest_short_sha"] = new_short_sha
-            state["repos"][repo_key]["updated_at"] = now_iso()
+        matched_repo_key = next((k for k in state.get("repos", {}) if is_same_repo_path(k, repo_root)), None)
+        if matched_repo_key and new_head_sha:
+            state["repos"][matched_repo_key]["baseline_sha"] = new_head_sha
+            state["repos"][matched_repo_key]["youngest_short_sha"] = new_short_sha
+            state["repos"][matched_repo_key]["updated_at"] = now_iso()
         save_state(state)
 
     return {
@@ -4412,7 +4497,7 @@ def main() -> int:
             for j in state.get("jobs", []):
                 if j.get("status") != "queued" or j.get("queued_by") != "claude-session":
                     continue
-                if root and j.get("repo_path") != str(root):
+                if root and not is_same_repo_path(j.get("repo_path"), root):
                     continue
                 j["status"] = "running"
                 j["started_at"] = now_iso()
@@ -4421,6 +4506,13 @@ def main() -> int:
                 claimed.append(dict(j, prompt=build_watchdog_prompt(j)))
             if claimed:
                 save_state(state)
+        for c in claimed:
+            try:
+                rp = Path(c["repo_path"])
+                (rp / ".antigravity" / "tasks").mkdir(parents=True, exist_ok=True)
+                (rp / ".antigravity" / "audits").mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
         print(json.dumps({"ok": True, "ctl": str(Path(__file__).resolve()), "jobs": claimed}, indent=2))
         return 0
 
@@ -4452,13 +4544,11 @@ def main() -> int:
         return 0
 
     if args.cmd == "status" or not args.cmd:
-        root = resolve_git_root(args.repo) if getattr(args, "repo", "") else None
+        root = resolve_git_root(args.repo) or Path(args.repo).resolve() if getattr(args, "repo", "") else None
         reconcile_jobs(root)
         state = load_state()
-        if getattr(args, "repo", ""):
-            root = resolve_git_root(args.repo)
-            if root:
-                state["jobs"] = [j for j in state["jobs"] if j.get("repo_path") == str(root)]
+        if root:
+            state["jobs"] = [j for j in state["jobs"] if is_same_repo_path(j.get("repo_path"), root)]
         if getattr(args, "json", False):
             print(json.dumps(state, indent=2))
         else:

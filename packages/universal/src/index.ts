@@ -155,6 +155,13 @@ export default Plugin.define({
               }
               try {
                 const res = await applyFix(dir, sha);
+                if (res?.ok === false || res?.error) {
+                  await ctx.session.synthetic({
+                    sessionID,
+                    text: `Failed to apply fix: ${res.error || "Unknown error"}`,
+                  });
+                  return;
+                }
                 await ctx.session.synthetic({
                   sessionID,
                   text: `Applied fixes for commit \`${sha.slice(0, 7)}\` to the working branch.\n${res.message || "Successfully applied fix."}`,
@@ -272,8 +279,8 @@ export default Plugin.define({
               return;
             }
 
-            if (sub === "execute" || sub === "plan") {
-              const planId = args[1] || "1";
+            if (sub === "execute" || sub === "plan" || (sub && /^#?[1-4]$/.test(sub))) {
+              const planId = ((sub === "execute" || sub === "plan" ? args[1] : sub) || "1").replace(/^#/, "");
               const planRes = await executePlan(dir, planId, true);
               if (!planRes.ok || !planRes.prompt) {
                 await ctx.session.synthetic({
@@ -448,7 +455,8 @@ export default Plugin.define({
           }),
           async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
-            const result = await executePlan(targetRepo, input.planId, true);
+            const planId = String(input.planId || "").replace(/^#/, "");
+            const result = await executePlan(targetRepo, planId, true);
             return {
               output: result,
               content: JSON.stringify(result, null, 2),
@@ -490,20 +498,23 @@ export default Plugin.define({
           }),
           async (input) => {
             const targetRepo = input.repo || ctx.location.directory;
+            const isClear = Boolean(input.clear) || (typeof input.goal === "string" && input.goal.trim().toLowerCase() === "clear");
+            const isRefresh = Boolean(input.refresh) || (typeof input.goal === "string" && input.goal.trim().toLowerCase() === "refresh");
+            const goalVal = (isClear || isRefresh) ? undefined : input.goal;
             const result = await manageGoal(
               targetRepo,
-              input.goal,
-              Boolean(input.clear),
-              Boolean(input.refresh)
+              goalVal,
+              isClear,
+              isRefresh
             );
             const goalStr = typeof result?.goal === "object" ? (result.goal?.goal || "") : (result?.goal || "");
             let text = "No goal currently set.";
-            if (input.clear) {
+            if (isClear) {
               text = "Repository milestone goal cleared.";
-            } else if (input.refresh) {
+            } else if (isRefresh) {
               text = goalStr ? `Refreshed repository milestone goal: "${goalStr}"` : "Milestone goal refreshed.";
-            } else if (input.goal) {
-              text = `Repository milestone goal set to: "${input.goal}"`;
+            } else if (goalVal) {
+              text = `Repository milestone goal set to: "${goalVal}"`;
             } else if (goalStr) {
               text = `Current milestone goal: "${goalStr}"`;
             }
