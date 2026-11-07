@@ -33,6 +33,18 @@ export function timeAgo(iso, now = Date.now()) {
   return `${Math.round(hours / 24)}d ago`;
 }
 
+/** @param {string} u @returns {string} */
+function normalizeWsUri(u) {
+  let s = String(u || '').trim();
+  if (s.startsWith('file://')) {
+    s = s.replace(/^file:\/\//, '');
+    try {
+      s = decodeURIComponent(s);
+    } catch {}
+  }
+  return s.replace(/\/+$/, '');
+}
+
 /**
  * @param {Dashboard | null | undefined} data
  * @param {{ selectedRepoPath?: string, explicit?: boolean, workspaceUris?: string[] }} [options]
@@ -42,12 +54,14 @@ export function selectActiveRepo(data, { selectedRepoPath = '', explicit = false
   const repos = data?.activeRepos || [];
   if (repos.length === 0) return null;
   if (explicit && selectedRepoPath) {
-    const found = repos.find((r) => r.repoPath === selectedRepoPath);
+    const normSelected = normalizeWsUri(selectedRepoPath);
+    const found = repos.find((r) => r.repoPath === selectedRepoPath || r.repoPath === normSelected);
     if (found) return found;
   }
   if (workspaceUris.length > 0) {
+    const normUris = workspaceUris.map(normalizeWsUri).filter(Boolean);
     const matched = repos.find((r) =>
-      workspaceUris.some((u) => u.includes(r.repoPath) || r.repoPath.includes(u))
+      normUris.some((u) => u.includes(r.repoPath) || r.repoPath.includes(u))
     );
     if (matched) return matched;
   }

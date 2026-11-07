@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 import module from 'node:module'
 import fs from 'node:fs'
 import assert from 'node:assert/strict'
@@ -593,6 +594,21 @@ async function main() {
     const vmUrl = pathToFileURL(path.join(rootDir, 'sidecars/panel/view-model.js')).href
     const vm = await import(vmUrl)
     assert.equal(vm.selectActiveRepo({ activeRepos: [], jobs: [] }), null)
+    const parentWsTest = vm.selectActiveRepo(
+      {
+        activeRepos: [
+          { repoPath: '/Users/test/other-repo', repoName: 'other-repo' },
+          { repoPath: '/Users/test/#KdG/AI Sandbox/antigravity-watchdog', repoName: 'antigravity-watchdog' },
+        ],
+        jobs: [],
+      },
+      { workspaceUris: ['file:///Users/test/%23KdG/AI%20Sandbox'] }
+    )
+    assert.equal(parentWsTest?.repoName, 'antigravity-watchdog')
+    const indexHtml = fs.readFileSync(path.join(rootDir, 'sidecars/panel/index.html'), 'utf8')
+    assert.ok(!/<script\s+type="module"\s+src="\/app\.js/.test(indexHtml), 'index.html must use classic script tag for /app.js so sidecar-gateway sends cookies')
+    execFileSync(process.execPath, ['--check', path.join(rootDir, 'sidecars/panel/app.js')])
+    execFileSync(process.execPath, ['--check', path.join(rootDir, 'sidecars/panel/main.mjs')])
     const action = vm.auditAction({ activeRepos: [], jobs: [] }, null)
     assert.equal(action.kind, 'none')
     assert.equal(action.disabled, true)

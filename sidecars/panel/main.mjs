@@ -130,10 +130,31 @@ function discoverActiveClaudeWorkspaces() {
   return result;
 }
 
-app.page('/', () => readLocal('index.html'));
+function renderIndexHtml() {
+  let html = readLocal('index.html');
+  try {
+    const css = readLocal('styles.css');
+    html = html.replace(
+      /<link\s+rel="stylesheet"\s+href="\/styles\.css[^"]*">/,
+      () => `<style>\n${css}\n</style>`
+    );
+  } catch {}
+  try {
+    const js = readLocal('app.js');
+    html = html.replace(
+      /<script(?:\s+type="module")?\s+src="\/app\.js[^"]*"><\/script>/,
+      () => `<script>\n${js}\n</script>`
+    );
+  } catch {}
+  return html;
+}
+
+app.page('/', () => renderIndexHtml());
 app.page('/app.js', () => readLocal('app.js'));
 app.page('/view-model.js', () => readLocal('view-model.js'));
-app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
+if (isStandaloneMode) {
+  app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
+}
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
 app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, host: isStandaloneMode ? 'claude' : 'antigravity', pid: process.pid }), 'GET');
 app.api('/api/active-workspace', (data, req) => {
@@ -216,6 +237,7 @@ function runGit(repoPath, args) {
     return execFileSync('git', ['-C', repoPath, ...args], {
       encoding: 'utf8',
       timeout: 8000,
+      stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
   } catch {
     return '';
@@ -879,10 +901,24 @@ function collectActiveRepos(uris, state) {
     repos = repos.filter((r) => !r.head?.isEmptyTree);
   }
 
+  const normUri = (u) => {
+    let s = String(u || '').trim();
+    if (s.startsWith('file://')) {
+      try {
+        s = fileURLToPath(s);
+      } catch {
+        s = s.replace(/^file:\/\//, '');
+        try { s = decodeURIComponent(s); } catch {}
+      }
+    }
+    return s.replace(/\/+$/, '');
+  };
+  const normUris = uris.map(normUri).filter(Boolean);
+
   // Sort: workspace repos first, non-empty tree first, youngest commit timestamp DESC
   repos.sort((a, b) => {
-    const inWsA = uris.length > 0 && uris.some((u) => u.includes(a.repoPath) || a.repoPath.includes(u)) ? 1 : 0;
-    const inWsB = uris.length > 0 && uris.some((u) => u.includes(b.repoPath) || b.repoPath.includes(u)) ? 1 : 0;
+    const inWsA = normUris.length > 0 && normUris.some((u) => u.includes(a.repoPath) || a.repoPath.includes(u)) ? 1 : 0;
+    const inWsB = normUris.length > 0 && normUris.some((u) => u.includes(b.repoPath) || b.repoPath.includes(u)) ? 1 : 0;
     if (inWsA !== inWsB) return inWsB - inWsA;
 
     const neA = a.head?.isEmptyTree ? 0 : 1;
