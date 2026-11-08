@@ -33,6 +33,7 @@ APP_DATA_DIR = Path(os.environ.get("ANTIGRAVITY_APP_DATA_DIR", str(HOME / ".gemi
 WATCHDOG_DIR = APP_DATA_DIR / "watchdog"
 STATE_FILE = WATCHDOG_DIR / "state.json"
 LOCK_FILE = WATCHDOG_DIR / "state.lock"
+STATE_LOCK_DIR = WATCHDOG_DIR / "state.json.lock"
 WORKTREES_DIR = WATCHDOG_DIR / "worktrees"
 LOGS_DIR = WATCHDOG_DIR / "logs"
 ENV_CACHE_FILE = WATCHDOG_DIR / "ls_env.json"
@@ -146,6 +147,22 @@ class StateLock:
                 except Exception:
                     fp.close()
                     raise
+                # Coordinate with sidecar panel's directory lock
+                for _ in range(40):
+                    try:
+                        STATE_LOCK_DIR.mkdir(parents=True, exist_ok=False)
+                        break
+                    except FileExistsError:
+                        try:
+                            mtime = STATE_LOCK_DIR.stat().st_mtime
+                            if time.time() - mtime > 5.0:
+                                shutil.rmtree(STATE_LOCK_DIR, ignore_errors=True)
+                                continue
+                        except Exception:
+                            pass
+                        time.sleep(0.025)
+                    except Exception:
+                        break
             StateLock._depth += 1
             return self
         except Exception:
@@ -155,22 +172,27 @@ class StateLock:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         try:
             StateLock._depth = max(0, StateLock._depth - 1)
-            if StateLock._depth == 0 and StateLock._fp is not None:
+            if StateLock._depth == 0:
                 try:
-                    if fcntl is not None:
-                        fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
-                    else:
-                        try:
-                            import msvcrt
-                            StateLock._fp.seek(0)
-                            msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_UNLCK, 1)
-                        except Exception:
-                            pass
-                finally:
+                    shutil.rmtree(STATE_LOCK_DIR, ignore_errors=True)
+                except Exception:
+                    pass
+                if StateLock._fp is not None:
                     try:
-                        StateLock._fp.close()
+                        if fcntl is not None:
+                            fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
+                        else:
+                            try:
+                                import msvcrt
+                                StateLock._fp.seek(0)
+                                msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_UNLCK, 1)
+                            except Exception:
+                                pass
                     finally:
-                        StateLock._fp = None
+                        try:
+                            StateLock._fp.close()
+                        finally:
+                            StateLock._fp = None
         finally:
             StateLock._thread_lock.release()
 
@@ -2308,11 +2330,24 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
                                 status_val = "failed"
                                 is_synthesizing = False
                     else:
-                        is_synthesizing = True
-            elif status_val == "cancelled":
+                        if elapsed > 60:
+                            s_data["status"] = "failed"
+                            s_data["error"] = "Synthesis process did not record a conversation ID."
+                            try:
+                                state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+                            except Exception:
+                                pass
+                            status_val = "failed"
+                            is_synthesizing = False
+                        else:
+                            is_synthesizing = True
+            elif status_val in ("cancelled", "failed", "idle"):
                 is_synthesizing = False
-        except Exception:
-            pass
+        except Exception as exc:
+            is_synthesizing = False
+            status_val = "failed"
+            s_data["status"] = "failed"
+            s_data["error"] = str(exc)
 
     proposals = []
     goal_data = load_goal(repo_root)
@@ -2991,7 +3026,7 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = Tru
         conv_id = spawn_plan_agent(repo_root, title, plan_content) if spawn_agent else "foreground-agent"
         prompt_text = f"[NEXT-STEPS-SESSION]\nImplement the approved plan '{title}':\n\n{plan_content}"
 
-        exec_record = mark_execution_running(repo_root, clean_id, conv_id, title)
+        exec_record = mark_execution_running(repo_root, clean_id, conv_id, title) if spawn_agent else None
 
         return {
             "ok": True,
@@ -4068,8 +4103,20 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
                     summary = s_match.group(1).strip()
 
                 fix_branch = f"fix/watchdog-{short_sha}"
+                slug = repo_slug(repo_root)
+                worktree_path = Path(j.get("worktree_path")) if j.get("worktree_path") and Path(j.get("worktree_path")).exists() else (WORKTREES_DIR / f"{slug}-{short_sha}")
+                has_commits = False
+                if worktree_path.exists():
+                    rc_wt, wt_ahead, _ = run_git(worktree_path, ["rev-list", "--count", f"{full_sha}..HEAD"])
+                    if rc_wt == 0 and wt_ahead.isdigit() and int(wt_ahead) > 0:
+                        has_commits = True
+                        _, wt_head_sha, _ = run_git(worktree_path, ["rev-parse", "HEAD"])
+                        if wt_head_sha.strip():
+                            run_git(repo_root, ["branch", "-f", fix_branch, wt_head_sha.strip()])
+
                 rc, ahead_out, _ = run_git(repo_root, ["rev-list", "--count", f"{full_sha}..{fix_branch}"])
-                has_commits = rc == 0 and ahead_out.isdigit() and int(ahead_out) > 0
+                if rc == 0 and ahead_out.isdigit() and int(ahead_out) > 0:
+                    has_commits = True
                 if has_commits and verdict == "PASS":
                     verdict = "FIXED_ON_BRANCH"
 
@@ -4327,7 +4374,39 @@ def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = 
                     break
 
         if not target_job:
+            info = get_commit_info(repo_root, sha) if sha and repo_root else None
+            check_short = info["short_sha"] if info else (sha[:7] if sha else "")
+            if not check_short and repo_root:
+                y, _ = get_youngest_commit(repo_root, limit=1)
+                if y:
+                    check_short = y["short_sha"]
+            if check_short and repo_root:
+                report_file = repo_root / ".antigravity" / "audits" / f"review-{check_short}.md"
+                if report_file.exists():
+                    return {
+                        "ok": True,
+                        "completed": True,
+                        "shortSha": check_short,
+                        "verdict": "PASS",
+                        "summary": "Audit completed.",
+                    }
             return {"ok": False, "error": "No matching audit job found to continue."}
+
+        # Check for existing report before re-spawning
+        target_root = Path(target_job.get("repo_path") or repo_root) if (target_job.get("repo_path") or repo_root) else None
+        target_short = target_job.get("short_sha") or (sha[:7] if sha else "")
+        if target_root and target_short:
+            report_file = target_root / ".antigravity" / "audits" / f"review-{target_short}.md"
+            if report_file.exists():
+                reconcile_job(target_job)
+                save_state(st)
+                return {
+                    "ok": True,
+                    "completed": True,
+                    "shortSha": target_job.get("short_sha") or target_short,
+                    "verdict": target_job.get("verdict") or "PASS",
+                    "summary": target_job.get("summary") or "Audit completed.",
+                }
 
         # If already completed during reconciliation
         if target_job.get("status") == "completed":
@@ -4387,7 +4466,21 @@ python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{
             return {"ok": True, "resumed": True, "queued": True, "shortSha": target_job.get("short_sha")}
 
         if not resumed_chat:
-            spawn_detached_agent(target_job)
+            spawn_success = False
+            try:
+                spawn_success = spawn_detached_agent(target_job)
+            except OSError as err:
+                target_job["status"] = "failed"
+                target_job["error"] = f"Failed to spawn background agent: {err}"
+                target_job["summary"] = f"Failed to spawn auditor: {err}"
+                save_state(st)
+                return {"ok": False, "error": f"Failed to spawn background agent: {err}"}
+            if not spawn_success:
+                target_job["status"] = "failed"
+                target_job["error"] = "Failed to launch background auditor process."
+                target_job["summary"] = "Background auditor failed to start."
+                save_state(st)
+                return {"ok": False, "error": "Failed to launch background auditor process."}
 
         target_job["status"] = "running"
         target_job["started_at"] = now_iso()
@@ -4451,7 +4544,12 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
         if worktree_path.exists():
             run_git(repo_root, ["worktree", "remove", "--force", str(worktree_path)])
             shutil.rmtree(worktree_path, ignore_errors=True)
+        run_git(repo_root, ["worktree", "prune"])
         run_git(repo_root, ["branch", "-D", fix_branch])
+        rc_b, _, _ = run_git(repo_root, ["show-ref", "--verify", f"refs/heads/{fix_branch}"])
+        if rc_b == 0:
+            run_git(repo_root, ["worktree", "prune"])
+            run_git(repo_root, ["branch", "-D", fix_branch])
 
         job_id = f"{slug}-{short_sha}"
         _, new_head_sha, _ = run_git(repo_root, ["rev-parse", "HEAD"])
@@ -4509,7 +4607,12 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
     if worktree_path.exists():
         run_git(repo_root, ["worktree", "remove", "--force", str(worktree_path)])
         shutil.rmtree(worktree_path, ignore_errors=True)
+    run_git(repo_root, ["worktree", "prune"])
     run_git(repo_root, ["branch", "-D", fix_branch])
+    rc_b, _, _ = run_git(repo_root, ["show-ref", "--verify", f"refs/heads/{fix_branch}"])
+    if rc_b == 0:
+        run_git(repo_root, ["worktree", "prune"])
+        run_git(repo_root, ["branch", "-D", fix_branch])
 
     # 7. Update state.json to mark fixes_applied = True and record applied commit
     job_id = f"{slug}-{short_sha}"
@@ -4604,7 +4707,7 @@ def main() -> int:
 
     p_comp = sub.add_parser("complete", help="Mark a Watchdog review job complete", parents=[p_common])
     p_comp.add_argument("--repo", required=True)
-    p_comp.add_argument("--sha", required=True)
+    p_comp.add_argument("--sha", default="")
     p_comp.add_argument("--verdict", default="PASS")
     p_comp.add_argument("--summary", default="Audit completed.")
     p_comp.add_argument("--bugs-count", type=int, default=0)
@@ -4853,10 +4956,22 @@ def main() -> int:
 
     if args.cmd == "complete":
         root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        target_sha = args.sha
+        if not target_sha:
+            with StateLock():
+                state = load_state()
+                for j in state.get("jobs", []):
+                    if is_same_repo_path(j.get("repo", "") or j.get("repo_path", ""), str(root)) and j.get("status") in ("running", "dispatched", "queued"):
+                        target_sha = j.get("sha") or j.get("commit_sha") or j.get("short_sha") or ""
+                        if target_sha:
+                            break
+            if not target_sha:
+                _, head_sha, _ = run_git(root, ["rev-parse", "HEAD"])
+                target_sha = head_sha.strip()
         fixes_bool = str(args.fixes_committed).lower() in ("true", "1", "yes")
         res = complete_job(
             root,
-            sha=args.sha,
+            sha=target_sha,
             verdict=args.verdict,
             summary=args.summary,
             bugs_count=args.bugs_count,
@@ -4906,6 +5021,15 @@ def main() -> int:
             print(json.dumps({"ok": True, "job_id": job["id"], "dispatched": True}))
             return 0
         else:
+            with StateLock():
+                state = load_state()
+                for j in state.get("jobs", []):
+                    if j.get("id") == job["id"]:
+                        j["status"] = "failed"
+                        j["error"] = "Failed to launch background auditor process."
+                        j["summary"] = "Background auditor failed to start."
+                        break
+                save_state(state)
             print(json.dumps({"ok": False, "error": "Failed to spawn agent conversation."}))
             return 1
 

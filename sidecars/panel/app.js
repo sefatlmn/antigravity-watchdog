@@ -411,10 +411,25 @@ function parseInlineMd(text) {
     if (/^(https?:\/\/|#|\/)/i.test(cleanUrl)) {
       return `<a href="${cleanUrl}" target="_blank" rel="noopener">${label}</a>`;
     }
+    if (/^file:\/\//i.test(cleanUrl)) {
+      return `<a href="${cleanUrl}" class="file-link" data-file-url="${cleanUrl}" onclick="window.handleFileLinkClick?.(event, this)">${label}</a>`;
+    }
     return `${label} (${cleanUrl})`;
   });
   return s;
 }
+
+window.handleFileLinkClick = function(event, el) {
+  event.preventDefault();
+  const url = el?.dataset?.fileUrl || el?.getAttribute('href') || '';
+  if (!url) return;
+  if (window.vscode && typeof window.vscode.postMessage === 'function') {
+    window.vscode.postMessage({ command: 'openFile', uri: url });
+  }
+  if (typeof callApi === 'function') {
+    callApi('/api/open-file', { body: { uri: url } }).catch(() => {});
+  }
+};
 
 function renderMarkdown(md) {
   if (!md) return '';
@@ -613,7 +628,17 @@ function renderDashboard(data) {
       const action = auditAction(data, activeRepo, commentInput ? commentInput.value : '');
 
       if (commitTagBadge) {
-        commitTagBadge.hidden = !action.isAppliedFix;
+        if (action.isAuditSkipped) {
+          commitTagBadge.hidden = false;
+          commitTagBadge.className = 'applied-badge small-applied-tag warn-pill';
+          commitTagBadge.textContent = 'Review Skipped';
+        } else if (action.isAppliedFix) {
+          commitTagBadge.hidden = false;
+          commitTagBadge.className = 'applied-badge small-applied-tag';
+          commitTagBadge.textContent = 'Applied Fix';
+        } else {
+          commitTagBadge.hidden = true;
+        }
       }
 
       if (commentInput) {
@@ -687,7 +712,13 @@ function renderDashboard(data) {
   }
 
   // Audits Partition
-  const { recent: recentJobs, archived: archivedJobs } = partitionJobs(data);
+  const activeRepoPath = (activeRepo?.repoPath || activeRepo?.repo || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  const filteredJobs = (data.jobs || []).filter((j) => {
+    if (!activeRepoPath) return true;
+    const jp = (j.repo_path || j.repo || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    return Boolean(jp && jp === activeRepoPath);
+  });
+  const { recent: recentJobs, archived: archivedJobs } = partitionJobs({ ...data, jobs: filteredJobs });
 
   const auditsCountEl = $('audits-count');
   if (auditsCountEl) auditsCountEl.textContent = recentJobs.length;
@@ -1493,12 +1524,12 @@ async function runAudit() {
     return;
   }
 
-  const latest = activeRepo.youngestCommit || activeRepo.head;
-  const subject = latest?.subject || '';
-  if (latest?.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag))) {
+  const action = auditAction(currentDashboard, activeRepo, comment);
+  if (action.isAppliedFix) {
     toast('The latest commit is an applied fix and cannot be re-audited. Make a new commit first.', true);
     return;
   }
+  const latest = activeRepo?.youngestCommit || activeRepo?.head || action?.latest;
   const sha = latest?.sha || 'YOUNGEST';
   const repoPath = activeRepo.repoPath;
 

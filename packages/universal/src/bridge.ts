@@ -135,15 +135,13 @@ export async function runCtlJson<T = any>(args: string[]): Promise<T> {
 }
 
 export async function getStatus(repo?: string): Promise<any> {
-  const args = ["status"];
-  if (repo) args.push("--repo", resolveRepo(repo));
-  return runCtlJson(args);
+  const targetRepo = resolveRepo(repo);
+  return runCtlJson(["status", "--repo", targetRepo]);
 }
 
 export async function getGitState(repo?: string): Promise<any> {
-  const args = ["git-state"];
-  if (repo) args.push("--repo", resolveRepo(repo));
-  return runCtlJson(args);
+  const targetRepo = resolveRepo(repo);
+  return runCtlJson(["git-state", "--repo", targetRepo]);
 }
 
 export async function syncRepo(repo?: string): Promise<any> {
@@ -193,8 +191,6 @@ export async function applyFix(repo?: string, sha?: string): Promise<any> {
         firstFix?.shortSha ||
         (typeof firstFix === "string" ? firstFix.replace(/^fix\/watchdog-/, "") : "") ||
         sync?.bestRepo?.lastFixSha ||
-        sync?.bestRepo?.head?.sha ||
-        sync?.bestRepo?.headSha ||
         ""
       ).replace(/^fix\/watchdog-/, "");
     } catch {
@@ -202,7 +198,7 @@ export async function applyFix(repo?: string, sha?: string): Promise<any> {
     }
   }
   if (!targetSha) {
-    throw new Error("No fix branch or commit SHA specified.");
+    throw new Error("No fix branch available to apply. Run an audit first or specify a commit SHA.");
   }
   return runCtlJson(["apply-fix", "--repo", targetRepo, "--sha", targetSha]);
 }
@@ -224,8 +220,18 @@ export async function completeAudit(
   fixesCommitted = false
 ): Promise<any> {
   const targetRepo = resolveRepo(repo);
+  let targetSha = sha;
+  if (!targetSha) {
+    try {
+      const state = await getStatus(targetRepo);
+      const activeJob = state?.jobs?.find((j: any) => j.status === "running" || j.status === "dispatched" || j.status === "queued");
+      targetSha = activeJob?.sha || activeJob?.commit_sha || activeJob?.short_sha;
+    } catch {
+      // fallback handled by watchdog_ctl
+    }
+  }
   const args = ["complete", "--repo", targetRepo];
-  if (sha) args.push("--sha", sha);
+  if (targetSha) args.push("--sha", targetSha);
   args.push("--verdict", verdict);
   args.push("--summary", summary);
   args.push("--bugs-count", String(bugsCount));
@@ -307,7 +313,16 @@ export function readReportMarkdown(reportPath: string): string {
 
 export function formatStatusReport(status: any, syncInfo?: any): string {
   const repoInfo = syncInfo?.bestRepo || {};
-  const jobs = status?.jobs || [];
+  const repoPath = repoInfo.repoPath || status?.repo || status?.repo_path || "";
+  let jobs: any[] = Array.isArray(status?.jobs) ? status.jobs : [];
+  if (repoPath) {
+    const norm = (p: string) => String(p || "").replace(/\\/g, "/").replace(/\/+$/, "");
+    const target = norm(repoPath);
+    jobs = jobs.filter((j: any) => {
+      const jp = norm(j?.repo || j?.repo_path || "");
+      return Boolean(jp && jp === target);
+    });
+  }
   const latestJob = jobs[0];
 
   let output = `## Watchdog Status: ACTIVE\n\n`;

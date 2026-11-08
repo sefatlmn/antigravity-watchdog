@@ -172,7 +172,8 @@ function parseShellCommand(command: string): { subcommands: string[]; error: str
     }
 
     const remainder = input.slice(i)
-    const allowedRedirect = /^(\d?>&\d|\d?>\s*\/dev\/null)/.exec(remainder)
+    const allowedRedirect =
+      /^(\d?>&\d|\d?>{1,2}\s*(?:["']?\/dev\/null["']?|"(?:\/private)?\/tmp\/[^"<>|;&$]+"|'(?:\/private)?\/tmp\/[^'<>|;&$]+'|(?:\/private)?\/tmp\/[a-zA-Z0-9_\-\.\/]+)|&>\s*(?:["']?\/dev\/null["']?|"(?:\/private)?\/tmp\/[^"<>|;&$]+"|'(?:\/private)?\/tmp\/[^'<>|;&$]+'|(?:\/private)?\/tmp\/[a-zA-Z0-9_\-\.\/]+)|<\s*["']?\/dev\/null["']?)/.exec(remainder)
     if (allowedRedirect) {
       current += ' '
       i += allowedRedirect[0].length
@@ -237,9 +238,10 @@ export function commandAllowed(grant: AgentGrant, command: string): string | nul
     const normPart = normPath(part)
     const normCtl = normPath(grant.ctl)
     const isComplete =
-      /^(?:python3?|node)\s+(?:"[^"]*watchdog_ctl\.py"|'[^']*watchdog_ctl\.py'|\S*watchdog_ctl\.py)\s+complete\b/.test(part) ||
-      /^(?:python3?|node)\s+(?:"[^"]*watchdog_ctl\.py"|'[^']*watchdog_ctl\.py'|\S*watchdog_ctl\.py)\s+complete\b/.test(normPart) ||
-      /^(?:npx\s+)?(?:watchdog|\.\/bin\/watchdog\.js|\S*watchdog(?:\.js)?)\s+complete\b/.test(part) ||
+      /^(?:python3?|node)\s+(?:"[^"]*(?:watchdog_ctl\.py|watchdog(?:\.js)?)"|'[^']*(?:watchdog_ctl\.py|watchdog(?:\.js)?)'|\S*(?:watchdog_ctl\.py|watchdog(?:\.js)?))\s+complete\b/.test(part) ||
+      /^(?:python3?|node)\s+(?:"[^"]*(?:watchdog_ctl\.py|watchdog(?:\.js)?)"|'[^']*(?:watchdog_ctl\.py|watchdog(?:\.js)?)'|\S*(?:watchdog_ctl\.py|watchdog(?:\.js)?))\s+complete\b/.test(normPart) ||
+      /^(?:node\s+)?(?:npx\s+)?(?:"[^"]*watchdog(?:\.js)?"|'[^']*watchdog(?:\.js)?'|\S*watchdog(?:\.js)?)\s+complete\b/.test(part) ||
+      /^(?:node\s+)?(?:npx\s+)?(?:"[^"]*watchdog(?:\.js)?"|'[^']*watchdog(?:\.js)?'|\S*watchdog(?:\.js)?)\s+complete\b/.test(normPart) ||
       startsWithWord(normPart, `python3 "${normCtl}" complete`) ||
       startsWithWord(normPart, `python3 '${normCtl}' complete`) ||
       startsWithWord(normPart, `python3 ${normCtl} complete`) ||

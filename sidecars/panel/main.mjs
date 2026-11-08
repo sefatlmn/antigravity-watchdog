@@ -1,5 +1,5 @@
-import { execFileSync } from 'node:child_process';
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -179,6 +179,20 @@ function discoverActiveClaudeWorkspaces() {
 function renderIndexHtml() {
   let html = readLocal('index.html');
   try {
+    let preloadContent = '';
+    try {
+      preloadContent = readLocal('preload.js');
+    } catch {
+      preloadContent = STANDALONE_PRELOAD_JS;
+    }
+    if (preloadContent) {
+      html = html.replace(
+        /<script(?:\s+type="module")?\s+src="\/preload\.js[^"]*"><\/script>/,
+        () => `<script>\n${preloadContent}\n</script>`
+      );
+    }
+  } catch {}
+  try {
     const css = readLocal('styles.css');
     html = html.replace(
       /<link\s+rel="stylesheet"\s+href="\/styles\.css[^"]*">/,
@@ -329,10 +343,19 @@ function loadState(skipReconcile = false) {
       jobs: [],
     };
   }
-  let state;
-  try {
-    state = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
-  } catch {
+  let state = null;
+  for (let r = 0; r < 5; r++) {
+    try {
+      const content = readFileSync(STATE_FILE, 'utf8').trim();
+      if (content) {
+        state = JSON.parse(content);
+        break;
+      }
+    } catch {}
+    const start = Date.now();
+    while (Date.now() - start < 15) {}
+  }
+  if (!state || typeof state !== 'object') {
     state = {
       auto_dispatch: true,
       skip_docs_only: true,
@@ -370,12 +393,15 @@ function findWatchdogConversationForJob(j) {
       if (!existsSync(tFile)) continue;
       try {
         const fd = openSync(tFile, 'r');
-        const buf = Buffer.alloc(32768);
-        const bytesRead = readSync(fd, buf, 0, 32768, 0);
-        closeSync(fd);
-        const header = buf.toString('utf8', 0, bytesRead);
-        if (header.includes('[WATCHDOG-SESSION]') && header.includes(shortSha)) {
-          return d.name;
+        try {
+          const buf = Buffer.alloc(32768);
+          const bytesRead = readSync(fd, buf, 0, 32768, 0);
+          const header = buf.toString('utf8', 0, bytesRead);
+          if (header.includes('[WATCHDOG-SESSION]') && header.includes(shortSha)) {
+            return d.name;
+          }
+        } finally {
+          closeSync(fd);
         }
       } catch {}
     }
@@ -535,10 +561,13 @@ function reconcileJobs(state) {
                 let chunkText = '';
                 if (stat.size > 65536) {
                   const fd = openSync(tFile, 'r');
-                  const buffer = Buffer.alloc(65536);
-                  readSync(fd, buffer, 0, 65536, stat.size - 65536);
-                  closeSync(fd);
-                  chunkText = buffer.toString('utf8');
+                  try {
+                    const buffer = Buffer.alloc(65536);
+                    readSync(fd, buffer, 0, 65536, stat.size - 65536);
+                    chunkText = buffer.toString('utf8');
+                  } finally {
+                    closeSync(fd);
+                  }
                 } else {
                   chunkText = readFileSync(tFile, 'utf8');
                 }
@@ -599,13 +628,50 @@ function reconcileJobs(state) {
 }
 
 function saveStatePatch(patch) {
-  const current = loadState(true);
-  const next = { ...current, ...patch };
   mkdirSync(WATCHDOG_DIR, { recursive: true });
-  const tmpFile = `${STATE_FILE}.tmp.${process.pid}`;
-  writeFileSync(tmpFile, JSON.stringify(next, null, 2), 'utf8');
-  renameSync(tmpFile, STATE_FILE);
-  return next;
+  const lockDir = `${STATE_FILE}.lock`;
+  let acquired = false;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      mkdirSync(lockDir);
+      acquired = true;
+      break;
+    } catch {
+      try {
+        const stats = statSync(lockDir);
+        if (Date.now() - stats.mtimeMs > 5000) {
+          rmdirSync(lockDir);
+          continue;
+        }
+      } catch {}
+      const start = Date.now();
+      while (Date.now() - start < 25) {}
+    }
+  }
+
+  try {
+    let current = {};
+    for (let r = 0; r < 5; r++) {
+      try {
+        current = loadState(true);
+        if (current && typeof current === 'object' && Object.keys(current).length > 0) break;
+      } catch {}
+      const start = Date.now();
+      while (Date.now() - start < 20) {}
+    }
+    const next = { ...current, ...patch };
+    const tmpFile = `${STATE_FILE}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+    writeFileSync(tmpFile, JSON.stringify(next, null, 2), 'utf8');
+    renameSync(tmpFile, STATE_FILE);
+    return next;
+  } catch (err) {
+    console.error('Failed to save state patch:', err);
+    return patch;
+  } finally {
+    if (acquired) {
+      try { rmdirSync(lockDir); } catch {}
+    }
+  }
 }
 
 function getRepoRecentCommits(repoPath, limit = 12) {
@@ -834,12 +900,30 @@ function inspectSingleRepo(topLevel) {
       if (item.status === 'running') {
         const initSha = item.initialHeadSha;
         if (latestSha && initSha && latestSha !== initSha) {
-          item.status = 'completed';
-          item.completedAt = new Date().toISOString();
-          item.summary = 'Plan execution completed (changes committed to repository).';
-          item.completedSha = latestSha.slice(0, 7);
-          execsModified = true;
-          continue;
+          let isAncestor = false;
+          try {
+            const gitBin = getGitBin();
+            execFileSync(gitBin, ['-C', topLevel, 'merge-base', '--is-ancestor', initSha, latestSha], {
+              stdio: 'ignore',
+              timeout: 5000,
+              env: {
+                ...process.env,
+                PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
+              },
+            });
+            isAncestor = true;
+          } catch {
+            isAncestor = false;
+          }
+
+          if (isAncestor) {
+            item.status = 'completed';
+            item.completedAt = new Date().toISOString();
+            item.summary = 'Plan execution completed (changes committed to repository).';
+            item.completedSha = latestSha.slice(0, 7);
+            execsModified = true;
+            continue;
+          }
         }
 
         const convId = item.conversationId;
@@ -870,10 +954,13 @@ function inspectSingleRepo(topLevel) {
                 let chunkText = '';
                 if (stat.size > 65536) {
                   const fd = openSync(transcriptPath, 'r');
-                  const buffer = Buffer.alloc(65536);
-                  readSync(fd, buffer, 0, 65536, stat.size - 65536);
-                  closeSync(fd);
-                  chunkText = buffer.toString('utf8');
+                  try {
+                    const buffer = Buffer.alloc(65536);
+                    readSync(fd, buffer, 0, 65536, stat.size - 65536);
+                    chunkText = buffer.toString('utf8');
+                  } finally {
+                    closeSync(fd);
+                  }
                 } else {
                   chunkText = readFileSync(transcriptPath, 'utf8');
                 }
@@ -922,10 +1009,12 @@ function inspectSingleRepo(topLevel) {
       }
     }
     let synthesizing = false;
+    let synthesisError = null;
     const synthStateFile = join(nextStepsDir, 'synthesis_state.json');
     if (existsSync(synthStateFile)) {
       try {
         const sData = JSON.parse(readFileSync(synthStateFile, 'utf8'));
+        if (sData.error) synthesisError = sData.error;
         if (sData.status === 'synthesizing') {
           const startedTs = sData.startedAt ? new Date(sData.startedAt).getTime() : 0;
           const elapsed = startedTs ? Date.now() - startedTs : 0;
@@ -937,14 +1026,23 @@ function inspectSingleRepo(topLevel) {
               proposalsFresh = true;
             }
           }
-          if (proposalsFresh || elapsed > 15 * 60 * 1000) {
+          if (proposalsFresh) {
             synthesizing = false;
+            sData.status = 'ready';
+            try { writeFileSync(synthStateFile, JSON.stringify(sData, null, 2), 'utf8'); } catch {}
+          } else if (elapsed > 15 * 60 * 1000) {
+            synthesizing = false;
+            sData.status = 'idle';
+            sData.error = 'Synthesis timed out after 15 minutes.';
+            synthesisError = sData.error;
+            try { writeFileSync(synthStateFile, JSON.stringify(sData, null, 2), 'utf8'); } catch {}
           } else {
             synthesizing = true;
           }
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        synthesizing = false;
+        synthesisError = err.message || 'Synthesis state read error';
       }
     }
 
@@ -962,6 +1060,8 @@ function inspectSingleRepo(topLevel) {
         proposals,
         executions,
         synthesizing,
+        synthesis_status: synthesizing ? 'synthesizing' : 'idle',
+        synthesis_error: synthesisError,
       };
     }
 
@@ -993,6 +1093,8 @@ function inspectSingleRepo(topLevel) {
       proposals,
       executions,
       synthesizing,
+      synthesis_status: synthesizing ? 'synthesizing' : 'idle',
+      synthesis_error: synthesisError,
     };
   } catch (err) {
     console.error(`Error inspecting repo at ${topLevel}:`, err);
@@ -1494,7 +1596,21 @@ app.api('/api/next-steps/refresh', (data) => {
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['dispatch-synthesis', '--repo', repo], host);
+  try {
+    return runPythonCtl(['dispatch-synthesis', '--repo', repo], host);
+  } catch (err) {
+    const nextStepsDir = join(repo, '.antigravity', 'next_steps');
+    const synthStateFile = join(nextStepsDir, 'synthesis_state.json');
+    try {
+      if (existsSync(synthStateFile)) {
+        const sData = JSON.parse(readFileSync(synthStateFile, 'utf8'));
+        sData.status = 'idle';
+        sData.error = err.message || 'Synthesis dispatch failed';
+        writeFileSync(synthStateFile, JSON.stringify(sData, null, 2), 'utf8');
+      }
+    } catch {}
+    return { ok: false, error: err.message || 'Synthesis dispatch failed', status: 'idle' };
+  }
 });
 
 // POST /api/next-steps/cancel { repo, host? }
@@ -1629,6 +1745,27 @@ app.api('/api/next-steps/mark-running', (data) => {
   const args = ['mark-execution-running', '--repo', repo, '--plan-id', planId];
   if (convId) args.push('--conversation-id', convId);
   return runPythonCtl(args);
+});
+
+// POST /api/open-file { uri | path }
+app.api('/api/open-file', (data) => {
+  const uri = String(data?.uri || data?.path || '').trim();
+  if (!uri) return { ok: false, error: 'No URI provided' };
+  let filePath = uri.replace(/^file:\/\//i, '').replace(/#.*$/, '');
+  try {
+    filePath = decodeURIComponent(filePath);
+  } catch {}
+  if (!existsSync(filePath)) {
+    return { ok: false, error: `File not found: ${filePath}` };
+  }
+  try {
+    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+    const child = spawn(opener, [filePath], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return { ok: true, path: filePath };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
 });
 
 app.run();

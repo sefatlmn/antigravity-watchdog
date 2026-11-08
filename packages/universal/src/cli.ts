@@ -13,6 +13,7 @@ import {
   sendAuditComment,
   synthesizeNextSteps,
   cancelSynthesis,
+  cancelPlanExecution,
   manageGoal,
   executePlan,
   formatStatusReport,
@@ -40,6 +41,7 @@ Commands:
   comment <notes...>       Send guidance note to an in-progress audit
   next-steps               Synthesize and display 4 project-grounded implementation plans
   plan <id>                Display approved plan prompt specification for agent execution
+  cancel-plan [id]         Cancel an ongoing next step plan execution
   goal                     Inspect current milestone goal
   goal --set "<goal>"      Set project milestone goal
   goal --refresh           Refresh project milestone goal
@@ -414,6 +416,22 @@ async function main(): Promise<void> {
           console.log(JSON.stringify(res, null, 2));
         } else {
           console.log("Next steps synthesis cancelled.");
+        }
+        break;
+      }
+
+      case "cancel-plan":
+      case "cancel-execution": {
+        const planId = (positionals[0] || (typeof flags["plan-id"] === "string" ? flags["plan-id"] : "1")).replace(/^#/, "");
+        const res = await cancelPlanExecution(repo, planId);
+        if (isJson) {
+          console.log(JSON.stringify(res, null, 2));
+        } else {
+          if (res?.ok === false || res?.error) {
+            console.error(`Error cancelling plan execution: ${res.error || "Unknown error"}`);
+            process.exit(1);
+          }
+          console.log(`Plan execution #${res.planId || planId} cancelled.`);
         }
         break;
       }

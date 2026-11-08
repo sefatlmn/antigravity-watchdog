@@ -134,16 +134,12 @@ export async function runCtlJson(args) {
     }
 }
 export async function getStatus(repo) {
-    const args = ["status"];
-    if (repo)
-        args.push("--repo", resolveRepo(repo));
-    return runCtlJson(args);
+    const targetRepo = resolveRepo(repo);
+    return runCtlJson(["status", "--repo", targetRepo]);
 }
 export async function getGitState(repo) {
-    const args = ["git-state"];
-    if (repo)
-        args.push("--repo", resolveRepo(repo));
-    return runCtlJson(args);
+    const targetRepo = resolveRepo(repo);
+    return runCtlJson(["git-state", "--repo", targetRepo]);
 }
 export async function syncRepo(repo) {
     const target = resolveRepo(repo);
@@ -192,8 +188,6 @@ export async function applyFix(repo, sha) {
             targetSha = String(firstFix?.shortSha ||
                 (typeof firstFix === "string" ? firstFix.replace(/^fix\/watchdog-/, "") : "") ||
                 sync?.bestRepo?.lastFixSha ||
-                sync?.bestRepo?.head?.sha ||
-                sync?.bestRepo?.headSha ||
                 "").replace(/^fix\/watchdog-/, "");
         }
         catch {
@@ -201,7 +195,7 @@ export async function applyFix(repo, sha) {
         }
     }
     if (!targetSha) {
-        throw new Error("No fix branch or commit SHA specified.");
+        throw new Error("No fix branch available to apply. Run an audit first or specify a commit SHA.");
     }
     return runCtlJson(["apply-fix", "--repo", targetRepo, "--sha", targetSha]);
 }
@@ -216,9 +210,20 @@ export async function continueAudit(repo, sha, jobId) {
 }
 export async function completeAudit(repo, sha, verdict = "PASS", summary = "Audit completed.", bugsCount = 0, fixesCommitted = false) {
     const targetRepo = resolveRepo(repo);
+    let targetSha = sha;
+    if (!targetSha) {
+        try {
+            const state = await getStatus(targetRepo);
+            const activeJob = state?.jobs?.find((j) => j.status === "running" || j.status === "dispatched" || j.status === "queued");
+            targetSha = activeJob?.sha || activeJob?.commit_sha || activeJob?.short_sha;
+        }
+        catch {
+            // fallback handled by watchdog_ctl
+        }
+    }
     const args = ["complete", "--repo", targetRepo];
-    if (sha)
-        args.push("--sha", sha);
+    if (targetSha)
+        args.push("--sha", targetSha);
     args.push("--verdict", verdict);
     args.push("--summary", summary);
     args.push("--bugs-count", String(bugsCount));
@@ -297,7 +302,16 @@ export function readReportMarkdown(reportPath) {
 }
 export function formatStatusReport(status, syncInfo) {
     const repoInfo = syncInfo?.bestRepo || {};
-    const jobs = status?.jobs || [];
+    const repoPath = repoInfo.repoPath || status?.repo || status?.repo_path || "";
+    let jobs = Array.isArray(status?.jobs) ? status.jobs : [];
+    if (repoPath) {
+        const norm = (p) => String(p || "").replace(/\\/g, "/").replace(/\/+$/, "");
+        const target = norm(repoPath);
+        jobs = jobs.filter((j) => {
+            const jp = norm(j?.repo || j?.repo_path || "");
+            return Boolean(jp && jp === target);
+        });
+    }
     const latestJob = jobs[0];
     let output = `## Watchdog Status: ACTIVE\n\n`;
     if (status?.error && jobs.length === 0) {

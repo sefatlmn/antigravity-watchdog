@@ -592,7 +592,7 @@ async function main() {
 
     const unquotedRedirect = await $.tool.check({
       tool: 'Bash',
-      input: { command: 'echo "hello" > /tmp/unsafe' },
+      input: { command: 'echo "hello" > /data/unsafe' },
       agentId: 'agent-1',
     })
     assert.equal(unquotedRedirect.decision, 'deny')
@@ -1415,6 +1415,165 @@ print("OK")
     passed++
   } catch (err) {
     console.error('✗ app.js live runtime execution test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    // BUG-04 & BUG-18: hooks/agents.ts node watchdog and shell redirection
+    const { commandAllowed } = await import(agentsModuleUrl)
+    const grant = { roots: ['/data/worktrees/app-abc1234', '/work/app/.antigravity/audits'], ctl: '/plugin/scripts/watchdog_ctl.py', jobId: 'app-abc1234' }
+
+    // BUG-04: node watchdog.js complete and watchdog complete commands allowed
+    assert.equal(commandAllowed(grant, 'node /path/to/watchdog.js complete --repo /work/app --verdict PASS'), null)
+    assert.equal(commandAllowed(grant, 'node ./bin/watchdog.js complete'), null)
+    assert.equal(commandAllowed(grant, 'watchdog complete --repo /work/app'), null)
+
+    // BUG-18: safe file redirection to /dev/null and /tmp/
+    assert.equal(commandAllowed(grant, 'cd /data/worktrees/app-abc1234 && npm test > /tmp/test-output.log 2>&1'), null)
+    assert.equal(commandAllowed(grant, 'cd /data/worktrees/app-abc1234 && python3 -m pytest > /tmp/pytest.log'), null)
+    assert.equal(commandAllowed(grant, 'echo "hello" > /tmp/unsafe-log.txt'), null)
+    assert.equal(commandAllowed(grant, 'npm test > /tmp/out.log && echo "handling unsafe input"'), null)
+    assert.notEqual(commandAllowed(grant, 'echo "test" > ~/.bashrc'), null)
+    assert.notEqual(commandAllowed(grant, 'echo "test" > /etc/shadow'), null)
+    assert.notEqual(commandAllowed(grant, 'echo "hello" > ./unsafe.txt'), null)
+
+    console.log('✓ hooks/agents.ts: node watchdog complete execution and safe /tmp/ shell redirection')
+    passed++
+  } catch (err) {
+    console.error('✗ hooks/agents.ts BUG-04 & BUG-18 test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    // BUG-06 & BUG-08: sidecars/panel/view-model.js sameRepo null-safety & isAuditSkipped
+    const vmUrl = pathToFileURL(path.join(rootDir, 'sidecars/panel/view-model.js')).href
+    const vm = await import(vmUrl)
+
+    // BUG-06: sameRepo returns false if either path is empty
+    const jobA = { id: '1', repo_path: '' }
+    const repoA = { repoPath: '/data/repoA' }
+    const actionNull = vm.auditAction({ jobs: [jobA] }, repoA)
+    assert.equal(actionNull.matchingJob, null)
+
+    // BUG-08: [skip-watchdog] marked as isAuditSkipped, button enabled as 'audit'
+    const skipRepo = {
+      repoPath: '/data/repoB',
+      head: { sha: 'abcdef1234567890', shortSha: 'abcdef1', subject: 'docs: update [skip-watchdog]' },
+    }
+    const skipAction = vm.auditAction({ jobs: [] }, skipRepo)
+    assert.equal(skipAction.isAuditSkipped, true)
+    assert.equal(skipAction.isAppliedFix, false)
+    assert.equal(skipAction.kind, 'audit')
+    assert.equal(skipAction.disabled, false)
+    assert.ok(skipAction.label.includes('Run Review'))
+
+    console.log('✓ view-model.js: sameRepo cross-repo isolation and [skip-watchdog] manual review override')
+    passed++
+  } catch (err) {
+    console.error('✗ view-model.js BUG-06 & BUG-08 test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    // BUG-01, BUG-05, BUG-07, BUG-17, BUG-19: universal bridge and CLI
+    const bridgeUrl = pathToFileURL(path.join(rootDir, 'packages/universal/dist/bridge.js')).href
+    const bridge = await import(bridgeUrl)
+
+    // BUG-05: formatStatusReport filters jobs by repoPath and excludes empty repo_path
+    const multiRepoReport = bridge.formatStatusReport(
+      {
+        jobs: [
+          { short_sha: 'other1', repo_path: '/other/repo', verdict: 'NEEDS_ATTENTION', status: 'completed' },
+          { short_sha: 'empty1', repo_path: '', verdict: 'NEEDS_ATTENTION', status: 'completed' },
+          { short_sha: 'target1', repo_path: rootDir, verdict: 'PASS', status: 'completed' },
+        ],
+      },
+      { bestRepo: { repoPath: rootDir, repoName: 'watchdog', branch: 'main' } }
+    )
+    assert.ok(multiRepoReport.includes('target1'), 'Status report must show target repo job')
+    assert.ok(!multiRepoReport.includes('other1'), 'Status report must NOT leak other repo job')
+    assert.ok(!multiRepoReport.includes('empty1'), 'Status report must NOT leak job with empty repo_path')
+
+    // BUG-17: applyFix throws when no fix branch is present
+    await assert.rejects(
+      async () => {
+        await bridge.applyFix(rootDir)
+      },
+      (err) => {
+        assert.ok(err.message.includes('No fix branch available'), `Expected informative error, got: ${err.message}`)
+        return true
+      }
+    )
+
+    // BUG-19: cancelPlanExecution function exists and runs
+    assert.equal(typeof bridge.cancelPlanExecution, 'function')
+    const cancelRes = await bridge.cancelPlanExecution(rootDir, 'non-existent-999')
+    assert.ok(cancelRes !== null && typeof cancelRes === 'object')
+
+    console.log('✓ universal bridge: status cross-repo filtering, applyFix error guard, and cancelPlanExecution')
+    passed++
+  } catch (err) {
+    console.error('✗ universal bridge BUG-05, BUG-17, BUG-19 test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    // BUG-02: execute-plan --no-spawn does not mark execution running
+    const { execFileSync } = await import('node:child_process')
+    const ctlScript = path.join(rootDir, 'scripts/watchdog_ctl.py')
+    const out = execFileSync('python3', [ctlScript, 'execute-plan', '--repo', rootDir, '--plan-id', '1', '--no-spawn', '--json'], {
+      encoding: 'utf8',
+    })
+    const parsed = JSON.parse(out)
+    assert.equal(parsed.dispatched, false)
+    assert.equal(parsed.execution, null)
+
+    // BUG-01: watchdog complete without --sha resolves gracefully
+    const compHelp = execFileSync('python3', [ctlScript, 'complete', '--help'], { encoding: 'utf8' })
+    assert.ok(!compHelp.includes('required: --sha') && !compHelp.includes('--sha SHA\n\nrequired arguments:\n  --repo REPO\n  --sha SHA'), '--sha must be optional')
+
+    console.log('✓ watchdog_ctl.py: read-only plan inspection preserves state and complete --sha is optional')
+    passed++
+  } catch (err) {
+    console.error('✗ watchdog_ctl.py BUG-01 & BUG-02 test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    // BUG-10 & BUG-14: StateLock directory lock coordination and app.js link/audit handlers
+    const { execFileSync } = await import('node:child_process')
+    const pyOutput = execFileSync('python3', [
+      '-c',
+      `
+import sys, time
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(rootDir)})
+import scripts.watchdog_ctl as ctl
+
+# Verify STATE_LOCK_DIR is acquired and cleaned up
+assert not ctl.STATE_LOCK_DIR.exists(), "STATE_LOCK_DIR should not exist before lock"
+with ctl.StateLock():
+    assert ctl.STATE_LOCK_DIR.exists(), "STATE_LOCK_DIR should exist during lock"
+assert not ctl.STATE_LOCK_DIR.exists(), "STATE_LOCK_DIR should be removed after lock"
+print("OK")
+      `,
+    ], { encoding: 'utf8' })
+    assert.ok(pyOutput.includes('OK'), 'Python StateLock must manage STATE_LOCK_DIR')
+
+    // Test app.js open-file and runAudit integrity
+    const appJsRaw = fs.readFileSync(path.join(rootDir, 'sidecars/panel/app.js'), 'utf8')
+    assert.ok(appJsRaw.includes("const latest = activeRepo?.youngestCommit"), 'runAudit must declare latest before use')
+    assert.ok(appJsRaw.includes("window.handleFileLinkClick"), 'handleFileLinkClick must be declared on window')
+
+    console.log('✓ StateLock directory coordination and app.js file link / audit handlers verified')
+    passed++
+  } catch (err) {
+    console.error('✗ StateLock & app.js test')
     console.error(err)
     failed++
   }

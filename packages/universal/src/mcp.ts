@@ -7,9 +7,11 @@ import {
   queueAudit,
   applyFix,
   continueAudit,
+  completeAudit,
   sendAuditComment,
   synthesizeNextSteps,
   cancelSynthesis,
+  cancelPlanExecution,
   manageGoal,
   executePlan,
   formatStatusReport,
@@ -232,6 +234,57 @@ const PRIMARY_TOOLS = [
       },
     },
   },
+  {
+    name: "watchdog_complete",
+    description: "Mark a Watchdog review job complete with verdict and summary.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: {
+          type: "string",
+          description: "Path to git repository (defaults to working directory).",
+        },
+        sha: {
+          type: "string",
+          description: "Target commit SHA (defaults to active running job or HEAD).",
+        },
+        verdict: {
+          type: "string",
+          description: "Audit verdict: PASS, FIXED_ON_BRANCH, or NEEDS_ATTENTION.",
+        },
+        summary: {
+          type: "string",
+          description: "Executive summary of the completed audit.",
+        },
+        bugsCount: {
+          type: "number",
+          description: "Number of reproducible bugs found.",
+        },
+        fixesCommitted: {
+          type: "boolean",
+          description: "Whether fixes were committed to the fix branch.",
+        },
+      },
+    },
+  },
+  {
+    name: "watchdog_cancel_plan",
+    description: "Cancel an ongoing next step plan execution.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        planId: {
+          type: "string",
+          description: "Proposal plan ID to cancel (e.g. 1, 2, 3, or 4).",
+        },
+        repo: {
+          type: "string",
+          description: "Path to git repository (defaults to working directory).",
+        },
+      },
+      required: ["planId"],
+    },
+  },
 ];
 
 const ALL_TOOLS = [
@@ -422,6 +475,32 @@ async function handleToolCall(name: string, args: Record<string, any> = {}): Pro
       case "watchdog_cancel_synthesis": {
         const res = await cancelSynthesis(args.repo);
         return { text: `Next steps synthesis cancelled.${res?.notifiedChat ? " Active turn notified." : ""}` };
+      }
+
+      case "watchdog_complete": {
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const verdict = args.verdict || "PASS";
+        const summary = args.summary || "Audit completed.";
+        const bugsCount = Number(args.bugsCount ?? args.bugs_count ?? 0) || 0;
+        const fixesCommitted = Boolean(args.fixesCommitted ?? args.fixes_committed ?? false);
+        const res = await completeAudit(repo, args.sha, verdict, summary, bugsCount, fixesCommitted);
+        if (res?.ok === false || res?.error) {
+          return { text: `Failed to complete audit: ${res.error || "Unknown error"}`, isError: true };
+        }
+        return { text: `Audit marked complete: ${verdict} - ${summary}` };
+      }
+
+      case "watchdog_cancel_plan": {
+        const planId = String(args.planId || args.plan_id || args.plan || args.id || "").replace(/^#/, "");
+        if (!planId) {
+          return { text: "Error: planId is required.", isError: true };
+        }
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const res = await cancelPlanExecution(repo, planId);
+        if (res?.ok === false || res?.error) {
+          return { text: `Could not cancel plan #${planId}: ${res?.error || "Plan execution not found."}`, isError: true };
+        }
+        return { text: `Plan execution #${res.planId || planId} cancelled.` };
       }
 
       default:

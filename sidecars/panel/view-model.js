@@ -82,9 +82,10 @@ export function goalText(repo) {
 
 /** @param {Job} job @param {Repo} repo */
 const sameRepo = (job, repo) => {
-  const jp = (job?.repo_path || '').trim().replace(/\/+$/, '');
-  const rp = (repo?.repoPath || '').trim().replace(/\/+$/, '');
-  return !jp || !rp || jp === rp;
+  const jp = (job?.repo_path || job?.repo || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  const rp = (repo?.repoPath || repo?.repo || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!jp || !rp) return false;
+  return jp === rp;
 };
 
 // What one audit card shows. `badge` is the corner tag: null, or { kind: 'fix' | 'warn' | 'plain', label }.
@@ -133,11 +134,12 @@ export function auditAction(data, repo, comment = '') {
   const matchesSha = (sha, short) => (activeSha && sha === activeSha) || (shortSha && short === shortSha);
 
   const matchingJob = jobs.find((j) => sameRepo(j, repo) && matchesSha((j.sha || '').toLowerCase(), (j.short_sha || '').toLowerCase()));
-  const hasSkipTag = latest.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag));
-  const isAppliedFix = hasSkipTag || jobs.some((j) => sameRepo(j, repo) && matchesSha((j.applied_commit_sha || '').toLowerCase(), (j.applied_short_sha || '').toLowerCase()));
+  const hasSkipTag = Boolean(latest.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag)));
+  const isAppliedFix = Boolean(jobs.some((j) => sameRepo(j, repo) && matchesSha((j.applied_commit_sha || '').toLowerCase(), (j.applied_short_sha || '').toLowerCase())));
+  const isAuditSkipped = hasSkipTag && !isAppliedFix;
   const runningJob = jobs.find((j) => sameRepo(j, repo) && (j.status === 'running' || j.status === 'queued'));
 
-  const base = { latest, shortSha, isAppliedFix, runningJob: runningJob || null, matchingJob: matchingJob || null };
+  const base = { latest, shortSha, isAppliedFix, isAuditSkipped, runningJob: runningJob || null, matchingJob: matchingJob || null };
   if (runningJob) {
     const sha = runningJob.short_sha || shortSha;
     if (comment.trim()) {
@@ -153,6 +155,17 @@ export function auditAction(data, repo, comment = '') {
   }
   if (isAppliedFix) {
     return { ...base, kind: 'none', disabled: true, tone: 'primary', icon: 'check', label: `Commit ${shortSha} Verified (Fix Applied)`, title: `The latest commit is a verified fix applied to ${repo.branch || 'main'}. Make a new commit to audit again.` };
+  }
+  if (isAuditSkipped) {
+    return {
+      ...base,
+      kind: 'audit',
+      disabled: false,
+      tone: 'warn',
+      icon: 'play',
+      label: `Run Review (${shortSha})`,
+      title: `Commit has skip tags (${subject}). Click to run review manually.`,
+    };
   }
   if (latest.isDocsOnly) {
     return { ...base, kind: 'audit', disabled: false, tone: 'warn', icon: 'warn', label: `Audit Commit ${shortSha} (Docs Only)`, title: `Warning: Commit ${shortSha} only updated documentation/README files. Click to audit anyway.` };

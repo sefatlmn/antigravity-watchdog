@@ -51,6 +51,7 @@ export class SidecarApp {
         '/api/git_state',
         '/api/health',
         '/api/active-workspace',
+        '/api/open-file',
       ].includes(url.pathname);
 
       // Like the real SDK, non-GET mutating calls need the token; reads and status queries are open on loopback.
