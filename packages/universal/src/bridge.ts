@@ -168,6 +168,24 @@ export async function continueAudit(repo?: string, sha?: string, jobId?: string)
   return runCtlJson(args);
 }
 
+export async function completeAudit(
+  repo?: string,
+  sha?: string,
+  verdict = "PASS",
+  summary = "Audit completed.",
+  bugsCount = 0,
+  fixesCommitted = false
+): Promise<any> {
+  const targetRepo = resolveRepo(repo);
+  const args = ["complete", "--repo", targetRepo];
+  if (sha) args.push("--sha", sha);
+  args.push("--verdict", verdict);
+  args.push("--summary", summary);
+  args.push("--bugs-count", String(bugsCount));
+  args.push("--fixes-committed", fixesCommitted ? "true" : "false");
+  return runCtlJson(args);
+}
+
 export async function sendAuditComment(repo?: string, comment?: string, jobId?: string): Promise<any> {
   const targetRepo = resolveRepo(repo);
   if (!comment) throw new Error("Comment must not be empty.");

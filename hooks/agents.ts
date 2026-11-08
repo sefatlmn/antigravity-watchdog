@@ -93,8 +93,10 @@ const LOOK = ['ls', 'pwd', 'cat', 'head', 'tail', 'wc', 'grep', 'rg', 'find', 'e
 const READ_ONLY_TOOLS = ['Read', 'Grep', 'Glob', 'LS', 'TodoWrite']
 const FILE_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
 
+const userHome = () => ((globalThis as any).process?.env?.HOME || (globalThis as any).process?.env?.USERPROFILE || '')
 const unquote = (s: string) => s.trim().replace(/^(['"])(.*)\1$/, '$2')
-const normPath = (p: string) => p.replace(/\\/g, '/')
+const expandTilde = (p: string) => (p.startsWith('~') ? p.replace(/^~(?=\/|$)/, userHome()) : p)
+const normPath = (p: string) => expandTilde(p.replace(/\\/g, '/'))
 const isInside = (path: string, roots: string[]) => {
   const np = normPath(path)
   return !/(^|\/)\.\.(\/|$)/.test(np) && roots.some(root => {
@@ -234,7 +236,10 @@ export function commandAllowed(grant: AgentGrant, command: string): string | nul
     }
     const normPart = normPath(part)
     const normCtl = normPath(grant.ctl)
-    if (
+    const isComplete =
+      /^(?:python3?|node)\s+(?:"[^"]*watchdog_ctl\.py"|'[^']*watchdog_ctl\.py'|\S*watchdog_ctl\.py)\s+complete\b/.test(part) ||
+      /^(?:python3?|node)\s+(?:"[^"]*watchdog_ctl\.py"|'[^']*watchdog_ctl\.py'|\S*watchdog_ctl\.py)\s+complete\b/.test(normPart) ||
+      /^(?:npx\s+)?(?:watchdog|\.\/bin\/watchdog\.js|\S*watchdog(?:\.js)?)\s+complete\b/.test(part) ||
       startsWithWord(normPart, `python3 "${normCtl}" complete`) ||
       startsWithWord(normPart, `python3 '${normCtl}' complete`) ||
       startsWithWord(normPart, `python3 ${normCtl} complete`) ||
@@ -247,7 +252,7 @@ export function commandAllowed(grant: AgentGrant, command: string): string | nul
       startsWithWord(part, `python "${grant.ctl}" complete`) ||
       startsWithWord(part, `python '${grant.ctl}' complete`) ||
       startsWithWord(part, `python ${grant.ctl} complete`)
-    ) continue
+    if (isComplete) continue
     if (CHECKS.some(prefix => startsWithWord(part, prefix))) continue
     if (LOOK.some(prefix => startsWithWord(part, prefix)) && !/\s-(delete|exec|execdir|ok)\b/.test(part)) continue
     return `\`${part.split(/\s+/).slice(0, 3).join(' ')}\` is not one of the commands a Watchdog audit may run`
@@ -276,11 +281,18 @@ export const register: Register = on => {
   on('agent.spawn', async ($, e, next) => {
     const result = await next(e)
     const spec = e as unknown as { subagentType?: string; subagent_type?: string; prompt?: string }
+    const subType = spec.subagentType ?? spec.subagent_type
     const agentId = result?.agentId ?? (result as any)?.agent_id
-    if (!agentId || (spec.subagentType ?? spec.subagent_type) !== AUDITOR) return result
+    if (!agentId || (subType !== AUDITOR && subType !== 'watchdog-auditor')) return result
     const waiting = await read($, pending)
     const normPrompt = normPath(String(spec.prompt ?? ''))
-    const taskFile = Object.keys(waiting).find(file => normPrompt.includes(normPath(file)))
+    const taskFiles = Object.keys(waiting)
+    const taskFile = taskFiles.find(file => {
+      const nf = normPath(file)
+      const base = nf.split('/').pop() ?? ''
+      const dotAnti = nf.includes('.antigravity') ? nf.slice(nf.indexOf('.antigravity')) : ''
+      return normPrompt.includes(nf) || (dotAnti && normPrompt.includes(dotAnti)) || (base && normPrompt.includes(base))
+    }) ?? (taskFiles.length === 1 ? taskFiles[0] : undefined)
     const grant = taskFile ? waiting[taskFile] : undefined
     if (!taskFile || !grant) return result
     await update($, pending, all => Object.fromEntries(Object.entries(all).filter(([file]) => file !== taskFile)))
@@ -306,6 +318,8 @@ export const register: Register = on => {
     const aid = e.agentId ?? (e as any)?.agent_id
     const grant = aid ? (await read($, agents))[aid] : undefined
     if (aid && grant) {
+      const stopReason = (e as any)?.stopReason ?? (e as any)?.stop_reason
+      if (stopReason === 'tool_use') return result
       await ctl($, ['agent-done', '--conversation-id', `claude-agent-${aid}`])
       await update($, agents, all => Object.fromEntries(Object.entries(all).filter(([id]) => id !== aid)))
     }

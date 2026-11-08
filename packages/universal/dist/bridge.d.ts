@@ -9,6 +9,7 @@ export declare function prepareWorktree(repo?: string, sha?: string): Promise<an
 export declare function queueAudit(repo?: string, sha?: string, userComment?: string, force?: boolean): Promise<any>;
 export declare function applyFix(repo?: string, sha?: string): Promise<any>;
 export declare function continueAudit(repo?: string, sha?: string, jobId?: string): Promise<any>;
+export declare function completeAudit(repo?: string, sha?: string, verdict?: string, summary?: string, bugsCount?: number, fixesCommitted?: boolean): Promise<any>;
 export declare function sendAuditComment(repo?: string, comment?: string, jobId?: string): Promise<any>;
 export declare function synthesizeNextSteps(repo?: string, force?: boolean): Promise<any>;
 export declare function checkSynthesis(repo?: string): Promise<any>;

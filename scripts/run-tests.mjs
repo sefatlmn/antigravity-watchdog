@@ -312,6 +312,7 @@ function createHarness(pluginRegister) {
         stateStore.set(k, { value: e.value, version: nextVersion })
         return { value: { version: nextVersion } }
       }
+      if (eventName === 'turn.complete') return {}
       throw new Error(`Unhandled event in test harness: ${eventName}`)
     }
 
@@ -543,6 +544,44 @@ async function main() {
     })
     assert.equal(singleQuoteCtl.decision, 'allow')
 
+    // Relative ctl paths and universal CLI complete allowed
+    const relCtl1 = await $.tool.check({
+      tool: 'Bash',
+      input: { command: 'python3 scripts/watchdog_ctl.py complete --repo /work/app --sha abc --verdict PASS' },
+      agentId: 'agent-1',
+    })
+    assert.equal(relCtl1.decision, 'allow')
+
+    const relCtl2 = await $.tool.check({
+      tool: 'Bash',
+      input: { command: 'python3 watchdog_ctl.py complete --verdict PASS' },
+      agentId: 'agent-1',
+    })
+    assert.equal(relCtl2.decision, 'allow')
+
+    const universalComplete = await $.tool.check({
+      tool: 'Bash',
+      input: { command: 'watchdog complete --repo /work/app --sha abc' },
+      agentId: 'agent-1',
+    })
+    assert.equal(universalComplete.decision, 'allow')
+
+    const npxComplete = await $.tool.check({
+      tool: 'Bash',
+      input: { command: 'npx watchdog complete --verdict PASS' },
+      agentId: 'agent-1',
+    })
+    assert.equal(npxComplete.decision, 'allow')
+
+    // turn.complete with stopReason 'tool_use' must NOT remove grant or trigger agent-done
+    await $.turn.complete({ agentId: 'agent-1', stopReason: 'tool_use' })
+    const stillAllowed = await $.tool.check({
+      tool: 'Bash',
+      input: { command: 'git status' },
+      agentId: 'agent-1',
+    })
+    assert.equal(stillAllowed.decision, 'allow')
+
     // Punctuation outside quotes still denied
     const unquotedInjection = await $.tool.check({
       tool: 'Bash',
@@ -686,7 +725,10 @@ async function main() {
       assert.ok(err.message.includes('0000000') && !err.message.includes('fix/watchdog-fix/watchdog-'))
     }
 
-    console.log('✓ universal package: goal unwrap, queueAudit, applyFix prefix stripping, formatters, null-safety')
+    // 6. completeAudit exported and callable
+    assert.equal(typeof bridge.completeAudit, 'function')
+
+    console.log('✓ universal package: goal unwrap, queueAudit, applyFix prefix stripping, completeAudit, formatters, null-safety')
     passed++
   } catch (err) {
     console.error('✗ universal package tests')
@@ -745,6 +787,11 @@ print("OK")
     const p5 = cli.parseArgs(['--repo', '/some/path', 'status'])
     assert.equal(p5.cmd, 'status')
     assert.equal(p5.flags.repo, '/some/path')
+
+    const p6 = cli.parseArgs(['complete', '--repo', '/some/path', '--sha', 'abc1234', '--verdict', 'PASS', '--summary', 'All good'])
+    assert.equal(p6.cmd, 'complete')
+    assert.equal(p6.flags.verdict, 'PASS')
+    assert.equal(p6.flags.summary, 'All good')
 
     console.log('✓ universal CLI: parseArgs non-consuming boolean flags and positionals')
     passed++
@@ -890,7 +937,13 @@ print("OK")
     assert.ok(ctlArgsLogged.some(args => args[0] === 'mark-running' && args.includes('claude-agent-snake-agent-1')))
     assert.ok(ctlArgsLogged.some(args => args[0] === 'agent-done' && args.includes('claude-agent-snake-agent-1')))
 
-    console.log('✓ hooks/agents.ts direct tool matching, playwright plugin prefix, Windows ctl paths, snake_case agent_id')
+    // 5. agent.spawn matches relative task path in prompt
+    ctlArgsLogged.length = 0
+    await $.tool.call({ tool: 'watchdog_audit', input: {} })
+    await $.agent.spawn({ subagent_type: 'watchdog:watchdog-auditor', prompt: 'Please read .antigravity/tasks/audit-direct1.md to begin.' })
+    assert.ok(ctlArgsLogged.some(args => args[0] === 'mark-running' && args.includes('claude-agent-snake-agent-1')))
+
+    console.log('✓ hooks/agents.ts direct tool matching, playwright plugin prefix, Windows ctl paths, snake_case agent_id, relative task matching')
     passed++
   } catch (err) {
     console.error('✗ hooks/agents.ts direct matching and cross-platform test')
@@ -903,7 +956,7 @@ print("OK")
     const pyOutput = execFileSync('python3', [
       '-c',
       `
-import sys, threading, time
+import sys, threading, time, json
 from pathlib import Path
 sys.path.insert(0, ${JSON.stringify(rootDir)})
 import scripts.watchdog_ctl as ctl
@@ -944,6 +997,108 @@ rec = ctl.mark_execution_running(repo_path, "#2", "test-conv", "Test Title")
 assert rec["planId"] == "2", f"Expected planId '2', got {rec['planId']}"
 cancelled = ctl.cancel_execution(repo_path, "#2")
 assert cancelled["ok"] == True, f"Cancel execution failed: {cancelled}"
+
+# 4. Test is_conversation_active with PLANNER_RESPONSE settling and status checks
+import tempfile
+with tempfile.TemporaryDirectory() as tmp_brain:
+    brain_dir = Path(tmp_brain)
+    old_brain = ctl.BRAIN_DIR
+    ctl.BRAIN_DIR = brain_dir
+    try:
+        test_conv_id = "test-conv-active-check"
+        log_dir = brain_dir / test_conv_id / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True)
+        t_file = log_dir / "transcript.jsonl"
+
+        # Recent PLANNER_RESPONSE without tool calls -> MUST be active (True)
+        t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []}) + "\\n", encoding="utf-8")
+        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True, "Recent PLANNER_RESPONSE without tool_calls should be active"
+
+        # Tool calls present -> active (True)
+        t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [{"name": "test"}]}) + "\\n", encoding="utf-8")
+        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True, "PLANNER_RESPONSE with tool_calls should be active"
+
+        # Status ERROR in GENERIC (e.g. failing tests or linting) -> MUST be active (True)
+        t_file.write_text(json.dumps({"type": "GENERIC", "status": "ERROR", "content": "1 test failed"}) + "\\n", encoding="utf-8")
+        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True, "GENERIC status ERROR should remain active"
+
+        # Status ERROR in PLANNER_RESPONSE -> inactive (False)
+        t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "ERROR", "tool_calls": []}) + "\\n", encoding="utf-8")
+        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False, "Status ERROR in PLANNER_RESPONSE should be inactive"
+
+        # Status CANCELLED -> inactive (False)
+        t_file.write_text(json.dumps({"type": "GENERIC", "status": "CANCELLED"}) + "\\n", encoding="utf-8")
+        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False, "Status CANCELLED should be inactive"
+
+        # Settling PLANNER_RESPONSE without tool calls within 600s (e.g. 200s) -> active (True)
+        t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []}) + "\\n", encoding="utf-8")
+        stale_time_mid = time.time() - 200
+        import os
+        os.utime(t_file, (stale_time_mid, stale_time_mid))
+        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True, "Settling PLANNER_RESPONSE (200s) should remain active"
+
+        # Stale PLANNER_RESPONSE without tool calls (> 600s) -> inactive (False)
+        stale_time_dead = time.time() - 650
+        os.utime(t_file, (stale_time_dead, stale_time_dead))
+        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False, "Stale PLANNER_RESPONSE (>600s) should be inactive"
+    finally:
+        ctl.BRAIN_DIR = old_brain
+
+# 5. Test reconcile_job finding report in worktree
+with tempfile.TemporaryDirectory() as tmp_repo, tempfile.TemporaryDirectory() as tmp_wt:
+    r_dir = Path(tmp_repo)
+    w_dir = Path(tmp_wt)
+    sha = "1234567890abcdef"
+    short_sha = sha[:7]
+    
+    # Place report inside worktree
+    wt_report = w_dir / f"review-{short_sha}.md"
+    wt_report.write_text(f"# Watchdog Audit Report -- {short_sha}\\n\\n- **Verdict**: PASS\\n\\n## 1. Executive Summary\\nAll tests passed successfully in worktree.", encoding="utf-8")
+    
+    job = {
+        "id": f"test-{short_sha}",
+        "repo_path": str(r_dir),
+        "worktree_path": str(w_dir),
+        "sha": sha,
+        "short_sha": short_sha,
+        "status": "running",
+        "conversation_id": "test-conv-wt"
+    }
+    modified = ctl.reconcile_job(job)
+    assert modified is True, "reconcile_job should modify job when report found in worktree"
+    assert job["status"] == "completed", f"Expected status completed, got {job['status']}"
+    assert job["verdict"] == "PASS", f"Expected verdict PASS, got {job['verdict']}"
+    assert (r_dir / ".antigravity" / "audits" / f"review-{short_sha}.md").exists(), "Report should be copied to repo audits dir"
+
+# 6. Test reconcile_job discovering Antigravity conversation for queued job
+with tempfile.TemporaryDirectory() as tmp_brain, tempfile.TemporaryDirectory() as tmp_repo:
+    brain_dir = Path(tmp_brain)
+    old_brain = ctl.BRAIN_DIR
+    ctl.BRAIN_DIR = brain_dir
+    try:
+        disc_conv_id = "test-conv-discovery-uuid"
+        log_dir = brain_dir / disc_conv_id / ".system_generated" / "logs"
+        log_dir.mkdir(parents=True)
+        t_file = log_dir / "transcript.jsonl"
+        sha_disc = "abcdef1234567890"
+        short_disc = sha_disc[:7]
+        t_file.write_text(f'[WATCHDOG-SESSION] Audit commit {short_disc}\\n{json.dumps({"type": "GENERIC", "status": "DONE"})}\\n', encoding="utf-8")
+        
+        queued_job = {
+            "id": f"job-{short_disc}",
+            "repo_path": tmp_repo,
+            "sha": sha_disc,
+            "short_sha": short_disc,
+            "status": "queued",
+            "queued_at": ctl.now_iso(),
+        }
+        modified_disc = ctl.reconcile_job(queued_job)
+        assert modified_disc is True, "reconcile_job should modify queued job when conversation discovered"
+        assert queued_job["status"] == "running", f"Expected queued job to transition to running, got {queued_job['status']}"
+        assert queued_job["conversation_id"] == disc_conv_id, "conversation_id should match discovered conversation"
+        assert queued_job.get("started_at"), "started_at should be set"
+    finally:
+        ctl.BRAIN_DIR = old_brain
 
 print("OK")
       `,

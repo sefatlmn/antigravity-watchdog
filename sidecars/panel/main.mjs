@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -271,6 +271,43 @@ function loadState(skipReconcile = false) {
   return state;
 }
 
+function findWatchdogConversationForJob(j) {
+  const shortSha = j.short_sha || (j.sha ? j.sha.slice(0, 7) : '');
+  if (!shortSha) return null;
+  const brainDir = join(homedir(), '.gemini', 'antigravity', 'brain');
+  if (!existsSync(brainDir)) return null;
+  try {
+    const entries = readdirSync(brainDir, { withFileTypes: true });
+    const dirs = entries
+      .filter(e => e.isDirectory() && e.name !== 'tempmediaStorage')
+      .map(e => {
+        try {
+          return { name: e.name, mtime: statSync(join(brainDir, e.name)).mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime);
+
+    for (const d of dirs.slice(0, 60)) {
+      const tFile = join(brainDir, d.name, '.system_generated', 'logs', 'transcript.jsonl');
+      if (!existsSync(tFile)) continue;
+      try {
+        const fd = openSync(tFile, 'r');
+        const buf = Buffer.alloc(32768);
+        const bytesRead = readSync(fd, buf, 0, 32768, 0);
+        closeSync(fd);
+        const header = buf.toString('utf8', 0, bytesRead);
+        if (header.includes('[WATCHDOG-SESSION]') && header.includes(shortSha)) {
+          return d.name;
+        }
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+
 function reconcileJobs(state) {
   let modified = false;
   const jobs = Array.isArray(state?.jobs) ? state.jobs : [];
@@ -285,6 +322,32 @@ function reconcileJobs(state) {
       const auditsDir = join(repoPath, '.antigravity', 'audits');
       const jsonReport = join(auditsDir, `review-${shortSha}.json`);
       const mdReport = join(auditsDir, `review-${shortSha}.md`);
+
+      const wtPath = j.worktree_path;
+      if (wtPath && existsSync(wtPath)) {
+        if (!existsSync(jsonReport)) {
+          for (const cand of [join(wtPath, '.antigravity', 'audits', `review-${shortSha}.json`), join(wtPath, `review-${shortSha}.json`)]) {
+            if (existsSync(cand)) {
+              try {
+                mkdirSync(auditsDir, { recursive: true });
+                copyFileSync(cand, jsonReport);
+                break;
+              } catch {}
+            }
+          }
+        }
+        if (!existsSync(mdReport)) {
+          for (const cand of [join(wtPath, '.antigravity', 'audits', `review-${shortSha}.md`), join(wtPath, `review-${shortSha}.md`)]) {
+            if (existsSync(cand)) {
+              try {
+                mkdirSync(auditsDir, { recursive: true });
+                copyFileSync(cand, mdReport);
+                break;
+              } catch {}
+            }
+          }
+        }
+      }
 
       // 1. JSON report exists -> mark completed
       if (existsSync(jsonReport)) {
@@ -339,7 +402,23 @@ function reconcileJobs(state) {
         } catch {}
       }
 
-      // 3. Check for interruption if no report exists and status is 'running'
+      // 3. Link active Antigravity session if missing before checking interruption
+      if (!j.conversation_id) {
+        const found = findWatchdogConversationForJob(j);
+        if (found) {
+          j.conversation_id = found;
+          if (j.status === 'queued') {
+            j.status = 'running';
+            j.summary = 'Autonomous Watchdog review in progress…';
+          }
+          if (!j.started_at) {
+            j.started_at = new Date().toISOString();
+          }
+          modified = true;
+        }
+      }
+
+      // 4. Check for interruption if no report exists and status is 'running'
       if (j.status === 'running') {
         const convId = j.conversation_id;
         if (convId && convId.startsWith('claude-pid-')) {
@@ -358,13 +437,26 @@ function reconcileJobs(state) {
             j.summary = 'Claude audit process exited before generating report.';
             modified = true;
           }
+        } else if (convId && (convId.startsWith('claude-agent-') || convId === 'claude-claiming')) {
+          const timeout = convId === 'claude-claiming' ? 600 : 3600;
+          const since = j.started_at || j.queued_at;
+          if (since) {
+            const age = (Date.now() - new Date(since).getTime()) / 1000;
+            if (age > timeout) {
+              j.status = 'interrupted';
+              j.summary = convId === 'claude-claiming'
+                ? 'The audit request was not sent. Click Continue Audit to try again.'
+                : 'The audit agent stopped before finishing. Click Continue Audit to resume.';
+              modified = true;
+            }
+          }
         } else if (convId) {
           const tFile = join(homedir(), '.gemini', 'antigravity', 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
           if (existsSync(tFile)) {
             try {
               const stat = statSync(tFile);
               const age = (Date.now() - stat.mtimeMs) / 1000;
-              if (age > 45) {
+              if (age > 180) {
                 let chunkText = '';
                 if (stat.size > 65536) {
                   const fd = openSync(tFile, 'r');
@@ -380,19 +472,25 @@ function reconcileJobs(state) {
                   const line = chunk[i].trim();
                   if (line.startsWith('{')) {
                     const parsed = JSON.parse(line);
-                    if (parsed.status === 'ERROR' || parsed.status === 'CANCELLED' || parsed.status === 'CANCELED') {
+                    if (parsed.status === 'CANCELLED' || parsed.status === 'CANCELED') {
+                      j.status = 'interrupted';
+                      j.summary = 'Audit subagent was cancelled.';
+                      modified = true;
+                      break;
+                    }
+                    if (parsed.status === 'ERROR' && parsed.type !== 'GENERIC') {
                       j.status = 'interrupted';
                       j.summary = 'Audit subagent was interrupted or encountered an error.';
                       modified = true;
                       break;
                     }
-                    if (parsed.type === 'PLANNER_RESPONSE' && (!parsed.tool_calls || parsed.tool_calls.length === 0)) {
+                    if (parsed.type === 'PLANNER_RESPONSE' && (!parsed.tool_calls || parsed.tool_calls.length === 0) && age > 600) {
                       j.status = 'interrupted';
                       j.summary = 'Audit subagent stopped before generating report.';
                       modified = true;
                       break;
                     }
-                    if (age > 180) {
+                    if (age > 900) {
                       j.status = 'interrupted';
                       j.summary = 'Audit conversation timed out with no recent activity.';
                       modified = true;
@@ -404,12 +502,15 @@ function reconcileJobs(state) {
               }
             } catch {}
           }
-        } else if (j.started_at) {
-          const elapsed = (Date.now() - new Date(j.started_at).getTime()) / 1000;
-          if (elapsed > 180) {
-            j.status = 'interrupted';
-            j.summary = 'Audit process stopped with no report produced.';
-            modified = true;
+        } else {
+          const since = j.started_at || j.queued_at;
+          if (since) {
+            const elapsed = (Date.now() - new Date(since).getTime()) / 1000;
+            if (elapsed > 1800) {
+              j.status = 'interrupted';
+              j.summary = 'Audit process stopped with no report produced.';
+              modified = true;
+            }
           }
         }
       }

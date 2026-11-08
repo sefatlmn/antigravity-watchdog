@@ -2039,7 +2039,7 @@ def is_conversation_active(conv_id: str, max_age_seconds: int = 900) -> bool:
         with open(t_file, "rb") as fp:
             fp.seek(0, 2)
             size = fp.tell()
-            fp.seek(max(0, size - 16384), 0)
+            fp.seek(max(0, size - 65536), 0)
             chunk = fp.read().decode("utf-8", errors="ignore")
             lines = chunk.strip().split("\n")
             for line in reversed(lines):
@@ -2057,18 +2057,32 @@ def is_conversation_active(conv_id: str, max_age_seconds: int = 900) -> bool:
             return True
 
         status = last_step.get("status")
-        if status in ("ERROR", "CANCELLED", "CANCELED"):
+        step_type = last_step.get("type")
+
+        # Explicit cancellation
+        if status in ("CANCELLED", "CANCELED"):
             return False
 
-        step_type = last_step.get("type")
+        # Tool execution steps (GENERIC) and user input:
+        # If a tool (e.g. bash test command, lint, curl) exited with an error, Antigravity sets
+        # status="ERROR" on the GENERIC step. The agent receives this output and continues its
+        # review in the next turn. This is NOT a conversation failure or agent crash!
         if step_type in ("USER_INPUT", "GENERIC"):
             return True
+
+        # System error or crash in planner
+        if status == "ERROR":
+            return False
 
         if step_type == "PLANNER_RESPONSE":
             tool_calls = last_step.get("tool_calls")
             if tool_calls and isinstance(tool_calls, list) and len(tool_calls) > 0:
                 return True
-            return False
+            # No tool calls: if recent, the agent may be thinking, communicating, or between steps.
+            # Only consider it inactive if it has settled with no tool calls and no activity for > 600s.
+            if age > min(max_age_seconds, 600):
+                return False
+            return True
 
         return True
     except Exception:
@@ -2541,8 +2555,20 @@ def claude_permission_args(task: str, repo_root: Path, worktree: Optional[Path] 
     Nothing else is allowed: a headless session has nobody to ask, so the rest is denied.
     Edit rules cover every file-writing tool; `//` starts an absolute path.
     """
-    ctl_py3 = f'Bash(python3 "{Path(__file__).resolve()}"'
-    ctl_py = f'Bash(python "{Path(__file__).resolve()}"'
+    ctl_full = str(Path(__file__).resolve())
+    ctl_cmds = [
+        f'Bash(python3 "{ctl_full}" complete:*)',
+        f'Bash(python "{ctl_full}" complete:*)',
+        f'Bash(python3 {ctl_full} complete:*)',
+        f'Bash(python {ctl_full} complete:*)',
+        "Bash(python3 scripts/watchdog_ctl.py complete:*)",
+        "Bash(python scripts/watchdog_ctl.py complete:*)",
+        "Bash(python3 watchdog_ctl.py complete:*)",
+        "Bash(python watchdog_ctl.py complete:*)",
+        "Bash(watchdog complete:*)",
+        "Bash(./bin/watchdog.js complete:*)",
+        "Bash(npx watchdog complete:*)",
+    ]
     if task == "audit":
         # Fixes go in the isolated worktree, the report in the repository's audits folder.
         audits = repo_root / ".antigravity" / "audits"
@@ -2550,17 +2576,27 @@ def claude_permission_args(task: str, repo_root: Path, worktree: Optional[Path] 
         edits = [f"Edit(/{audits}/**)"] + ([f"Edit(/{worktree}/**)"] if worktree else [])
         allowed = GIT_READ_RULES + CHECK_RULES + edits + [
             "Bash(git add:*)", "Bash(git commit:*)",
-            f"{ctl_py3} complete:*)", f"{ctl_py} complete:*)",
+            *ctl_cmds,
             f"Read(/{SKILL_PATH.parent}/**)", "mcp__playwright", "mcp__playwright:*",
         ]
         return ["--add-dir", str(audits), "--allowedTools", *allowed]
     if task == "synthesis":
         # Reads the repository; writes only the Next Steps plans.
         plans = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+        synthesis_cmds = [
+            f'Bash(python3 "{ctl_full}" complete-synthesis:*)',
+            f'Bash(python "{ctl_full}" complete-synthesis:*)',
+            f'Bash(python3 {ctl_full} complete-synthesis:*)',
+            f'Bash(python {ctl_full} complete-synthesis:*)',
+            "Bash(python3 scripts/watchdog_ctl.py complete-synthesis:*)",
+            "Bash(python scripts/watchdog_ctl.py complete-synthesis:*)",
+            "Bash(python3 watchdog_ctl.py complete-synthesis:*)",
+            "Bash(python watchdog_ctl.py complete-synthesis:*)",
+            "Bash(watchdog complete-synthesis:*)",
+        ]
         allowed = GIT_READ_RULES + [
             f"Edit(/{plans}/**)",
-            f"{ctl_py3} complete-synthesis:*)",
-            f"{ctl_py} complete-synthesis:*)",
+            *synthesis_cmds,
         ]
         return ["--allowedTools", *allowed]
     # "plan": the person chose to execute a plan in this repository, so it may edit and commit there.
@@ -2813,7 +2849,7 @@ def reconcile_executions(repo_root: Path) -> Dict[str, Any]:
                 modified = True
 
         if conv_id and conv_id != "foreground-agent":
-            if not is_conversation_active(conv_id, max_age_seconds=120):
+            if not is_conversation_active(conv_id, max_age_seconds=900):
                 t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
                 if t_file.exists():
                     try:
@@ -3694,6 +3730,38 @@ def complete_job(
     if has_branch_commits and verdict == "PASS":
         verdict = "FIXED_ON_BRANCH"
 
+    # If reports were written inside the isolated worktree, preserve them in repo audits dir before cleanup
+    if worktree_path.exists():
+        if not report_json.exists():
+            for cj in [worktree_path / ".antigravity" / "audits" / f"review-{short_sha}.json", worktree_path / f"review-{short_sha}.json"]:
+                if cj.exists():
+                    try:
+                        shutil.copy2(cj, report_json)
+                        break
+                    except Exception:
+                        pass
+        if not report_md.exists():
+            for cmd in [worktree_path / ".antigravity" / "audits" / f"review-{short_sha}.md", worktree_path / f"review-{short_sha}.md"]:
+                if cmd.exists():
+                    try:
+                        shutil.copy2(cmd, report_md)
+                        break
+                    except Exception:
+                        pass
+
+    if not report_md.exists():
+        try:
+            report_md.write_text(
+                f"# Watchdog Audit Report — `{short_sha}`\n\n"
+                f"- **Commit**: `{full_sha}`\n"
+                f"- **Verdict**: `{verdict}`\n"
+                f"- **Fix Branch**: `{fix_branch if has_branch_commits else 'None'}`\n\n"
+                f"## 1. Executive Summary\n{summary}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     if not has_branch_commits:
         if worktree_path.exists():
             run_git(repo_root, ["worktree", "remove", "--force", str(worktree_path)])
@@ -3804,14 +3872,14 @@ def find_watchdog_conversation_for_job(job: Dict[str, Any]) -> Optional[str]:
         return None
 
     try:
-        dirs = sorted([d for d in BRAIN_DIR.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
-        for d in dirs[:30]:
+        dirs = sorted([d for d in BRAIN_DIR.iterdir() if d.is_dir() and d.name != "tempmediaStorage"], key=lambda d: d.stat().st_mtime, reverse=True)
+        for d in dirs[:60]:
             t_file = d / ".system_generated" / "logs" / "transcript.jsonl"
             if not t_file.exists():
                 continue
             try:
                 with open(t_file, "r", encoding="utf-8", errors="ignore") as fp:
-                    header = fp.readline()
+                    header = fp.read(32768)
                     if "[WATCHDOG-SESSION]" in header and short_sha in header:
                         return d.name
             except Exception:
@@ -3848,6 +3916,29 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
     audits_dir = repo_root / ".antigravity" / "audits"
     report_json = audits_dir / f"review-{short_sha}.json"
     report_md = audits_dir / f"review-{short_sha}.md"
+
+    # Also detect reports written inside the isolated worktree and copy to repo audits dir
+    wt_path_str = j.get("worktree_path")
+    if wt_path_str and Path(wt_path_str).exists():
+        wt_dir = Path(wt_path_str)
+        if not report_json.exists():
+            for cj in [wt_dir / ".antigravity" / "audits" / f"review-{short_sha}.json", wt_dir / f"review-{short_sha}.json"]:
+                if cj.exists():
+                    try:
+                        audits_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(cj, report_json)
+                        break
+                    except Exception:
+                        pass
+        if not report_md.exists():
+            for cmd in [wt_dir / ".antigravity" / "audits" / f"review-{short_sha}.md", wt_dir / f"review-{short_sha}.md"]:
+                if cmd.exists():
+                    try:
+                        audits_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(cmd, report_md)
+                        break
+                    except Exception:
+                        pass
 
     # 1. Report JSON exists -> mark completed immediately
     if report_json.exists():
@@ -3904,9 +3995,34 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
         except Exception:
             pass
 
-    # 3. No report exists. A queued job nobody started, or an in-session agent that never
-    # reported, would otherwise block every later audit of the repository.
+    modified = False
+
+    # 3. Discover active conversation if missing before evaluating timeouts
     conv_id = j.get("conversation_id")
+    if not conv_id:
+        found_id = find_watchdog_conversation_for_job(j)
+        if found_id:
+            j["conversation_id"] = found_id
+            conv_id = found_id
+            if curr_status == "queued":
+                j["status"] = "running"
+                curr_status = "running"
+                j["summary"] = "Autonomous Watchdog review in progress…"
+            if not j.get("started_at"):
+                j["started_at"] = now_iso()
+            track_active_conversation(found_id)
+            modified = True
+    elif curr_status == "queued" and conv_id:
+        if is_conversation_active(conv_id):
+            j["status"] = "running"
+            curr_status = "running"
+            j["summary"] = "Autonomous Watchdog review in progress…"
+            if not j.get("started_at"):
+                j["started_at"] = now_iso()
+            modified = True
+
+    # 4. No report exists. A queued job nobody started, or an in-session agent that never
+    # reported, would otherwise block every later audit of the repository.
     stale_after = None
     if curr_status == "queued" and not conv_id:
         stale_after, why = QUEUED_TIMEOUT, "The audit never started. Click Continue Audit to start it."
@@ -3917,25 +4033,23 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
     if stale_after is not None:
         since = j.get("started_at") if curr_status == "running" else j.get("queued_at")
         try:
-            age = (datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(since)).total_seconds()
+            since_str = str(since).replace("Z", "+00:00")
+            s_dt = datetime.datetime.fromisoformat(since_str)
+            if s_dt.tzinfo is None:
+                s_dt = s_dt.replace(tzinfo=datetime.timezone.utc)
+            age = (datetime.datetime.now(datetime.timezone.utc) - s_dt).total_seconds()
         except Exception:
             age = 0
         if age > stale_after:
             j["status"] = "interrupted"
             j["summary"] = why
             return True
-        return False
+        return modified
 
-    # 4. Check if conversation has stopped or been interrupted
-    if not conv_id:
-        found_id = find_watchdog_conversation_for_job(j)
-        if found_id:
-            j["conversation_id"] = found_id
-            conv_id = found_id
-
+    # 5. Check if running conversation has stopped or been interrupted
     if curr_status == "running":
         if conv_id:
-            if not is_conversation_active(conv_id, max_age_seconds=120):
+            if not is_conversation_active(conv_id, max_age_seconds=900):
                 j["status"] = "interrupted"
                 j["summary"] = "Audit subagent was interrupted before completion. Click Continue Audit to resume."
                 return True
@@ -3943,16 +4057,19 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
             started = j.get("started_at") or j.get("queued_at")
             if started:
                 try:
-                    s_dt = datetime.datetime.fromisoformat(started)
+                    s_str = str(started).replace("Z", "+00:00")
+                    s_dt = datetime.datetime.fromisoformat(s_str)
+                    if s_dt.tzinfo is None:
+                        s_dt = s_dt.replace(tzinfo=datetime.timezone.utc)
                     elapsed = (datetime.datetime.now(datetime.timezone.utc) - s_dt).total_seconds()
-                    if elapsed > 180:
+                    if elapsed > 1800:
                         j["status"] = "interrupted"
                         j["summary"] = "Audit process stopped before completion. Click Continue Audit to resume."
                         return True
                 except Exception:
                     pass
 
-    return False
+    return modified
 
 
 def reconcile_jobs(repo_filter: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -4525,6 +4642,9 @@ def main() -> int:
                     job["status"] = "interrupted"
                     job["summary"] = f"The audit agent could not start: {args.failed}"
                 else:
+                    job["status"] = "running"
+                    if not job.get("started_at"):
+                        job["started_at"] = now_iso()
                     job["conversation_id"] = args.conversation_id
                     job["summary"] = "Autonomous Watchdog review in progress…"
                 save_state(state)

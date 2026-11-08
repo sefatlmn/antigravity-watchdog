@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getStatus, syncRepo, queueAudit, applyFix, continueAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, resolveRepo, PLUGIN_ROOT, } from "./bridge.js";
+import { getStatus, syncRepo, queueAudit, applyFix, continueAudit, completeAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, resolveRepo, PLUGIN_ROOT, } from "./bridge.js";
 import { startMcpServer } from "./mcp.js";
 function printHelp() {
     const help = `
@@ -15,6 +15,7 @@ Commands:
   audit [notes...]         Queue audit in isolated worktree for HEAD or --sha
   apply-fix [sha]          Apply confirmed fixes from fix branch to active branch
   continue [sha]           Resume an interrupted audit or check completed audit report
+  complete [options]       Mark a Watchdog audit job complete
   comment <notes...>       Send guidance note to an in-progress audit
   next-steps               Synthesize and display 4 project-grounded implementation plans
   plan <id>                Display approved plan prompt specification for agent execution
@@ -44,6 +45,10 @@ export const VALUE_FLAGS = new Set([
     "editor",
     "limit",
     "conversation-id",
+    "verdict",
+    "summary",
+    "bugs-count",
+    "fixes-committed",
 ]);
 export function parseArgs(args) {
     const flags = {};
@@ -253,6 +258,25 @@ async function main() {
                     else {
                         console.log(res?.message || "Resumed audit job in worktree.");
                     }
+                }
+                break;
+            }
+            case "complete": {
+                const targetSha = positionals[0] || (typeof flags.sha === "string" ? flags.sha : "");
+                const verdict = typeof flags.verdict === "string" ? flags.verdict : "PASS";
+                const summary = typeof flags.summary === "string" ? flags.summary : "Audit completed.";
+                const bugsCount = typeof flags["bugs-count"] === "string" ? parseInt(flags["bugs-count"], 10) || 0 : 0;
+                const fixesCommitted = flags["fixes-committed"] === true || flags["fixes-committed"] === "true";
+                const res = await completeAudit(repo, targetSha, verdict, summary, bugsCount, fixesCommitted);
+                if (isJson) {
+                    console.log(JSON.stringify(res, null, 2));
+                }
+                else {
+                    if (res?.ok === false || res?.error) {
+                        console.error(`Error completing audit: ${res.error || "Unknown error"}`);
+                        process.exit(1);
+                    }
+                    console.log(`Audit marked complete: ${verdict} - ${summary}`);
                 }
                 break;
             }

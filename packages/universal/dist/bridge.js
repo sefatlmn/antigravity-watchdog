@@ -162,6 +162,17 @@ export async function continueAudit(repo, sha, jobId) {
         args.push("--sha", sha);
     return runCtlJson(args);
 }
+export async function completeAudit(repo, sha, verdict = "PASS", summary = "Audit completed.", bugsCount = 0, fixesCommitted = false) {
+    const targetRepo = resolveRepo(repo);
+    const args = ["complete", "--repo", targetRepo];
+    if (sha)
+        args.push("--sha", sha);
+    args.push("--verdict", verdict);
+    args.push("--summary", summary);
+    args.push("--bugs-count", String(bugsCount));
+    args.push("--fixes-committed", fixesCommitted ? "true" : "false");
+    return runCtlJson(args);
+}
 export async function sendAuditComment(repo, comment, jobId) {
     const targetRepo = resolveRepo(repo);
     if (!comment)
