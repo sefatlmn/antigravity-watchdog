@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -359,16 +360,42 @@ def _repo_head_score(repo: Path) -> Tuple[int, int]:
     return (non_empty, int(youngest.get("timestamp", 0)))
 
 
+def clean_repo_path(path_str: Any) -> Optional[Path]:
+    """Clean and resolve a repository or workspace path, handling file:// URIs, percent-encoding, and Windows drive letters."""
+    if not path_str:
+        return None
+    s = str(path_str).strip()
+    if s.startswith("file://"):
+        s = re.sub(r"^file://(localhost)?", "", s)
+        try:
+            s = urllib.parse.unquote(s)
+        except Exception:
+            pass
+    elif "%" in s:
+        try:
+            s = urllib.parse.unquote(s)
+        except Exception:
+            pass
+    if re.match(r"^/[a-zA-Z]:[\\/]", s):
+        s = s[1:]
+    s = s.rstrip("/\\")
+    if not s:
+        return None
+    try:
+        p = Path(s).expanduser().resolve()
+        return p
+    except Exception:
+        return None
+
+
 def discover_git_roots(path_str: str) -> List[Path]:
     """
     Discover git repository roots at path_str and up to 3 directory levels below it,
     sorted by (is_non_empty_tree, youngest_commit_timestamp) descending.
     Automatically filters out empty-tree wrapper repositories when nested real repositories exist.
     """
-    if not path_str:
-        return []
-    p = Path(path_str).expanduser().resolve()
-    if not p.exists():
+    p = clean_repo_path(path_str)
+    if not p or not p.exists():
         return []
     if p.is_file():
         p = p.parent
@@ -416,13 +443,20 @@ def discover_git_roots(path_str: str) -> List[Path]:
 
 
 def resolve_git_root(path_str: str) -> Optional[Path]:
-    roots = discover_git_roots(path_str)
+    p = clean_repo_path(path_str)
+    if not p:
+        return None
+    roots = discover_git_roots(str(p))
     return roots[0] if roots else None
 
 
 def is_same_repo_path(p1: Any, p2: Any) -> bool:
     if not p1 or not p2:
         return False
+    c1 = clean_repo_path(p1)
+    c2 = clean_repo_path(p2)
+    if c1 and c2 and c1 == c2:
+        return True
     s1 = str(p1).strip().replace("\\", "/").rstrip("/")
     s2 = str(p2).strip().replace("\\", "/").rstrip("/")
     if s1 == s2 or s1.lower() == s2.lower():
@@ -2974,9 +3008,8 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = Tru
 
 def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
     youngest, recent = get_youngest_commit(repo_root, limit=12)
-    if not youngest:
-        return None
     rc_b, branch, _ = run_git(repo_root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    branch_name = branch if rc_b == 0 and branch else "HEAD"
     rc_fb, fb_out, _ = run_git(repo_root, ["branch", "--list", "fix/watchdog-*", "--format=%(refname:short)"])
     fix_branches = [b.strip() for b in fb_out.splitlines() if b.strip()] if rc_fb == 0 and fb_out else []
 
@@ -3019,10 +3052,26 @@ def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
     goal_data = load_goal(repo_root)
     convs = get_project_conversations(repo_root)
 
+    if not youngest:
+        return {
+            "repoPath": str(repo_root),
+            "repoName": repo_root.name,
+            "branch": branch_name,
+            "head": None,
+            "youngestCommit": None,
+            "recentCommits": [],
+            "fixBranches": fix_branches,
+            "reports": reports,
+            "goal": goal_data,
+            "proposals": proposals,
+            "executions": executions,
+            "conversationsCount": len(convs),
+        }
+
     return {
         "repoPath": str(repo_root),
         "repoName": repo_root.name,
-        "branch": branch if rc_b == 0 and branch else "HEAD",
+        "branch": branch_name,
         "head": {
             "sha": youngest["sha"],
             "shortSha": youngest["short_sha"],
@@ -3051,11 +3100,42 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
     """
     with StateLock():
         state = load_state()
+        effective_ws_paths = list(workspace_paths or [])
+
+        # If no workspace paths were provided, discover active Antigravity/Claude workspaces
+        if not effective_ws_paths:
+            if PROJECTS_DIR.exists():
+                try:
+                    for pfile in sorted(PROJECTS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]:
+                        try:
+                            pdata = json.loads(pfile.read_text(encoding="utf-8"))
+                            for res in pdata.get("projectResources", {}).get("resources", []):
+                                raw_uri = res.get("folderUri") or (res.get("gitFolder") or {}).get("folderUri")
+                                cp = clean_repo_path(raw_uri)
+                                if cp and cp.exists() and str(cp) not in effective_ws_paths:
+                                    effective_ws_paths.append(str(cp))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if CLAUDE_SESSIONS_DIR.exists():
+                try:
+                    for sfile in sorted(CLAUDE_SESSIONS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]:
+                        try:
+                            sdata = json.loads(sfile.read_text(encoding="utf-8"))
+                            scwd = clean_repo_path(sdata.get("cwd"))
+                            if scwd and scwd.exists() and str(scwd) not in effective_ws_paths:
+                                effective_ws_paths.append(str(scwd))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
         requested_roots = set()
         discovered_roots: List[Path] = []
         seen_roots = set()
 
-        for wp in workspace_paths:
+        for wp in effective_ws_paths:
             if not wp:
                 continue
             for r in discover_git_roots(wp):
@@ -3080,14 +3160,16 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
                 repo_details.append(details)
 
         # Sort by: (inRequestedWorkspace, not is_empty_tree, youngestCommit.timestamp) DESC
-        repo_details.sort(
-            key=lambda d: (
-                1 if d.get("inRequestedWorkspace", True) else 0,
-                0 if d["youngestCommit"].get("is_empty_tree") else 1,
-                int(d["youngestCommit"].get("timestamp", 0)),
-            ),
-            reverse=True,
-        )
+        def _sort_key(d: Dict[str, Any]):
+            in_req = 1 if d.get("inRequestedWorkspace", True) else 0
+            yc = d.get("youngestCommit")
+            if not yc:
+                return (in_req, 0, 0)
+            non_empty = 0 if yc.get("is_empty_tree") else 1
+            ts = int(yc.get("timestamp", 0))
+            return (in_req, non_empty, ts)
+
+        repo_details.sort(key=_sort_key, reverse=True)
 
         # Prune any tracked outer wrapper repo in state["repos"] that has an empty-tree commit
         # or contains a nested active repository inside it
@@ -3096,24 +3178,34 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
         for d in repo_details:
             rpath = d["repoPath"]
             norm_rpath = str(rpath).replace("\\", "/").rstrip("/")
-            yc = d["youngestCommit"]
+            yc = d.get("youngestCommit")
             has_nested_child = any(
                 other["repoPath"] != rpath and (
                     str(other["repoPath"]).replace("\\", "/").rstrip("/").startswith(norm_rpath + "/")
                 )
                 for other in repo_details
             )
-            if yc.get("is_empty_tree") and has_nested_child:
+            if yc and yc.get("is_empty_tree") and has_nested_child:
                 empty_wrapper_paths.add(rpath)
                 continue
-            new_repos_state[rpath] = {
-                "name": d["repoName"],
-                "baseline_sha": yc["sha"],
-                "youngest_short_sha": yc["short_sha"],
-                "youngest_subject": yc["subject"],
-                "youngest_committed_at": yc.get("committed_at", ""),
-                "updated_at": now_iso(),
-            }
+            if yc:
+                new_repos_state[rpath] = {
+                    "name": d["repoName"],
+                    "baseline_sha": yc["sha"],
+                    "youngest_short_sha": yc["short_sha"],
+                    "youngest_subject": yc["subject"],
+                    "youngest_committed_at": yc.get("committed_at", ""),
+                    "updated_at": now_iso(),
+                }
+            else:
+                new_repos_state[rpath] = {
+                    "name": d["repoName"],
+                    "baseline_sha": "",
+                    "youngest_short_sha": "",
+                    "youngest_subject": "No commits yet",
+                    "youngest_committed_at": "",
+                    "updated_at": now_iso(),
+                }
 
         # Also check any previous state["repos"] entries that were empty wrappers of discovered repos
         for old_rpath in list(state.get("repos", {}).keys()):
@@ -4484,6 +4576,20 @@ def main() -> int:
     )
     p_sync.add_argument("--repo", action="append", default=[], help="Workspace or repository path(s) to sync")
 
+    p_git_state = sub.add_parser(
+        "git-state",
+        help="Scan git history across workspace & nested repos and return git state summary (alias of sync)",
+        parents=[p_common],
+    )
+    p_git_state.add_argument("--repo", action="append", default=[], help="Workspace or repository path(s) to sync")
+
+    p_git_state_alt = sub.add_parser(
+        "git_state",
+        help="Scan git history across workspace & nested repos and return git state summary (alias of sync)",
+        parents=[p_common],
+    )
+    p_git_state_alt.add_argument("--repo", action="append", default=[], help="Workspace or repository path(s) to sync")
+
     p_prep = sub.add_parser("prepare", help="Prepare isolated Git worktree for a commit", parents=[p_common])
     p_prep.add_argument("--repo", required=True)
     p_prep.add_argument("--sha", default="YOUNGEST")
@@ -4601,7 +4707,7 @@ def main() -> int:
         print(json.dumps({"ok": True, "count": len(jobs), "jobs": jobs}, indent=2))
         return 0
 
-    if args.cmd == "sync":
+    if args.cmd in ("sync", "git-state", "git_state"):
         res = sync_git_history(args.repo or [])
         print(json.dumps(res, indent=2))
         return 0

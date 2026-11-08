@@ -1146,8 +1146,281 @@ print("OK")
     failed++
   }
 
+  try {
+    // Test normalizeWsUri
+    const vmUrl = pathToFileURL(path.join(rootDir, 'sidecars/panel/view-model.js')).href
+    const vm = await import(vmUrl)
+    assert.equal(vm.normalizeWsUri('file:///Users/sefa/%23KdG/Sandbox/'), '/Users/sefa/#KdG/Sandbox')
+    assert.equal(vm.normalizeWsUri('file:///C:/Users/test/workspace/'), 'C:/Users/test/workspace')
+    assert.equal(vm.normalizeWsUri('/plain/path/with/trailing/slash///'), '/plain/path/with/trailing/slash')
+    assert.equal(vm.normalizeWsUri(''), '')
+
+    // Test bridge resolveRepo and getGitState
+    const bridgeUrl = pathToFileURL(path.join(rootDir, 'packages/universal/dist/bridge.js')).href
+    const bridge = await import(bridgeUrl)
+    assert.equal(bridge.resolveRepo('file:///Users/sefa/%23KdG/Sandbox/'), path.resolve('/Users/sefa/#KdG/Sandbox'))
+    const gitState = await bridge.getGitState(rootDir)
+    assert.equal(gitState.ok, true)
+    assert.ok(gitState.bestRepo?.branch || gitState.branch)
+    assert.ok(gitState.bestRepo)
+
+    // Test universal CLI git-state and sync
+    const cliBin = path.join(rootDir, 'packages/universal/bin/watchdog.js')
+    const cliGitStateRaw = execFileSync(process.execPath, [cliBin, 'git-state', '--repo', rootDir, '--json'], { encoding: 'utf8' })
+    const cliGitState = JSON.parse(cliGitStateRaw)
+    assert.equal(cliGitState.ok, true)
+    assert.ok(cliGitState.bestRepo)
+
+    const cliSyncRaw = execFileSync(process.execPath, [cliBin, 'sync', '--repo', rootDir, '--json'], { encoding: 'utf8' })
+    const cliSync = JSON.parse(cliSyncRaw)
+    assert.equal(cliSync.ok, true)
+    assert.ok(cliSync.bestRepo)
+
+    // Test standalone_sdk auth behavior
+    const sdkUrl = pathToFileURL(path.join(rootDir, 'sidecars/panel/standalone_sdk.mjs')).href
+    const { SidecarApp } = await import(sdkUrl)
+    const testApp = new SidecarApp()
+    testApp.page('/', () => '<html><body>OK</body></html>')
+    testApp.api('/api/test-secure', () => ({ ok: true }))
+    testApp.api('/api/dashboard', () => ({ ok: true, activeRepos: [] }))
+    const testServer = await testApp.run()
+    const testPort = testServer.address().port
+
+    try {
+      // 1. GET / should return 200 and set sidecar_token cookie
+      const getRes = await fetch(`http://127.0.0.1:${testPort}/`)
+      assert.equal(getRes.status, 200)
+      const setCookie = getRes.headers.get('set-cookie') || ''
+      assert.ok(setCookie.includes('sidecar_token='), 'GET / should issue sidecar_token cookie')
+      const tokenMatch = setCookie.match(/sidecar_token=([^;]+)/)
+      const cookieToken = tokenMatch ? tokenMatch[1] : null
+      assert.ok(cookieToken, 'cookie token should be extracted')
+
+      // 2. Loopback safe endpoint /api/dashboard should allow request even without token
+      const dashRes = await fetch(`http://127.0.0.1:${testPort}/api/dashboard`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      assert.equal(dashRes.status, 200)
+      const dashJson = await dashRes.json()
+      assert.equal(dashJson.ok, true)
+
+      // 3. Secure mutating endpoint without token should return 401
+      const mutResNoToken = await fetch(`http://127.0.0.1:${testPort}/api/test-secure`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      assert.equal(mutResNoToken.status, 401)
+
+      // 4. Secure mutating endpoint with cookie token should return 200
+      const mutResCookie = await fetch(`http://127.0.0.1:${testPort}/api/test-secure`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Cookie': `sidecar_token=${cookieToken}`,
+        },
+        body: JSON.stringify({}),
+      })
+      assert.equal(mutResCookie.status, 200)
+
+      // 5. Secure mutating endpoint with header token should return 200
+      const mutResHeader = await fetch(`http://127.0.0.1:${testPort}/api/test-secure`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-sidecar-token': cookieToken,
+        },
+        body: JSON.stringify({}),
+      })
+      assert.equal(mutResHeader.status, 200)
+    } finally {
+      testServer.close()
+    }
+
+    console.log('✓ repo scanning & git state: normalizeWsUri, bridge resolveRepo, CLI sync/git-state, and standalone SDK auth')
+    passed++
+  } catch (err) {
+    console.error('✗ repo scanning & git state test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    // 15. Real runtime test for app.js: verify hostMode is defined, callApi doesn't throw ReferenceError,
+    // and syncGit correctly updates the DOM with repo commits instead of 'Unable to scan repository'
+    const appJsCode = fs.readFileSync(path.join(rootDir, 'sidecars/panel/app.js'), 'utf8')
+    const vm = await import('node:vm')
+
+    const elements = new Map()
+    function createMockElement(id) {
+      const el = {
+        id,
+        textContent: '',
+        value: '',
+        title: '',
+        hidden: false,
+        disabled: false,
+        classList: {
+          classes: new Set(),
+          add(c) { this.classes.add(c) },
+          remove(c) { this.classes.delete(c) },
+          toggle(c, v) { if (v) this.classes.add(c); else this.classes.delete(c) },
+          contains(c) { return this.classes.has(c) },
+        },
+        dataset: {},
+        style: { setProperty() {} },
+        setAttribute() {},
+        removeAttribute() {},
+        querySelector() { return null },
+        querySelectorAll() { return [] },
+        addEventListener() {},
+        innerHTML: '',
+      }
+      elements.set(id, el)
+      return el
+    }
+
+    const domIds = [
+      'select-repo', 'repo-name', 'repo-branch', 'commit-sha', 'commit-subject', 'commit-time',
+      'commit-tag-badge', 'btn-run-audit', 'btn-run-audit-text', 'btn-run-audit-icon',
+      'input-audit-comment', 'audits-count', 'archived-count', 'archive-details', 'jobs-list',
+      'archived-jobs-list', 'btn-sync', 'toast', 'tab-btn-audits', 'tab-btn-next-steps',
+      'tab-pane-audits', 'tab-pane-next-steps', 'tab-badge-audits', 'tab-badge-proposals',
+      'btn-refresh-goal', 'btn-edit-goal', 'btn-refresh-proposals', 'btn-cancel-synthesis-header',
+      'goal-text', 'ns-goal-text', 'input-goal', 'proposals-list', 'ns-goal-edit-form', 'ns-goal-view',
+      'report-card', 'btn-close-report', 'btn-send-report-chat',
+    ]
+    for (const id of domIds) {
+      createMockElement(id)
+    }
+
+    let lastFetchCall = null
+    const mockStorage = new Map()
+    const storageObj = {
+      getItem(k) { return mockStorage.get(k) || null },
+      setItem(k, v) { mockStorage.set(k, String(v)) },
+      removeItem(k) { mockStorage.delete(k) },
+    }
+
+    const sandbox = {
+      window: null,
+      document: {
+        getElementById(id) {
+          if (!elements.has(id)) createMockElement(id)
+          return elements.get(id)
+        },
+        addEventListener() {},
+        documentElement: createMockElement('html'),
+        hidden: false,
+      },
+      location: {
+        href: 'plugin://watchdog--panel-54377/?token=test-tok-123&conversationId=test-conv-abc',
+        search: '?token=test-tok-123&conversationId=test-conv-abc',
+      },
+      sessionStorage: storageObj,
+      localStorage: storageObj,
+      URLSearchParams,
+      setTimeout,
+      clearTimeout,
+      Promise,
+      Date,
+      JSON,
+      Math,
+      Number,
+      String,
+      Boolean,
+      Array,
+      Set,
+      Map,
+      addEventListener() {},
+      removeEventListener() {},
+      getComputedStyle: () => ({ getPropertyValue: () => '#0b0f19' }),
+      matchMedia: () => ({ matches: false }),
+      console: { log() {}, warn() {}, error() {} },
+    }
+    sandbox.window = sandbox
+    sandbox.sidecar = {
+      isStandalone: false,
+      conversationId: 'test-conv-abc',
+      getWorkspaceUris: async () => ['file:///Users/sefa/Documents/Code/Watchdog'],
+      onWorkspaceChange: () => {},
+      fetch: async (url, options = {}) => {
+        lastFetchCall = { url, options }
+        const parsedBody = options.body ? JSON.parse(options.body) : {}
+        // Must receive host parameter without ReferenceError!
+        assert.ok(parsedBody.host === 'antigravity' || parsedBody.host === 'claude', `fetch body must include valid host, got: ${parsedBody.host}`)
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            activeRepos: [
+              {
+                repoPath: '/Users/sefa/Documents/Code/Watchdog/antigravity-watchdog',
+                repoName: 'antigravity-watchdog',
+                branch: 'main',
+                head: {
+                  sha: '976b62cc0dfa774281bc29dae0a30afc4e79f5aa',
+                  shortSha: '976b62c',
+                  subject: 'fix(next-steps): fix project goal refresh button tactile feedback',
+                  relativeTime: 'just now',
+                  timestamp: 1794159545,
+                },
+                youngestCommit: {
+                  sha: '976b62cc0dfa774281bc29dae0a30afc4e79f5aa',
+                  short_sha: '976b62c',
+                  subject: 'fix(next-steps): fix project goal refresh button tactile feedback',
+                  relative_time: 'just now',
+                  timestamp: 1794159545,
+                },
+                recentCommits: [],
+                fixBranches: [],
+                reports: [],
+                goal: null,
+                proposals: [],
+                executions: {},
+              },
+            ],
+            jobs: [],
+          }),
+        }
+      },
+    }
+
+    vm.createContext(sandbox)
+    vm.runInContext(appJsCode, sandbox)
+
+    // Call init / syncGit in sandbox
+    assert.doesNotThrow(async () => {
+      await sandbox.init()
+    })
+
+    // Wait for async syncGit to populate the DOM elements
+    await new Promise((r) => setTimeout(r, 50))
+
+    const commitSubjectEl = elements.get('commit-subject')
+    assert.ok(commitSubjectEl.textContent.includes('fix(next-steps)'), `commit-subject must display latest commit message, got: ${commitSubjectEl.textContent}`)
+    assert.ok(!commitSubjectEl.textContent.includes('Unable to scan repository'), 'commit-subject must NOT display Unable to scan repository')
+
+    const repoNameEl = elements.get('repo-name')
+    assert.equal(repoNameEl.textContent, 'antigravity-watchdog')
+
+    // Test normalizeWsUri with file://localhost/
+    assert.equal(sandbox.normalizeWsUri('file://localhost/Users/sefa/test'), '/Users/sefa/test')
+    assert.equal(sandbox.normalizeWsUri('file:///Users/sefa/test%23123'), '/Users/sefa/test#123')
+
+    console.log('✓ app.js live runtime execution: hostMode safely declared, callApi transmits host and auth, and syncGit populates DOM')
+    passed++
+  } catch (err) {
+    console.error('✗ app.js live runtime execution test')
+    console.error(err)
+    failed++
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`)
-  if (failed > 0) process.exit(1)
+  process.exit(failed > 0 ? 1 : 0)
 }
 
 main().catch(err => {

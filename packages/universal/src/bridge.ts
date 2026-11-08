@@ -55,9 +55,47 @@ export function getPythonBin(): string {
 
 export function resolveRepo(repo?: string): string {
   if (repo && repo.trim()) {
-    return resolve(repo.trim());
+    let s = repo.trim();
+    if (s.startsWith("file://")) {
+      s = s.replace(/^file:\/\/(localhost)?/i, "");
+      try {
+        s = decodeURIComponent(s);
+      } catch {}
+      if (/^\/[a-zA-Z]:[\\/]/.test(s)) {
+        s = s.slice(1);
+      }
+    } else if (s.includes("%")) {
+      try {
+        s = decodeURIComponent(s);
+      } catch {}
+    }
+    return resolve(s);
   }
   return process.cwd();
+}
+
+function extractJsonFromOutput<T = any>(out: string): T {
+  const trimmed = (out || "").trim();
+  if (!trimmed) return {} as T;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const firstBrace = trimmed.indexOf("{");
+    const lastBrace = trimmed.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(trimmed.slice(firstBrace, lastBrace + 1));
+      } catch {}
+    }
+    const firstBracket = trimmed.indexOf("[");
+    const lastBracket = trimmed.lastIndexOf("]");
+    if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+      try {
+        return JSON.parse(trimmed.slice(firstBracket, lastBracket + 1));
+      } catch {}
+    }
+    throw new Error(`Could not parse JSON output: ${trimmed}`);
+  }
 }
 
 export async function runCtlJson<T = any>(args: string[]): Promise<T> {
@@ -71,19 +109,22 @@ export async function runCtlJson<T = any>(args: string[]): Promise<T> {
     fullArgs.push("--host", effectiveHost);
   }
 
+  const currentPath = process.env.PATH || "";
+  const augmentedPath = `/opt/homebrew/bin:/usr/local/bin:${currentPath}`;
+
   try {
     const { stdout } = await execFileAsync(py, fullArgs, {
       cwd: PLUGIN_ROOT,
       encoding: "utf8",
       maxBuffer: 20 * 1024 * 1024,
       timeout: 60000,
-      env: { ...process.env, WATCHDOG_HOST: effectiveHost },
+      env: { ...process.env, PATH: augmentedPath, WATCHDOG_HOST: effectiveHost },
     });
-    return JSON.parse(stdout.trim() || "{}");
+    return extractJsonFromOutput<T>(stdout);
   } catch (err: any) {
     if (err.stdout) {
       try {
-        return JSON.parse(err.stdout.trim());
+        return extractJsonFromOutput<T>(err.stdout);
       } catch {
         // fall through
       }
@@ -95,6 +136,12 @@ export async function runCtlJson<T = any>(args: string[]): Promise<T> {
 
 export async function getStatus(repo?: string): Promise<any> {
   const args = ["status"];
+  if (repo) args.push("--repo", resolveRepo(repo));
+  return runCtlJson(args);
+}
+
+export async function getGitState(repo?: string): Promise<any> {
+  const args = ["git-state"];
   if (repo) args.push("--repo", resolveRepo(repo));
   return runCtlJson(args);
 }

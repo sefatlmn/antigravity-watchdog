@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import {
   getStatus,
+  getGitState,
   syncRepo,
   prepareWorktree,
   queueAudit,
@@ -43,6 +44,32 @@ const PRIMARY_TOOLS = [
         repo: {
           type: "string",
           description: "Path to git repository (defaults to working directory).",
+        },
+      },
+    },
+  },
+  {
+    name: "watchdog_sync",
+    description: "Scan workspaces and sync Git history to discover active repositories and latest commits.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: {
+          type: "string",
+          description: "Path to git repository or workspace folder (defaults to working directory).",
+        },
+      },
+    },
+  },
+  {
+    name: "watchdog_git_state",
+    description: "Inspect raw git branch, commit status, and candidate repositories in workspace.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: {
+          type: "string",
+          description: "Path to git repository or workspace folder (defaults to working directory).",
         },
       },
     },
@@ -272,6 +299,18 @@ async function handleToolCall(name: string, args: Record<string, any> = {}): Pro
         }
         const text = formatStatusReport(status, syncInfo);
         return { text };
+      }
+
+      case "watchdog_sync": {
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const res = await syncRepo(repo);
+        return { text: JSON.stringify(res, null, 2) };
+      }
+
+      case "watchdog_git_state": {
+        const repo = args.repo || args.repo_path || args.repoPath;
+        const res = await getGitState(repo);
+        return { text: JSON.stringify(res, null, 2) };
       }
 
       case "watchdog_audit": {

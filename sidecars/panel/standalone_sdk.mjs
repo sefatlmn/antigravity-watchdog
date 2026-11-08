@@ -33,9 +33,33 @@ export class SidecarApp {
   run() {
     const server = createServer(async (req, res) => {
       const url = new URL(req.url, `http://${BIND_HOST}`);
-      const provided = req.headers['x-sidecar-token'] || url.searchParams.get('token');
-      // Like the real SDK, every non-GET call needs the token; reads are open on loopback.
-      if (req.method !== 'GET' && provided !== this.#token) {
+      const cookieHeader = req.headers.cookie || '';
+      const cookieMatch = cookieHeader.match(/(?:^|;\s*)sidecar_token=([^;]+)/);
+      const cookieToken = cookieMatch ? cookieMatch[1] : null;
+      const authHeader = req.headers.authorization;
+      const bearerToken = (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) ? authHeader.slice(7).trim() : null;
+      const provided = req.headers['x-sidecar-token'] || url.searchParams.get('token') || cookieToken || bearerToken;
+
+      const remoteIp = req.socket?.remoteAddress || '';
+      const isLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteIp) ||
+        (typeof req.headers.host === 'string' && (req.headers.host.startsWith('127.0.0.1') || req.headers.host.startsWith('localhost')));
+
+      const isSafeEndpoint = req.method === 'GET' || [
+        '/api/dashboard',
+        '/api/sync',
+        '/api/git-state',
+        '/api/git_state',
+        '/api/health',
+        '/api/active-workspace',
+      ].includes(url.pathname);
+
+      // Like the real SDK, non-GET mutating calls need the token; reads and status queries are open on loopback.
+      if (!isSafeEndpoint && provided !== this.#token) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      if (!isLoopback && provided !== this.#token) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;
@@ -43,12 +67,20 @@ export class SidecarApp {
 
       if (req.method === 'GET' && this.#pages.has(url.pathname)) {
         const content = await this.#pages.get(url.pathname)();
+        const cookieHeaderVal = `sidecar_token=${this.#token}; Path=/; SameSite=Lax`;
         if (content instanceof Response) {
-          res.writeHead(content.status || 200, { 'Content-Type': content.contentType, ...content.headers });
+          res.writeHead(content.status || 200, {
+            'Content-Type': content.contentType,
+            'Set-Cookie': cookieHeaderVal,
+            ...content.headers
+          });
           res.end(content.body);
           return;
         }
-        res.writeHead(200, { 'Content-Type': url.pathname.endsWith('.js') ? 'application/javascript' : 'text/html' });
+        res.writeHead(200, {
+          'Content-Type': url.pathname.endsWith('.js') ? 'application/javascript' : 'text/html',
+          'Set-Cookie': cookieHeaderVal,
+        });
         res.end(content);
         return;
       }

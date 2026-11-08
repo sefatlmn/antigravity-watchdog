@@ -4,6 +4,7 @@ export declare function getPythonBin(): string;
 export declare function resolveRepo(repo?: string): string;
 export declare function runCtlJson<T = any>(args: string[]): Promise<T>;
 export declare function getStatus(repo?: string): Promise<any>;
+export declare function getGitState(repo?: string): Promise<any>;
 export declare function syncRepo(repo?: string): Promise<any>;
 export declare function prepareWorktree(repo?: string, sha?: string): Promise<any>;
 export declare function queueAudit(repo?: string, sha?: string, userComment?: string, force?: boolean): Promise<any>;

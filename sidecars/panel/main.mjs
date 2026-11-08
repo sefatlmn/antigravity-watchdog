@@ -20,6 +20,52 @@ const CLAUDE_SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
 
 const app = new SidecarApp();
 
+function normalizeFsPath(uriOrPath) {
+  if (!uriOrPath) return '';
+  let s = String(uriOrPath).trim();
+  if (s.startsWith('file://')) {
+    try {
+      if (!s.includes('#') || s.includes('%23')) {
+        s = fileURLToPath(s);
+      } else {
+        s = s.replace(/^file:\/\/(localhost)?/, '');
+        try { s = decodeURIComponent(s); } catch {}
+      }
+    } catch {
+      s = s.replace(/^file:\/\/(localhost)?/, '');
+      try { s = decodeURIComponent(s); } catch {}
+    }
+  } else if (/%[0-9a-fA-F]{2}/.test(s)) {
+    try { s = decodeURIComponent(s); } catch {}
+  }
+  if (/^\/[a-zA-Z]:[\\/]/.test(s)) {
+    s = s.slice(1);
+  }
+  return s.replace(/\/+$/, '');
+}
+
+function extractJson(text) {
+  const str = String(text || '').trim();
+  try {
+    return JSON.parse(str);
+  } catch {}
+  const firstBrace = str.indexOf('{');
+  const lastBrace = str.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    try {
+      return JSON.parse(str.slice(firstBrace, lastBrace + 1));
+    } catch {}
+  }
+  const firstBracket = str.indexOf('[');
+  const lastBracket = str.lastIndexOf(']');
+  if (firstBracket !== -1 && lastBracket > firstBracket) {
+    try {
+      return JSON.parse(str.slice(firstBracket, lastBracket + 1));
+    } catch {}
+  }
+  return null;
+}
+
 const EMPTY_TREE_HASH = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 const SKIP_SCAN_DIRS = new Set([
   '.git',
@@ -152,9 +198,8 @@ function renderIndexHtml() {
 app.page('/', () => renderIndexHtml());
 app.page('/app.js', () => readLocal('app.js'));
 app.page('/view-model.js', () => readLocal('view-model.js'));
-if (isStandaloneMode) {
-  app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
-}
+app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
+app.page('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }));
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
 app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, host: isStandaloneMode ? 'claude' : 'antigravity', pid: process.pid }), 'GET');
 app.api('/api/active-workspace', (data, req) => {
@@ -167,6 +212,9 @@ app.api('/api/active-workspace', (data, req) => {
   }
   const state = loadState(true);
   const uris = [];
+  for (const pw of discoverActiveProjectWorkspaces()) {
+    if (!uris.includes(pw)) uris.push(pw);
+  }
   for (const cw of discoverActiveClaudeWorkspaces()) {
     if (!uris.includes(cw)) uris.push(cw);
   }
@@ -190,6 +238,26 @@ app.api('/api/active-workspace', (data) => {
 }, 'POST');
 
 let resolvedPythonBin = null;
+let resolvedGitBin = null;
+
+function getGitBin() {
+  if (resolvedGitBin) return resolvedGitBin;
+  const candidates = [
+    process.env.GIT_BIN,
+    '/opt/homebrew/bin/git',
+    '/usr/local/bin/git',
+    '/usr/bin/git',
+    'git',
+  ].filter(Boolean);
+  for (const bin of candidates) {
+    try {
+      execFileSync(bin, ['--version'], { stdio: 'ignore' });
+      resolvedGitBin = bin;
+      return bin;
+    } catch {}
+  }
+  return 'git';
+}
 
 function runPythonCtl(args, hostOverride = '') {
   const candidates = resolvedPythonBin
@@ -203,7 +271,11 @@ function runPythonCtl(args, hostOverride = '') {
   if (effectiveHost && !fullArgs.includes('--host')) {
     fullArgs.push('--host', effectiveHost);
   }
-  const childEnv = { ...process.env, WATCHDOG_HOST: effectiveHost };
+  const childEnv = {
+    ...process.env,
+    PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
+    WATCHDOG_HOST: effectiveHost,
+  };
   let lastErr = null;
   for (const bin of candidates) {
     try {
@@ -213,18 +285,16 @@ function runPythonCtl(args, hostOverride = '') {
         env: childEnv,
       });
       resolvedPythonBin = bin;
-      return JSON.parse(out.trim() || '{}');
+      const parsed = extractJson(out);
+      return parsed !== null ? parsed : {};
     } catch (err) {
       if (err.code === 'ENOENT') {
         lastErr = err;
         continue;
       }
       if (err.stdout) {
-        try {
-          return JSON.parse(String(err.stdout).trim());
-        } catch {
-          // fall through
-        }
+        const parsed = extractJson(String(err.stdout));
+        if (parsed !== null) return parsed;
       }
       throw new Error(err.stderr ? String(err.stderr).trim() : err.message);
     }
@@ -234,10 +304,15 @@ function runPythonCtl(args, hostOverride = '') {
 
 function runGit(repoPath, args) {
   try {
-    return execFileSync('git', ['-C', repoPath, ...args], {
+    const gitBin = getGitBin();
+    return execFileSync(gitBin, ['-C', repoPath, ...args], {
       encoding: 'utf8',
-      timeout: 8000,
+      timeout: 12000,
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
+      },
     }).trim();
   } catch {
     return '';
@@ -584,20 +659,14 @@ function getRepoRecentCommits(repoPath, limit = 12) {
 
 function discoverCandidateGitRoots(uriOrPath) {
   if (!uriOrPath) return [];
-  let fsPath = String(uriOrPath);
-  if (fsPath.startsWith('file://')) {
-    try {
-      fsPath = fileURLToPath(fsPath);
-    } catch {
-      return [];
-    }
-  }
-  if (!existsSync(fsPath)) return [];
+  const fsPath = normalizeFsPath(uriOrPath);
+  if (!fsPath || !existsSync(fsPath)) return [];
 
+  let dir = fsPath;
   try {
-    const st = statSync(fsPath);
+    const st = statSync(dir);
     if (!st.isDirectory()) {
-      fsPath = dirname(fsPath);
+      dir = dirname(dir);
     }
   } catch {
     return [];
@@ -606,7 +675,7 @@ function discoverCandidateGitRoots(uriOrPath) {
   const candidates = [];
   const seen = new Set();
 
-  const directRoot = runGit(fsPath, ['rev-parse', '--show-toplevel']);
+  const directRoot = runGit(dir, ['rev-parse', '--show-toplevel']);
   if (directRoot) {
     const resolved = resolve(directRoot);
     if (!resolved.includes('watchdog/worktrees') && !resolved.includes('.antigravity/worktrees')) {
@@ -625,7 +694,7 @@ function discoverCandidateGitRoots(uriOrPath) {
         const childPath = join(dirPath, entry.name);
         if (existsSync(join(childPath, '.git'))) {
           const resolved = resolve(childPath);
-          if (!seen.has(resolved) && !resolved.includes('watchdog/worktrees')) {
+          if (!seen.has(resolved) && !resolved.includes('watchdog/worktrees') && !resolved.includes('.antigravity/worktrees')) {
             seen.add(resolved);
             candidates.push(resolved);
           }
@@ -638,7 +707,7 @@ function discoverCandidateGitRoots(uriOrPath) {
     }
   };
 
-  scanDir(resolve(fsPath), 1);
+  scanDir(resolve(dir), 1);
   return candidates;
 }
 
@@ -931,12 +1000,72 @@ function inspectSingleRepo(topLevel) {
   }
 }
 
-function collectActiveRepos(uris, state) {
+function discoverActiveProjectWorkspaces() {
+  const ws = [];
+  const geminiProjectsDir = join(homedir(), '.gemini', 'config', 'projects');
+  if (process.env.ANTIGRAVITY_PROJECT_ID && existsSync(geminiProjectsDir)) {
+    const projFile = join(geminiProjectsDir, `${process.env.ANTIGRAVITY_PROJECT_ID}.json`);
+    if (existsSync(projFile)) {
+      try {
+        const pData = JSON.parse(readFileSync(projFile, 'utf8'));
+        const resources = pData?.projectResources?.resources || [];
+        for (const res of resources) {
+          const rawUri = res?.folderUri || res?.gitFolder?.folderUri;
+          if (rawUri) {
+            const norm = normalizeFsPath(rawUri);
+            if (norm && existsSync(norm) && !ws.includes(norm)) ws.push(norm);
+          }
+        }
+      } catch {}
+    }
+  }
+  if (existsSync(geminiProjectsDir)) {
+    try {
+      const files = readdirSync(geminiProjectsDir)
+        .filter((f) => f.endsWith('.json'))
+        .map((f) => {
+          const full = join(geminiProjectsDir, f);
+          try {
+            return { full, mtimeMs: statSync(full).mtimeMs };
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+      for (const item of files.slice(0, 10)) {
+        try {
+          const pData = JSON.parse(readFileSync(item.full, 'utf8'));
+          const resources = pData?.projectResources?.resources || [];
+          for (const res of resources) {
+            const rawUri = res?.folderUri || res?.gitFolder?.folderUri;
+            if (rawUri) {
+              const norm = normalizeFsPath(rawUri);
+              if (norm && existsSync(norm) && !ws.includes(norm)) ws.push(norm);
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+  return ws;
+}
+
+function collectActiveRepos(uris, state, targetRepo = '') {
   const roots = [];
   const seen = new Set();
 
-  const effectiveUris = [...uris];
-  if (isStandaloneMode) {
+  const effectiveUris = [];
+  for (const u of (uris || [])) {
+    const norm = normalizeFsPath(u);
+    if (norm && !effectiveUris.includes(norm)) effectiveUris.push(norm);
+  }
+
+  if (effectiveUris.length === 0) {
+    for (const pw of discoverActiveProjectWorkspaces()) {
+      if (!effectiveUris.includes(pw)) effectiveUris.push(pw);
+    }
     for (const cw of discoverActiveClaudeWorkspaces()) {
       if (!effectiveUris.includes(cw)) effectiveUris.push(cw);
     }
@@ -1002,22 +1131,17 @@ function collectActiveRepos(uris, state) {
     repos = repos.filter((r) => !r.head?.isEmptyTree);
   }
 
-  const normUri = (u) => {
-    let s = String(u || '').trim();
-    if (s.startsWith('file://')) {
-      try {
-        s = fileURLToPath(s);
-      } catch {
-        s = s.replace(/^file:\/\//, '');
-        try { s = decodeURIComponent(s); } catch {}
-      }
-    }
-    return s.replace(/\/+$/, '');
-  };
-  const normUris = uris.map(normUri).filter(Boolean);
+  const normUris = effectiveUris.map(normalizeFsPath).filter(Boolean);
+  const normTarget = targetRepo ? normalizeFsPath(targetRepo) : '';
 
-  // Sort: workspace repos first, non-empty tree first, youngest commit timestamp DESC
+  // Sort: explicit target repo first, workspace repos first, non-empty tree first, youngest commit timestamp DESC
   repos.sort((a, b) => {
+    if (normTarget) {
+      const matchA = (a.repoPath === normTarget || normTarget.includes(a.repoPath) || a.repoPath.includes(normTarget)) ? 1 : 0;
+      const matchB = (b.repoPath === normTarget || normTarget.includes(b.repoPath) || b.repoPath.includes(normTarget)) ? 1 : 0;
+      if (matchA !== matchB) return matchB - matchA;
+    }
+
     const inWsA = normUris.length > 0 && normUris.some((u) => u.includes(a.repoPath) || a.repoPath.includes(u)) ? 1 : 0;
     const inWsB = normUris.length > 0 && normUris.some((u) => u.includes(b.repoPath) || b.repoPath.includes(u)) ? 1 : 0;
     if (inWsA !== inWsB) return inWsB - inWsA;
@@ -1031,14 +1155,34 @@ function collectActiveRepos(uris, state) {
   return repos;
 }
 
-// POST /api/dashboard { workspaceUris }
-app.api('/api/dashboard', (data) => {
+// POST /api/dashboard { workspaceUris?, repoPath?, repo? }
+const handleDashboard = (data) => {
   try {
     const state = loadState();
-    const uris = Array.isArray(data?.workspaceUris) ? data.workspaceUris : [];
-    const activeRepos = collectActiveRepos(uris, state);
+    const uris = [];
+    const targetRepo = data?.repoPath || data?.repo;
+    if (targetRepo) {
+      const norm = normalizeFsPath(targetRepo);
+      if (norm) uris.push(norm);
+    }
+    let rawUris = data?.workspaceUris;
+    if (typeof rawUris === 'string') {
+      try {
+        rawUris = JSON.parse(rawUris);
+      } catch {
+        rawUris = rawUris.split(/[,|]/).map((s) => s.trim()).filter(Boolean);
+      }
+    }
+    if (Array.isArray(rawUris)) {
+      for (const u of rawUris) {
+        const norm = normalizeFsPath(u);
+        if (norm && !uris.includes(norm)) uris.push(norm);
+      }
+    }
+    const activeRepos = collectActiveRepos(uris, state, targetRepo);
 
     return {
+      ok: true,
       auto_dispatch: state.auto_dispatch !== false,
       skip_docs_only: state.skip_docs_only !== false,
       activeRepos,
@@ -1047,6 +1191,7 @@ app.api('/api/dashboard', (data) => {
   } catch (err) {
     console.error('Error in /api/dashboard:', err);
     return {
+      ok: false,
       auto_dispatch: true,
       skip_docs_only: true,
       activeRepos: [],
@@ -1054,25 +1199,31 @@ app.api('/api/dashboard', (data) => {
       error: String(err?.message || err),
     };
   }
-});
+};
+app.api('/api/dashboard', handleDashboard);
+app.api('/api/dashboard', handleDashboard, 'GET');
 
-// POST /api/sync { repoPath?, workspaceUris? }
-app.api('/api/sync', (data) => {
+// POST /api/sync & /api/git-state & /api/git_state { repoPath?, workspaceUris?, repo? }
+const handleGitState = (data) => {
   try {
     const uris = [];
-    if (data?.repoPath) uris.push(String(data.repoPath).trim());
-    if (Array.isArray(data?.workspaceUris)) {
-      for (const u of data.workspaceUris) {
-        if (!u) continue;
-        let p = String(u);
-        if (p.startsWith('file://')) {
-          try {
-            p = fileURLToPath(p);
-          } catch {
-            continue;
-          }
-        }
-        if (!uris.includes(p)) uris.push(p);
+    const targetRepo = data?.repoPath || data?.repo;
+    if (targetRepo) {
+      const norm = normalizeFsPath(targetRepo);
+      if (norm) uris.push(norm);
+    }
+    let rawUris = data?.workspaceUris;
+    if (typeof rawUris === 'string') {
+      try {
+        rawUris = JSON.parse(rawUris);
+      } catch {
+        rawUris = rawUris.split(/[,|]/).map((s) => s.trim()).filter(Boolean);
+      }
+    }
+    if (Array.isArray(rawUris)) {
+      for (const u of rawUris) {
+        const norm = normalizeFsPath(u);
+        if (norm && !uris.includes(norm)) uris.push(norm);
       }
     }
 
@@ -1087,7 +1238,7 @@ app.api('/api/sync', (data) => {
       console.warn('Python ctl sync warning:', pythonErr.message);
     }
     const state = loadState();
-    const activeRepos = collectActiveRepos(uris, state);
+    const activeRepos = collectActiveRepos(uris, state, targetRepo);
 
     return {
       ok: true,
@@ -1100,7 +1251,7 @@ app.api('/api/sync', (data) => {
       jobs: Array.isArray(state.jobs) ? state.jobs : [],
     };
   } catch (err) {
-    console.error('Error in /api/sync:', err);
+    console.error('Error in /api/sync or /api/git-state:', err);
     let state = { auto_dispatch: true, skip_docs_only: true, jobs: [] };
     try {
       state = loadState(true);
@@ -1113,7 +1264,14 @@ app.api('/api/sync', (data) => {
       jobs: Array.isArray(state.jobs) ? state.jobs : [],
     };
   }
-});
+};
+
+app.api('/api/sync', handleGitState);
+app.api('/api/sync', handleGitState, 'GET');
+app.api('/api/git-state', handleGitState);
+app.api('/api/git-state', handleGitState, 'GET');
+app.api('/api/git_state', handleGitState);
+app.api('/api/git_state', handleGitState, 'GET');
 
 // POST /api/settings { auto_dispatch?, skip_docs_only? }
 app.api('/api/settings', (data) => {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { existsSync, mkdirSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { getStatus, syncRepo, queueAudit, applyFix, continueAudit, completeAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, resolveRepo, PLUGIN_ROOT, } from "./bridge.js";
+import { getStatus, getGitState, syncRepo, queueAudit, applyFix, continueAudit, completeAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, resolveRepo, PLUGIN_ROOT, } from "./bridge.js";
 import { startMcpServer } from "./mcp.js";
 function printHelp() {
     const help = `
@@ -12,6 +12,8 @@ Usage:
 
 Commands:
   status                   Show repository status, latest audit verdict, and fix branches
+  sync                     Sync Git history and detect repositories
+  git-state                Inspect raw Git status and branch metadata
   audit [notes...]         Queue audit in isolated worktree for HEAD or --sha
   apply-fix [sha]          Apply confirmed fixes from fix branch to active branch
   continue [sha]           Resume an interrupted audit or check completed audit report
@@ -200,6 +202,22 @@ async function main() {
                 else {
                     console.log(formatStatusReport(status, syncInfo));
                 }
+                break;
+            }
+            case "sync": {
+                const res = await syncRepo(repo);
+                if (isJson) {
+                    console.log(JSON.stringify(res, null, 2));
+                }
+                else {
+                    console.log(`Synced repository: ${res?.bestRepo?.repoName || res?.bestRepo?.repoPath || "success"}`);
+                }
+                break;
+            }
+            case "git-state":
+            case "git_state": {
+                const res = await getGitState(repo);
+                console.log(JSON.stringify(res, null, 2));
                 break;
             }
             case "audit": {

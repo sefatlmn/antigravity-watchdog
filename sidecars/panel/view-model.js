@@ -34,15 +34,19 @@ export function timeAgo(iso, now = Date.now()) {
 }
 
 /** @param {string} u @returns {string} */
-function normalizeWsUri(u) {
+export function normalizeWsUri(u) {
   let s = String(u || '').trim();
+  if (!s) return '';
   if (s.startsWith('file://')) {
-    s = s.replace(/^file:\/\//, '');
-    try {
-      s = decodeURIComponent(s);
-    } catch {}
+    s = s.replace(/^file:\/\/(localhost)?/i, '');
   }
-  return s.replace(/\/+$/, '');
+  try {
+    s = decodeURIComponent(s);
+  } catch {}
+  if (/^\/[a-zA-Z]:[\\/]/.test(s)) {
+    s = s.slice(1);
+  }
+  return s.replace(/[\\/]+$/, '').replace(/\\/g, '/');
 }
 
 /**

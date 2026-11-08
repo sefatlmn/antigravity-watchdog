@@ -24,13 +24,17 @@ function timeAgo(iso, now = Date.now()) {
 
 function normalizeWsUri(u) {
   let s = String(u || '').trim();
+  if (!s) return '';
   if (s.startsWith('file://')) {
-    s = s.replace(/^file:\/\//, '');
-    try {
-      s = decodeURIComponent(s);
-    } catch {}
+    s = s.replace(/^file:\/\/(localhost)?/i, '');
   }
-  return s.replace(/\/+$/, '');
+  try {
+    s = decodeURIComponent(s);
+  } catch {}
+  if (/^\/[a-zA-Z]:[\\/]/.test(s)) {
+    s = s.slice(1);
+  }
+  return s.replace(/[\\/]+$/, '').replace(/\\/g, '/');
 }
 
 function selectActiveRepo(data, { selectedRepoPath = '', explicit = false, workspaceUris = [] } = {}) {
@@ -172,7 +176,17 @@ function proposalView(p, repo) {
   };
 }
 
-const sidecar = window.sidecar;
+const sidecar = typeof window !== 'undefined' ? window.sidecar : null;
+function getHostMode() {
+  try {
+    const fromUrl = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('host') : null;
+    if (fromUrl) return fromUrl;
+    if (typeof window !== 'undefined' && window.sidecar?.isStandalone) return 'claude';
+  } catch {}
+  return 'antigravity';
+}
+const hostMode = getHostMode();
+
 const $ = (id) => {
   const el = document.getElementById(id);
   if (el) return el;
@@ -221,19 +235,28 @@ function applyThemeFromPayload(payload = {}) {
   } else if (payload.themeType === 'dark') {
     isLight = false;
   } else {
-    const bgVal = cssVars['--background'] || getComputedStyle(document.documentElement).getPropertyValue('--background').trim();
+    const getCompStyle = typeof window !== 'undefined' && typeof window.getComputedStyle === 'function' ? window.getComputedStyle : null;
+    const bgVal = cssVars['--background'] || (getCompStyle ? getCompStyle(document.documentElement).getPropertyValue('--background').trim() : '');
     if (bgVal) {
       isLight = isColorLight(bgVal);
-    } else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
+    } else if (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
       isLight = true;
     }
   }
 
   const mode = isLight ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', mode);
-  document.documentElement.classList.toggle('theme-light', isLight);
-  document.documentElement.classList.toggle('theme-dark', !isLight);
-  document.documentElement.style.colorScheme = mode;
+  if (typeof document !== 'undefined' && document.documentElement) {
+    if (typeof document.documentElement.setAttribute === 'function') {
+      document.documentElement.setAttribute('data-theme', mode);
+    }
+    if (document.documentElement.classList && typeof document.documentElement.classList.toggle === 'function') {
+      document.documentElement.classList.toggle('theme-light', isLight);
+      document.documentElement.classList.toggle('theme-dark', !isLight);
+    }
+    if (document.documentElement.style) {
+      document.documentElement.style.colorScheme = mode;
+    }
+  }
 }
 
 // Initial theme probe & message event listener
@@ -283,15 +306,39 @@ async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000 } =
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
   try {
-    let res;
+    let token = null;
+    try {
+      if (typeof window !== 'undefined') {
+        token = new URLSearchParams(window.location.search).get('token');
+        if (token) {
+          try { sessionStorage.setItem('watchdog_panel_token', token); } catch {}
+          try { localStorage.setItem('watchdog_panel_token', token); } catch {}
+        } else {
+          token = sessionStorage.getItem('watchdog_panel_token') || localStorage.getItem('watchdog_panel_token');
+        }
+      }
+    } catch {}
+
+    const currentHost = (typeof hostMode !== 'undefined' ? hostMode : '') || getHostMode();
     const payloadBody = (method !== 'GET' && body && typeof body === 'object' && !Array.isArray(body))
-      ? { host: hostMode, ...body }
+      ? { host: currentHost, ...body }
       : body;
     const bodyStr = method === 'GET' ? undefined : JSON.stringify(payloadBody);
-    if (sidecar?.fetch) {
-      const fetchPromise = sidecar.fetch(path, {
+
+    let effectivePath = path;
+    if (token && !effectivePath.includes('token=')) {
+      const sep = effectivePath.includes('?') ? '&' : '?';
+      effectivePath = `${effectivePath}${sep}token=${encodeURIComponent(token)}`;
+    }
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['x-sidecar-token'] = token;
+
+    let res;
+    if (window.sidecar?.fetch) {
+      const fetchPromise = window.sidecar.fetch(effectivePath, {
         method,
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: bodyStr,
         signal: controller?.signal,
       });
@@ -302,10 +349,7 @@ async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000 } =
         ),
       ]);
     } else {
-      const token = new URLSearchParams(window.location.search).get('token');
-      const headers = { 'Content-Type': 'application/json' };
-      if (token) headers['x-sidecar-token'] = token;
-      const fetchPromise = window.fetch(path, {
+      const fetchPromise = window.fetch(effectivePath, {
         method,
         headers,
         body: bodyStr,
@@ -318,8 +362,17 @@ async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000 } =
         ),
       ]);
     }
+
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      // Safe read endpoints auto-retry via GET if POST encountered 401/405/auth mismatch
+      const basePath = path.split('?')[0];
+      if ((res.status === 401 || res.status === 405) && method !== 'GET') {
+        const safeReadEndpoints = ['/api/dashboard', '/api/sync', '/api/git-state', '/api/git_state', '/api/active-workspace'];
+        if (safeReadEndpoints.includes(basePath)) {
+          return callApi(path, { method: 'GET', body, timeoutMs });
+        }
+      }
       throw new Error(data.error || `${res.status} ${res.statusText}`);
     }
     return data;
@@ -626,7 +679,10 @@ function renderDashboard(data) {
     if (repoNameEl) repoNameEl.textContent = 'No repository detected';
     if (repoBranchEl) repoBranchEl.textContent = '–';
     if (commitShaEl) commitShaEl.textContent = '–';
-    if (commitSubjectEl) commitSubjectEl.textContent = data.error ? 'Unable to scan repository (click sync to retry)' : 'Open a Git workspace to begin';
+    if (commitSubjectEl) {
+      commitSubjectEl.textContent = data.error ? `Unable to scan repository: ${data.error}` : 'Open a Git workspace to begin';
+      commitSubjectEl.title = data.error ? String(data.error) : '';
+    }
     if (commitTimeEl) commitTimeEl.textContent = '';
   }
 
@@ -1346,26 +1402,38 @@ async function syncGit({ silent = false } = {}) {
     try {
       // Use lightweight dashboard endpoint for silent polling; call full Python sync on user click
       if (silent) {
-        data = await callApi('/api/dashboard', { body });
+        data = await callApi('/api/dashboard', { body, timeoutMs: 30000 });
       } else {
-        data = await callApi('/api/sync', { body });
+        data = await callApi('/api/sync', { body, timeoutMs: 30000 });
       }
     } catch {
       try {
-        data = await callApi('/api/dashboard', { body });
-      } catch (innerErr) {
-        if (!currentDashboard) {
-          data = {
-            activeRepos: [],
-            jobs: [],
-            error: innerErr.message,
-          };
-        } else {
-          data = currentDashboard;
+        data = await callApi('/api/dashboard', { body, timeoutMs: 30000 });
+      } catch {
+        try {
+          data = await callApi('/api/git-state', { body, timeoutMs: 30000 });
+        } catch (innerErr) {
+          if (!currentDashboard) {
+            data = {
+              activeRepos: [],
+              jobs: [],
+              error: innerErr.message,
+            };
+          } else {
+            data = {
+              ...currentDashboard,
+              error: innerErr.message,
+            };
+          }
         }
       }
     }
     if (data) {
+      if ((!data.activeRepos || data.activeRepos.length === 0) && currentDashboard?.activeRepos?.length > 0) {
+        data.activeRepos = currentDashboard.activeRepos;
+      } else if (data.activeRepos?.length > 0 && (!workspaceUris || workspaceUris.length === 0)) {
+        workspaceUris = data.activeRepos.map((r) => r.repoPath);
+      }
       renderDashboard(data);
     }
     if (!silent) {
@@ -1837,7 +1905,7 @@ async function init() {
     try {
       const urisPromise = sidecar.getWorkspaceUris();
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('getWorkspaceUris timeout')), 600)
+        setTimeout(() => reject(new Error('getWorkspaceUris timeout')), 4000)
       );
       const uris = await Promise.race([urisPromise, timeoutPromise]);
       if (uris && uris.length > 0) {
@@ -1865,14 +1933,22 @@ async function init() {
         }
       } catch {}
     }
-    if (sidecar.onWorkspaceChange) {
-      sidecar.onWorkspaceChange((uris) => {
-        workspaceUris = uris || [];
-        selectedRepoPath = '';
-        userExplicitlySelectedRepo = false;
-        syncGit({ silent: true });
-      });
-    }
+  }
+  if (workspaceUris.length === 0 && !urlParamRepo) {
+    try {
+      const activeRes = await callApi('/api/active-workspace', { method: 'GET', timeoutMs: 3000 }).catch(() => null);
+      if (activeRes?.workspaceUris && activeRes.workspaceUris.length > 0) {
+        workspaceUris = activeRes.workspaceUris;
+      }
+    } catch {}
+  }
+  if (sidecar?.onWorkspaceChange) {
+    sidecar.onWorkspaceChange((uris) => {
+      workspaceUris = uris || [];
+      selectedRepoPath = '';
+      userExplicitlySelectedRepo = false;
+      syncGit({ silent: true });
+    });
   }
 
   let pollTimeout = null;
