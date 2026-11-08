@@ -4533,7 +4533,8 @@ def main() -> int:
     p_cancel_ns.add_argument("--repo", required=True)
 
     p_goal = sub.add_parser("goal", help="Get or set project goal", parents=[p_common])
-    p_goal.add_argument("--repo", required=True)
+    p_goal.add_argument("repo_pos", nargs="?", default="", help="Optional repository path positional")
+    p_goal.add_argument("--repo", default="")
     p_goal.add_argument("--set", dest="set_goal", default="")
     p_goal.add_argument("--clear", action="store_true")
     p_goal.add_argument("--refresh", action="store_true", help="Review codebase & update project goal")
@@ -4853,7 +4854,11 @@ def main() -> int:
         return 0
 
     if args.cmd == "goal":
-        root = resolve_git_root(args.repo) or Path(args.repo).resolve()
+        repo_arg = args.repo or args.repo_pos or "."
+        root = resolve_git_root(repo_arg) or Path(repo_arg).resolve()
+        if not root.exists() or not root.is_dir():
+            print(json.dumps({"ok": False, "error": f"Repository directory not found: {repo_arg}"}, indent=2))
+            return 1
         if args.refresh:
             res = refresh_project_goal(root)
         elif args.clear:

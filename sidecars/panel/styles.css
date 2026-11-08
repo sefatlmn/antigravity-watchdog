@@ -563,14 +563,25 @@ body {
 }
 
 .icon-btn.spinning svg,
-.icon-btn.spinning .icon-svg {
+.icon-btn.spinning .icon-svg,
+.icon-btn svg.spinning,
+.icon-svg.spinning {
   animation: spin 0.75s linear infinite;
   transform-origin: center;
+  transform-box: fill-box;
 }
 
-.icon-btn.spinning {
+.icon-btn.spinning,
+.icon-btn.spinning:disabled,
+.icon-btn:disabled.spinning {
   pointer-events: none;
-  opacity: 0.85;
+  opacity: 0.85 !important;
+}
+
+.goal-loading {
+  opacity: 0.6;
+  font-style: italic;
+  transition: opacity 0.2s ease-in-out;
 }
 
 .spinning:not(.icon-btn) {

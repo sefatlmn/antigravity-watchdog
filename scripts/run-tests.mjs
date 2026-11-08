@@ -646,6 +646,9 @@ async function main() {
     assert.equal(parentWsTest?.repoName, 'antigravity-watchdog')
     const indexHtml = fs.readFileSync(path.join(rootDir, 'sidecars/panel/index.html'), 'utf8')
     assert.ok(!/<script\s+type="module"\s+src="\/app\.js/.test(indexHtml), 'index.html must use classic script tag for /app.js so sidecar-gateway sends cookies')
+    assert.ok(/id="btn-refresh-goal"/.test(indexHtml), 'index.html must include #btn-refresh-goal')
+    assert.ok(/id="goal-text"/.test(indexHtml), 'index.html must include #goal-text')
+    assert.ok(/onclick="refreshProjectGoal\(\)"/.test(indexHtml), '#btn-refresh-goal should have inline onclick handler')
     execFileSync(process.execPath, ['--check', path.join(rootDir, 'sidecars/panel/app.js')])
     execFileSync(process.execPath, ['--check', path.join(rootDir, 'sidecars/panel/main.mjs')])
     const action = vm.auditAction({ activeRepos: [], jobs: [] }, null)
@@ -680,6 +683,28 @@ async function main() {
     // Goal refresh flag
     const goalRefresh = await bridge.manageGoal(rootDir, undefined, false, true)
     assert.equal(typeof goalRefresh.goal, 'string')
+    assert.ok(goalRefresh.goal.length > 0)
+    assert.equal(goalRefresh.ok, true)
+    assert.ok(typeof goalRefresh.source === 'string')
+    assert.ok(typeof goalRefresh.updatedAt === 'string')
+
+    // Direct positional invocation of watchdog_ctl.py goal <repo> --refresh
+    const ctlPath = path.join(rootDir, 'scripts/watchdog_ctl.py')
+    const pyGoalRaw = execFileSync('python3', [ctlPath, 'goal', rootDir, '--refresh', '--json'], { encoding: 'utf8' })
+    const pyGoal = JSON.parse(pyGoalRaw)
+    assert.equal(pyGoal.ok, true)
+    assert.ok(pyGoal.goal && typeof pyGoal.goal.goal === 'string')
+
+    // Error handling on invalid directory
+    try {
+      execFileSync('python3', [ctlPath, 'goal', '/nonexistent/invalid/dir', '--refresh', '--json'], { encoding: 'utf8', stdio: 'pipe' })
+      assert.fail('Should fail on nonexistent directory')
+    } catch (err) {
+      assert.equal(err.status, 1)
+      const errJson = JSON.parse(String(err.stdout).trim())
+      assert.equal(errJson.ok, false)
+      assert.ok(errJson.error.includes('not found'))
+    }
 
     // 2. formatStatusReport with bestRepo.head schema and null-safety
     const statusReport = bridge.formatStatusReport(
@@ -783,6 +808,15 @@ print("OK")
     const p4 = cli.parseArgs(['goal', 'clear'])
     assert.equal(p4.cmd, 'goal')
     assert.deepEqual(p4.positionals, ['clear'])
+
+    const pRefresh = cli.parseArgs(['goal', 'refresh'])
+    assert.equal(pRefresh.cmd, 'goal')
+    assert.deepEqual(pRefresh.positionals, ['refresh'])
+
+    const pRefreshFlag = cli.parseArgs(['goal', '--repo', '/some/path', '--refresh'])
+    assert.equal(pRefreshFlag.cmd, 'goal')
+    assert.equal(pRefreshFlag.flags.repo, '/some/path')
+    assert.equal(pRefreshFlag.flags.refresh, true)
 
     const p5 = cli.parseArgs(['--repo', '/some/path', 'status'])
     assert.equal(p5.cmd, 'status')

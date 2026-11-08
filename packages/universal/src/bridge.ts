@@ -228,6 +228,8 @@ export async function manageGoal(repo?: string, goal?: string, clear = false, re
   }
   const res = await runCtlJson(args);
   if (res && typeof res.goal === "object" && res.goal !== null) {
+    if (res.goal.source && !res.source) res.source = res.goal.source;
+    if (res.goal.updatedAt && !res.updatedAt) res.updatedAt = res.goal.updatedAt;
     res.goal = res.goal.goal || res.goal;
   }
   return res;

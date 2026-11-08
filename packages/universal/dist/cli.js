@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { getStatus, syncRepo, queueAudit, applyFix, continueAudit, completeAudit, sendAuditComment, synthesizeNextSteps, cancelSynthesis, manageGoal, executePlan, formatStatusReport, formatNextStepsReport, resolveRepo, PLUGIN_ROOT, } from "./bridge.js";
 import { startMcpServer } from "./mcp.js";
@@ -360,25 +360,30 @@ async function main() {
                 break;
             }
             case "goal": {
-                const rawPos = positionals.join(" ").trim();
-                const clear = Boolean(flags.clear) || positionals[0]?.toLowerCase() === "clear";
-                const refresh = Boolean(flags.refresh) || positionals[0]?.toLowerCase() === "refresh";
+                let targetRepo = repo;
+                const pos = [...positionals];
+                if (!targetRepo && pos.length > 0 && existsSync(pos[0]) && statSync(pos[0]).isDirectory()) {
+                    targetRepo = pos.shift();
+                }
+                const rawPos = pos.join(" ").trim();
+                const clear = Boolean(flags.clear) || pos[0]?.toLowerCase() === "clear";
+                const refresh = Boolean(flags.refresh) || pos[0]?.toLowerCase() === "refresh";
                 const setGoal = typeof flags.set === "string" ? flags.set : (!clear && !refresh ? rawPos : "");
                 if (refresh) {
-                    const res = await manageGoal(repo, undefined, false, true);
+                    const res = await manageGoal(targetRepo, undefined, false, true);
                     const goalStr = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");
                     console.log(isJson ? JSON.stringify(res, null, 2) : (goalStr ? `Milestone goal refreshed: "${goalStr}"` : "Milestone goal refreshed."));
                 }
                 else if (clear) {
-                    const res = await manageGoal(repo, undefined, true);
+                    const res = await manageGoal(targetRepo, undefined, true);
                     console.log(isJson ? JSON.stringify(res, null, 2) : "Milestone goal cleared.");
                 }
                 else if (setGoal) {
-                    const res = await manageGoal(repo, setGoal);
+                    const res = await manageGoal(targetRepo, setGoal);
                     console.log(isJson ? JSON.stringify(res, null, 2) : `Milestone goal set to: "${setGoal}"`);
                 }
                 else {
-                    const res = await manageGoal(repo);
+                    const res = await manageGoal(targetRepo);
                     const goalStr = typeof res?.goal === "object" ? (res.goal?.goal || "") : (res?.goal || "");
                     console.log(isJson ? JSON.stringify(res, null, 2) : (goalStr ? `Milestone goal: "${goalStr}"` : "No goal set."));
                 }

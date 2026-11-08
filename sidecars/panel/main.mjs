@@ -726,19 +726,19 @@ function inspectSingleRepo(topLevel) {
     const proposalsFile = join(nextStepsDir, 'proposals.json');
     let proposals = [];
     let goal = null;
-    if (existsSync(proposalsFile)) {
+    const goalFile = join(nextStepsDir, 'goal.json');
+    if (existsSync(goalFile)) {
       try {
-        const pData = JSON.parse(readFileSync(proposalsFile, 'utf8'));
-        proposals = Array.isArray(pData.proposals) ? pData.proposals : [];
-        if (pData.goal) goal = pData.goal;
+        goal = JSON.parse(readFileSync(goalFile, 'utf8'));
       } catch {
         // ignore
       }
     }
-    const goalFile = join(nextStepsDir, 'goal.json');
-    if (!goal && existsSync(goalFile)) {
+    if (existsSync(proposalsFile)) {
       try {
-        goal = JSON.parse(readFileSync(goalFile, 'utf8'));
+        const pData = JSON.parse(readFileSync(proposalsFile, 'utf8'));
+        proposals = Array.isArray(pData.proposals) ? pData.proposals : [];
+        if (!goal && pData.goal) goal = pData.goal;
       } catch {
         // ignore
       }
@@ -1355,6 +1355,7 @@ app.api('/api/next-steps/cancel', (data) => {
 // POST /api/next-steps/goal { repo, goal?, clear?, refresh? }
 app.api('/api/next-steps/goal', (data) => {
   const repo = String(data?.repo || '').trim();
+  const host = String(data?.host || '').trim();
   if (!repo) {
     return new Response(JSON.stringify({ error: 'Missing repo' }), {
       status: 400,
@@ -1362,14 +1363,21 @@ app.api('/api/next-steps/goal', (data) => {
     });
   }
   const args = ['goal', '--repo', repo];
-  if (data?.clear) {
-    args.push('--clear');
-  } else if (data?.refresh) {
+  if (data?.refresh) {
     args.push('--refresh');
+  } else if (data?.clear) {
+    args.push('--clear');
   } else if (data?.goal) {
     args.push('--set', String(data.goal).trim());
   }
-  return runPythonCtl(args);
+  try {
+    return runPythonCtl(args, host);
+  } catch (err) {
+    return new Response(JSON.stringify({ error: err.message || 'Failed to update goal' }), {
+      status: 500,
+      contentType: 'application/json',
+    });
+  }
 });
 
 // POST /api/next-steps/conversations { repo }

@@ -173,8 +173,13 @@ function proposalView(p, repo) {
 }
 
 const sidecar = window.sidecar;
-const hostMode = new URLSearchParams(window.location.search).get('host') || (sidecar?.isStandalone ? 'claude' : 'antigravity');
-const $ = (id) => document.getElementById(id);
+const $ = (id) => {
+  const el = document.getElementById(id);
+  if (el) return el;
+  if (id === 'ns-goal-text') return document.getElementById('goal-text');
+  if (id === 'goal-text') return document.getElementById('ns-goal-text');
+  return null;
+};
 
 // Theme Synchronization & Adaptation for Antigravity Host Themes
 function isColorLight(colorStr) {
@@ -718,7 +723,7 @@ function renderNextSteps(activeRepo) {
   if (isRefreshingProposals) return;
 
   const tabBadge = $('tab-badge-proposals');
-  const goalTextEl = $('ns-goal-text');
+  const goalTextEl = $('goal-text') || $('ns-goal-text');
   const proposalsList = $('proposals-list');
   const cancelHeaderBtn = $('btn-cancel-synthesis-header');
   const btnEditGoal = $('btn-edit-goal');
@@ -748,13 +753,23 @@ function renderNextSteps(activeRepo) {
     return;
   }
 
-  if (btnEditGoal) btnEditGoal.disabled = false;
-  if (btnRefreshGoal) btnRefreshGoal.disabled = false;
+  if (btnEditGoal) btnEditGoal.disabled = isRefreshingGoal;
+  if (btnRefreshGoal) {
+    btnRefreshGoal.disabled = isRefreshingGoal;
+    const svg = btnRefreshGoal.querySelector('svg');
+    if (isRefreshingGoal) {
+      btnRefreshGoal.classList.add('spinning');
+      if (svg) svg.classList.add('spinning');
+    } else {
+      btnRefreshGoal.classList.remove('spinning');
+      if (svg) svg.classList.remove('spinning');
+    }
+  }
   if (btnRefreshProposals) btnRefreshProposals.disabled = false;
 
   try {
     // 1. Goal Banner
-    if (goalTextEl) {
+    if (goalTextEl && !isRefreshingGoal) {
       goalTextEl.textContent = goalText(activeRepo);
     }
 
@@ -1073,40 +1088,91 @@ async function refreshProposals(skipDispatch = false) {
 let isRefreshingGoal = false;
 async function refreshProjectGoal() {
   if (isRefreshingGoal) return;
-  const activeRepo = getActiveRepo();
+  isRefreshingGoal = true;
+
+  const refreshBtn = $('btn-refresh-goal');
+  const goalTextEl = $('goal-text') || $('ns-goal-text');
+  const originalGoalText = goalTextEl ? goalTextEl.textContent : '';
+  const svg = refreshBtn ? refreshBtn.querySelector('svg') : null;
+
+  // Immediate tactile UI feedback
+  if (refreshBtn) {
+    refreshBtn.disabled = true;
+    refreshBtn.classList.add('spinning');
+  }
+  if (svg) {
+    svg.classList.add('spinning');
+  }
+  if (goalTextEl) {
+    goalTextEl.textContent = 'Reviewing codebase & refreshing goal…';
+    goalTextEl.classList.add('goal-loading');
+  }
+  toast('Reviewing codebase & updating project goal…');
+
+  let activeRepo = getActiveRepo();
   if (!activeRepo) {
+    if (!currentDashboard) {
+      try {
+        await syncGit({ silent: true });
+        activeRepo = getActiveRepo();
+      } catch {}
+    }
+  }
+  if (!activeRepo) {
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+      refreshBtn.classList.remove('spinning');
+    }
+    if (svg) {
+      svg.classList.remove('spinning');
+    }
+    if (goalTextEl) {
+      goalTextEl.classList.remove('goal-loading');
+      goalTextEl.textContent = originalGoalText || 'Open a Git repository to set project goals';
+    }
+    isRefreshingGoal = false;
     toast('No Git repository detected.', true);
     return;
   }
-  const refreshBtn = $('btn-refresh-goal');
-  isRefreshingGoal = true;
+
   try {
-    if (refreshBtn) {
-      refreshBtn.disabled = true;
-      refreshBtn.classList.add('spinning');
-    }
-    toast('Reviewing codebase & updating project goal…');
     const res = await callApi('/api/next-steps/goal', {
       body: { repo: activeRepo.repoPath, refresh: true },
+      timeoutMs: 30000,
     });
     if (res && res.ok && res.goal) {
       activeRepo.goal = res.goal;
-      const goalTextEl = $('ns-goal-text');
+      const text =
+        (typeof res.goal === 'object' ? res.goal.goal : res.goal) ||
+        `Develop and maintain ${activeRepo.repoName}`;
       if (goalTextEl) {
-        const text =
-          (typeof res.goal === 'object' ? res.goal.goal : res.goal) ||
-          `Develop and maintain ${activeRepo.repoName}`;
+        goalTextEl.classList.remove('goal-loading');
         goalTextEl.textContent = text;
       }
       const gInput = $('input-goal');
       if (gInput) {
-        gInput.value = (typeof res.goal === 'object' ? res.goal.goal : res.goal) || '';
+        gInput.value = text;
+      }
+      // If edit form was open, switch back to view mode
+      const gForm = $('ns-goal-edit-form');
+      const gView = $('ns-goal-view');
+      if (gForm && !gForm.hidden) {
+        gForm.hidden = true;
+        if (gView) gView.hidden = false;
       }
       toast('Project goal updated from codebase');
     } else {
+      if (goalTextEl && originalGoalText) {
+        goalTextEl.classList.remove('goal-loading');
+        goalTextEl.textContent = originalGoalText;
+      }
       toast(res?.error || 'Could not refresh project goal.', true);
     }
   } catch (err) {
+    if (goalTextEl && originalGoalText) {
+      goalTextEl.classList.remove('goal-loading');
+      goalTextEl.textContent = originalGoalText;
+    }
     toast(`Failed to refresh goal: ${err.message}`, true);
   } finally {
     isRefreshingGoal = false;
@@ -1114,8 +1180,16 @@ async function refreshProjectGoal() {
       refreshBtn.disabled = false;
       refreshBtn.classList.remove('spinning');
     }
+    if (svg) {
+      svg.classList.remove('spinning');
+    }
+    if (goalTextEl) {
+      goalTextEl.classList.remove('goal-loading');
+    }
+    renderNextSteps(activeRepo);
   }
 }
+window.refreshProjectGoal = refreshProjectGoal;
 
 async function openPlanModal(planPath, planFile, planId, title, badge) {
   const activeRepo = getActiveRepo();
@@ -1613,7 +1687,10 @@ async function init() {
   // Goal refresh
   const btnRefreshGoal = $('btn-refresh-goal');
   if (btnRefreshGoal) {
-    btnRefreshGoal.addEventListener('click', refreshProjectGoal);
+    btnRefreshGoal.onclick = (e) => {
+      e?.preventDefault?.();
+      refreshProjectGoal();
+    };
   }
 
   // Next Steps refresh
