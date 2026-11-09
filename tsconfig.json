@@ -1,5 +1,12 @@
 {
-  "extends": "./.claude-plugin/types/tsconfig.json",
-  "compilerOptions": { "allowJs": true },
-  "include": [".claude-plugin/types", "hooks", "types", "tests", "sidecars/panel/view-model.js"]
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "strict": false
+  },
+  "include": ["types", "sidecars/panel/view-model.js"]
 }

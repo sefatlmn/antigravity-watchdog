@@ -1,11 +1,11 @@
-// Types for the Watchdog plugin's code. Commit, Job, Proposal, Repo and Dashboard are what
-// the panel server (sidecars/panel/main.mjs) returns from /api/dashboard, as the shared
-// view model (sidecars/panel/view-model.js) reads them; only the fields it reads are named.
-// AgentGrant and the state below belong to the Claude Code hooks module (hooks/agents.ts).
+// Types for the Antigravity Watchdog plugin. Commit, Job, Proposal, Repo and Dashboard are
+// what the panel server (sidecars/panel/main.mjs) returns from /api/dashboard, and what
+// the shared view model (sidecars/panel/view-model.js) reads.
 
 export type Commit = {
   sha: string
   shortSha?: string
+  short_sha?: string
   subject?: string
   relativeTime?: string
   isDocsOnly?: boolean
@@ -14,6 +14,7 @@ export type Commit = {
 
 export type Job = {
   id: string
+  repo?: string
   repo_path?: string
   repo_name?: string
   sha?: string
@@ -26,6 +27,8 @@ export type Job = {
   fix_branch?: string | null
   fixes_committed?: boolean
   fixes_applied?: boolean
+  applied_commit_sha?: string
+  applied_short_sha?: string
   report_path?: string
   conversation_id?: string | null
   archived?: boolean
@@ -34,6 +37,7 @@ export type Job = {
 export type Proposal = { id?: string; title?: string; [field: string]: unknown }
 
 export type Repo = {
+  repo?: string
   repoPath: string
   repoName: string
   branch?: string
@@ -46,21 +50,3 @@ export type Repo = {
 }
 
 export type Dashboard = { activeRepos: Repo[]; jobs: Job[]; error?: string }
-
-// What one Watchdog audit agent running in the session may do (hooks/agents.ts): the
-// folders it may write in (the first is where it may also `git add` and `git commit`), and
-// the controller it reports back to.
-export type AgentGrant = {
-  roots: string[]
-  ctl: string
-  jobId: string
-}
-
-declare module 'claude-code' {
-  interface PluginState {
-    watchdog: {
-      agents: Record<string, AgentGrant>
-      pending: Record<string, AgentGrant>
-    }
-  }
-}

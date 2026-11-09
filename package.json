@@ -2,12 +2,10 @@
   "name": "antigravity-watchdog",
   "version": "1.3.0",
   "private": true,
-  "description": "Autonomous post-commit auditing, visual verification, and next-step synthesis for agentic code editors.",
+  "description": "Code and visual watchdog for Antigravity. Audits commits on request in an isolated Git worktree using Playwright MCP, proposes architecture/performance/scalability improvements, and prepares isolated fix branches.",
   "type": "module",
   "scripts": {
-    "postinstall": "node -e \"import('node:fs').then(fs => { if (!fs.existsSync('packages/universal/node_modules/@opencode/plugin')) return import('node:child_process').then(cp => cp.execSync('npm --prefix packages/universal install', { stdio: 'inherit' })); })\"",
-    "typecheck": "PATH=\"$PWD/node_modules/.bin:$PWD/packages/universal/node_modules/.bin:$PATH\" tsc -p tsconfig.json && PATH=\"$PWD/node_modules/.bin:$PWD/packages/universal/node_modules/.bin:$PATH\" tsc -p packages/universal/tsconfig.json --noEmit",
-    "build": "npm --prefix packages/universal run build",
+    "typecheck": "tsc -p tsconfig.json",
     "test": "node scripts/run-tests.mjs"
   },
   "devDependencies": {

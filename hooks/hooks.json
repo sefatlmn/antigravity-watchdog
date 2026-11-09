@@ -1,4 +1,0 @@
-{
-  "description": "Watchdog audit agents in the Claude Code session, and their permissions",
-  "modules": ["./agents.ts"]
-}

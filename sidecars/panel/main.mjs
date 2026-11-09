@@ -24,7 +24,6 @@ const WATCHDOG_CTL_SCRIPT = join(PLUGIN_ROOT, 'scripts', 'watchdog_ctl.py');
 // Same data directory as watchdog_ctl.py, so both hosts read one state file.
 const WATCHDOG_DIR = join(process.env.ANTIGRAVITY_APP_DATA_DIR || join(homedir(), '.gemini', 'antigravity'), 'watchdog');
 const STATE_FILE = join(WATCHDOG_DIR, 'state.json');
-const CLAUDE_SESSIONS_DIR = join(homedir(), '.claude', 'sessions');
 
 const app = new SidecarApp();
 
@@ -107,7 +106,7 @@ const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
 
 let activeStandaloneWorkspaces = process.env.WATCHDOG_REPO ? [resolve(process.env.WATCHDOG_REPO)] : [];
 
-const STANDALONE_PRELOAD_JS = `// Watchdog Standalone Host Bridge (Claude Code / Browser)
+const STANDALONE_PRELOAD_JS = `// Watchdog Host Bridge (Antigravity Webview / Standalone Browser)
 if (!window.sidecar) {
   let _listeners = [];
   let _lastUrisKey = '';
@@ -144,48 +143,6 @@ if (!window.sidecar) {
   }, 4000);
 }
 `;
-
-function discoverActiveClaudeWorkspaces() {
-  if (!existsSync(CLAUDE_SESSIONS_DIR)) return [];
-  const entries = [];
-  try {
-    for (const name of readdirSync(CLAUDE_SESSIONS_DIR)) {
-      if (!name.endsWith('.json')) continue;
-      const fullPath = join(CLAUDE_SESSIONS_DIR, name);
-      try {
-        const st = statSync(fullPath);
-        const raw = JSON.parse(readFileSync(fullPath, 'utf8'));
-        const pid = Number(raw?.pid || name.replace(/\.json$/, ''));
-        const cwd = raw?.cwd ? resolve(String(raw.cwd).trim()) : '';
-        if (!cwd || !existsSync(cwd)) continue;
-        let alive = false;
-        if (!Number.isNaN(pid) && pid > 0) {
-          try {
-            process.kill(pid, 0);
-            alive = true;
-          } catch {
-            alive = false;
-          }
-        }
-        if (!alive) continue;
-        const ts = Number(raw?.updatedAt || raw?.startedAt || st.mtimeMs || 0);
-        entries.push({ cwd, ts });
-      } catch {
-        // ignore malformed session file
-      }
-    }
-  } catch {
-    return [];
-  }
-  entries.sort((a, b) => b.ts - a.ts);
-  const result = [];
-  for (const item of entries) {
-    if (!result.includes(item.cwd)) {
-      result.push(item.cwd);
-    }
-  }
-  return result;
-}
 
 function renderIndexHtml() {
   let html = readLocal('index.html');
@@ -226,7 +183,7 @@ app.page('/view-model.js', () => readLocal('view-model.js'));
 app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }), 'GET');
 app.page('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }));
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
-app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, host: isStandaloneMode ? 'claude' : 'antigravity', pid: process.pid }), 'GET');
+app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, host: 'antigravity', pid: process.pid }), 'GET');
 app.api('/api/active-workspace', (data, req) => {
   if (req && req.method === 'POST' && data?.repoPath) {
     const resolved = resolve(String(data.repoPath).trim());
@@ -239,9 +196,6 @@ app.api('/api/active-workspace', (data, req) => {
   const uris = [];
   for (const pw of discoverActiveProjectWorkspaces()) {
     if (!uris.includes(pw)) uris.push(pw);
-  }
-  for (const cw of discoverActiveClaudeWorkspaces()) {
-    if (!uris.includes(cw)) uris.push(cw);
   }
   for (const sw of activeStandaloneWorkspaces) {
     if (!uris.includes(sw) && existsSync(sw)) uris.push(sw);
@@ -288,7 +242,7 @@ function runPythonCtl(args, hostOverride = '') {
   const candidates = resolvedPythonBin
     ? [resolvedPythonBin]
     : [process.env.PYTHON_BIN, '/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', 'python3', 'python'].filter(Boolean);
-  const effectiveHost = String(hostOverride || process.env.WATCHDOG_HOST || (isStandaloneMode ? 'claude' : 'antigravity')).trim();
+  const effectiveHost = String(hostOverride || process.env.WATCHDOG_HOST || 'antigravity').trim();
   const fullArgs = [WATCHDOG_CTL_SCRIPT, ...args];
   if (!fullArgs.includes('--json')) {
     fullArgs.push('--json');
@@ -532,36 +486,7 @@ function reconcileJobs(state) {
       // 4. Check for interruption if no report exists and status is 'running'
       if (j.status === 'running') {
         const convId = j.conversation_id;
-        if (convId && convId.startsWith('claude-pid-')) {
-          const pid = parseInt(convId.slice('claude-pid-'.length), 10);
-          let alive = false;
-          if (!Number.isNaN(pid) && pid > 0) {
-            try {
-              process.kill(pid, 0);
-              alive = true;
-            } catch {
-              alive = false;
-            }
-          }
-          if (!alive) {
-            j.status = 'interrupted';
-            j.summary = 'Claude audit process exited before generating report.';
-            modified = true;
-          }
-        } else if (convId && (convId.startsWith('claude-agent-') || convId === 'claude-claiming')) {
-          const timeout = convId === 'claude-claiming' ? 600 : 3600;
-          const since = j.started_at || j.queued_at;
-          if (since) {
-            const age = (Date.now() - new Date(since).getTime()) / 1000;
-            if (age > timeout) {
-              j.status = 'interrupted';
-              j.summary = convId === 'claude-claiming'
-                ? 'The audit request was not sent. Click Continue Audit to try again.'
-                : 'The audit agent stopped before finishing. Click Continue Audit to resume.';
-              modified = true;
-            }
-          }
-        } else if (convId) {
+        if (convId) {
           const tFile = join(homedir(), '.gemini', 'antigravity', 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
           if (existsSync(tFile)) {
             try {
@@ -956,24 +881,7 @@ function inspectSingleRepo(topLevel) {
         }
 
         const convId = item.conversationId;
-        if (convId && convId.startsWith('claude-pid-')) {
-          const pid = parseInt(convId.slice('claude-pid-'.length), 10);
-          let alive = false;
-          if (!Number.isNaN(pid) && pid > 0) {
-            try {
-              process.kill(pid, 0);
-              alive = true;
-            } catch {
-              alive = false;
-            }
-          }
-          if (!alive) {
-            item.status = 'interrupted';
-            item.completedAt = new Date().toISOString();
-            item.summary = 'Claude execution process exited before committing changes. Click Continue Execution to resume.';
-            execsModified = true;
-          }
-        } else if (convId && convId !== 'foreground-agent') {
+        if (convId && convId !== 'foreground-agent') {
           const transcriptPath = join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
           if (existsSync(transcriptPath)) {
             try {
@@ -1196,9 +1104,6 @@ function collectActiveRepos(uris, state, targetRepo = '') {
   if (effectiveUris.length === 0) {
     for (const pw of discoverActiveProjectWorkspaces()) {
       if (!effectiveUris.includes(pw)) effectiveUris.push(pw);
-    }
-    for (const cw of discoverActiveClaudeWorkspaces()) {
-      if (!effectiveUris.includes(cw)) effectiveUris.push(cw);
     }
   }
 

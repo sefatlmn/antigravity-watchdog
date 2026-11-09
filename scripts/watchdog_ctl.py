@@ -42,47 +42,19 @@ ENV_CACHE_FILE = WATCHDOG_DIR / "ls_env.json"
 CONVERSATION_SUMMARIES_DB = APP_DATA_DIR / "conversation_summaries.db"
 BRAIN_DIR = APP_DATA_DIR / "brain"
 PROJECTS_DIR = HOME / ".gemini" / "config" / "projects"
-CLAUDE_DIR = HOME / ".claude"
-CLAUDE_PROJECTS_DIR = CLAUDE_DIR / "projects"
-CLAUDE_SESSIONS_DIR = CLAUDE_DIR / "sessions"
 NEXT_STEPS_DIR_NAME = "next_steps"
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
 SKILL_PATH = PLUGIN_DIR / "skills" / "watchdog-auditor" / "SKILL.md"
 AGENTAPI_DEFAULT = HOME / ".gemini" / "antigravity" / "bin" / "agentapi"
 
-# Conversation ids of agents the plugin starts inside a Claude Code session, and how long
-# (seconds) a queued job, a claim and an in-session audit may go before they count as stopped.
-IN_SESSION_PREFIXES = ("claude-agent-", "claude-claiming")
 QUEUED_TIMEOUT = 600
-CLAIM_TIMEOUT = 600
-IN_SESSION_TIMEOUT = 3600
 TODO_COMMENT_RE = re.compile(r'(?:^\s*(?://|#|/\*|\*|<!--)|(?<=\s)(?://|#)).*?\b(TODO|FIXME|BUG|HACK)\b')
 
 
-def in_claude_session() -> bool:
-    """
-    True when called from inside a Claude Code session: its MCP server, the Watchdog
-    pane's panel server, or the Stop handling the pane runs. Agents are then started
-    by the plugin in that session (hooks/register.tsx), never as background `claude -p`.
-    """
-    return os.environ.get("WATCHDOG_IN_SESSION") == "1"
-
-
 def resolve_host(preferred_host: str = "") -> str:
-    """
-    Determine active host environment ('antigravity', 'claude', or 'auto').
-    Respects explicit preferred_host, WATCHDOG_HOST env var, CLAUDE_PLUGIN_ROOT, and ANTIGRAVITY_LS_ADDRESS.
-    """
-    for cand in (preferred_host, os.environ.get("WATCHDOG_HOST", "")):
-        c = str(cand or "").strip().lower()
-        if c in ("antigravity", "claude"):
-            return c
-    if os.environ.get("CLAUDE_PLUGIN_ROOT") or os.environ.get("CLAUDECODE") == "1":
-        return "claude"
-    if os.environ.get("ANTIGRAVITY_LS_ADDRESS") and os.environ.get("ANTIGRAVITY_CSRF_TOKEN"):
-        return "antigravity"
-    return "auto"
+    """Always resolves to 'antigravity' for this Antigravity-optimized plugin."""
+    return "antigravity"
 
 SKIP_TAGS = ("[auto-review]", "[skip-watchdog]", "[watchdog]")
 EMPTY_TREE_HASH = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
@@ -568,42 +540,14 @@ def is_same_repo_path(p1: Any, p2: Any) -> bool:
 # 4-Pillar Project Intelligence & Next Steps Synthesizer
 # -----------------------------------------------------------------------------
 
-def _extract_claude_user_text(step: Dict[str, Any]) -> str:
-    if step.get("type") != "user":
-        return ""
-    msg = step.get("message")
-    raw_text = ""
-    if isinstance(msg, dict):
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            raw_text = content
-        elif isinstance(content, list):
-            parts = []
-            for item in content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(str(item.get("text", "")))
-                elif isinstance(item, str):
-                    parts.append(item)
-            raw_text = "\n".join(parts)
-    elif isinstance(step.get("content"), str):
-        raw_text = step.get("content", "")
-    raw_text = raw_text.strip()
-    if not raw_text:
-        return ""
-    if raw_text.startswith("<command-message>") or raw_text.startswith("<local-command-"):
-        return ""
-    return raw_text
-
-
 def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
     """
-    Find all Antigravity and Claude Code conversations associated with this repository.
+    Find all Antigravity conversations associated with this repository.
     Matches via:
     1. Direct folder matching in `conversation_summaries.db` (workspace_uris containing repo path or repo name)
     2. Parent workspace folders up to home
     3. Project resource mapping in ~/.gemini/config/projects/*.json
     4. Transcript content search (fallback when workspace_uris was left empty)
-    5. Claude Code project transcripts in ~/.claude/projects/<encoded-path>/*.jsonl and ~/.claude/sessions/*.json
     """
     repo_str = str(repo_root.resolve())
     repo_name = repo_root.name
@@ -615,68 +559,6 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
 
     conversations: List[Dict[str, Any]] = []
     seen_ids = set()
-
-    # A. Scan Claude Code project transcripts (~/.claude/projects/*/*.jsonl)
-    if CLAUDE_PROJECTS_DIR.exists():
-        encoded_candidates = {re.sub(r"[^a-zA-Z0-9]", "-", p) for p in [repo_str] + ancestors}
-        try:
-            for proj_dir in CLAUDE_PROJECTS_DIR.iterdir():
-                if not proj_dir.is_dir():
-                    continue
-                dir_matches = proj_dir.name in encoded_candidates or (
-                    len(repo_name) > 3 and repo_name.lower() in proj_dir.name.lower()
-                )
-                for jsonl_file in sorted(proj_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True):
-                    cid = jsonl_file.stem
-                    if not cid or cid in seen_ids:
-                        continue
-                    try:
-                        matches = dir_matches
-                        first_user_msg = ""
-                        last_user_msg = ""
-                        step_count = 0
-                        with open(jsonl_file, "r", encoding="utf-8", errors="ignore") as fp:
-                            for idx, line in enumerate(fp):
-                                if not line.strip():
-                                    continue
-                                if not matches and idx < 25 and repo_str in line:
-                                    matches = True
-                                try:
-                                    obj = json.loads(line)
-                                    if not matches and obj.get("cwd"):
-                                        obj_cwd = str(obj.get("cwd"))
-                                        if obj_cwd == repo_str or obj_cwd.startswith(repo_str + "/"):
-                                            matches = True
-                                    u_text = _extract_claude_user_text(obj)
-                                    if u_text and not u_text.startswith("[WATCHDOG") and not u_text.startswith("[NEXT-STEPS"):
-                                        step_count += 1
-                                        if not first_user_msg:
-                                            first_user_msg = u_text
-                                        last_user_msg = u_text
-                                except Exception:
-                                    pass
-                        if matches and (first_user_msg or dir_matches):
-                            seen_ids.add(cid)
-                            st = jsonl_file.stat()
-                            mtime_iso = datetime.datetime.fromtimestamp(st.st_mtime, tz=datetime.timezone.utc).isoformat()
-                            clean_title = re.sub(r"\s+", " ", (first_user_msg or f"Claude Session ({repo_name})")).strip()[:80]
-                            clean_preview = re.sub(r"\s+", " ", (last_user_msg or first_user_msg or "")).strip()[:160]
-                            conversations.append(
-                                {
-                                    "conversationId": cid,
-                                    "title": clean_title,
-                                    "preview": clean_preview,
-                                    "stepCount": step_count,
-                                    "lastModifiedTime": mtime_iso,
-                                    "projectId": proj_dir.name,
-                                    "host": "claude",
-                                    "transcriptPath": str(jsonl_file),
-                                }
-                            )
-                    except Exception:
-                        pass
-        except Exception:
-            pass
 
     if not CONVERSATION_SUMMARIES_DB.exists():
         return conversations
@@ -777,7 +659,7 @@ def get_conversation_user_requests(
     conv_id: str, limit: int = 5, transcript_path: Optional[Path] = None
 ) -> List[str]:
     """
-    Extract recent user requests from an Antigravity or Claude Code conversation transcript.
+    Extract recent user requests from an Antigravity conversation transcript.
     """
     t_file: Optional[Path] = None
     if transcript_path and Path(transcript_path).exists():
@@ -786,10 +668,6 @@ def get_conversation_user_requests(
         cand = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
         if cand.exists():
             t_file = cand
-        elif CLAUDE_PROJECTS_DIR.exists():
-            matches = list(CLAUDE_PROJECTS_DIR.glob(f"*/{conv_id}.jsonl"))
-            if matches:
-                t_file = matches[0]
 
     if not t_file or not t_file.exists():
         return []
@@ -802,12 +680,18 @@ def get_conversation_user_requests(
                 try:
                     step = json.loads(line)
                     req_text = ""
-                    if step.get("type") == "USER_INPUT":
-                        content = step.get("content", "")
+                    step_type = str(step.get("type", "")).upper()
+                    content = str(step.get("content", ""))
+                    if step_type in ("USER_INPUT", "USER") or "<USER_REQUEST>" in content:
                         m = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
                         req_text = m.group(1).strip() if m else content.strip()
-                    elif step.get("type") == "user":
-                        req_text = _extract_claude_user_text(step)
+                    elif "<original_task>" in content or "content=Task:" in content:
+                        m = re.search(r"<original_task>(.*?)</original_task>", content, re.DOTALL)
+                        if not m:
+                            m = re.search(r"content=(?:<original_task>\s*)?(Task:\s*.*?)(?:\n\n|</original_task>|$)", content, re.DOTALL)
+                        if m:
+                            req_text = m.group(1).strip()
+                            req_text = re.sub(r"</?[A-Za-z0-9_]+>.*$", "", req_text, flags=re.DOTALL).strip()
                     if (
                         req_text
                         and not req_text.startswith("Comments on artifact URI:")
@@ -1321,7 +1205,10 @@ def deep_analyze_codebase(repo_root: Path, head_sha: str = "HEAD") -> Dict[str, 
         for line in diff_out.splitlines():
             parts = line.strip().split("\t", 1)
             if len(parts) == 2:
-                codebase["changed_files_head"].append({"status": parts[0], "path": parts[1]})
+                status_code = parts[0].strip()
+                file_rel = parts[1].strip()
+                if status_code != "D" and (repo_root / file_rel).is_file():
+                    codebase["changed_files_head"].append({"status": status_code, "path": file_rel})
 
     # 4. Dirty working tree files
     rc_st, st_out, _ = run_git(repo_root, ["status", "--porcelain"])
@@ -1332,7 +1219,10 @@ def deep_analyze_codebase(repo_root: Path, head_sha: str = "HEAD") -> Dict[str, 
                 continue
             parts = line_s.split(maxsplit=1)
             if len(parts) == 2:
-                codebase["dirty_files"].append({"status": parts[0], "path": parts[1].strip()})
+                status_code = parts[0].strip()
+                file_rel = parts[1].strip()
+                if "D" not in status_code and (repo_root / file_rel).is_file():
+                    codebase["dirty_files"].append({"status": status_code, "path": file_rel})
 
     return codebase
 
@@ -1754,12 +1644,22 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
     goal_data = load_goal(repo_root)
     goal_text = goal_data.get("goal") or f"Develop and maintain {repo_root.name}"
 
+    def sanitize_target_files(files: List[str]) -> List[str]:
+        existing = [f for f in files if (repo_root / f).is_file()]
+        if existing:
+            return existing
+        for pool in (codebase["entry_points"], codebase["logic_files"], codebase["all_source_files"]):
+            pool_existing = [f for f in pool if (repo_root / f).is_file()]
+            if pool_existing:
+                return pool_existing[:3]
+        return []
+
     # Determine core affected files from recent changes or key entry points
-    recent_changed_paths = [f["path"] for f in codebase["changed_files_head"]]
+    recent_changed_paths = [f["path"] for f in codebase["changed_files_head"] if (repo_root / f["path"]).is_file()]
     if not recent_changed_paths:
-        recent_changed_paths = [f["path"] for f in codebase["dirty_files"]]
+        recent_changed_paths = [f["path"] for f in codebase["dirty_files"] if (repo_root / f["path"]).is_file()]
     if not recent_changed_paths:
-        recent_changed_paths = codebase["entry_points"][:3] or codebase["logic_files"][:3] or codebase["all_source_files"][:3]
+        recent_changed_paths = sanitize_target_files(codebase["entry_points"][:3] or codebase["logic_files"][:3] or codebase["all_source_files"][:3])
 
     latest_user_directive = chat_intel.get("latest_directive", "")
     pending_tasks = handoff.get("uncompleted_tasks", []) or handoff.get("next_steps_items", []) or chat_intel.get("pending_tasks", []) or readme.get("roadmap_items", [])
@@ -1846,7 +1746,7 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
         if len(clean_title) > 80:
             clean_title = clean_title[:80].rsplit(" ", 1)[0]
 
-        target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
+        target_files = sanitize_target_files(recent_changed_paths[:3] or codebase["logic_files"][:3])
 
         proposals_meta.append({
             "category": category,
@@ -1870,7 +1770,7 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
 
     # UI enhancement
     if codebase["ui_files"] and not any(p["category"] == "ui" for p in proposals_meta):
-        target_files = codebase["ui_files"][:3] or recent_changed_paths[:3]
+        target_files = sanitize_target_files(codebase["ui_files"][:3] or recent_changed_paths[:3])
         additional_candidates.append({
             "category": "ui",
             "badge": "UI",
@@ -1890,7 +1790,7 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
 
     # Workflow / Tooling
     if not any(p["category"] == "workflow" for p in proposals_meta):
-        target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
+        target_files = sanitize_target_files(recent_changed_paths[:3] or codebase["logic_files"][:3])
         additional_candidates.append({
             "category": "workflow",
             "badge": "Workflow",
@@ -1910,7 +1810,7 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
 
     # CLI / API ergonomics
     if codebase["entry_points"] and not any(p["category"] in ("cli", "api") for p in proposals_meta):
-        target_files = codebase["entry_points"][:2] or recent_changed_paths[:2]
+        target_files = sanitize_target_files(codebase["entry_points"][:2] or recent_changed_paths[:2])
         is_cli = "Python" in codebase["languages"] or "scripts" in manifest
         additional_candidates.append({
             "category": "cli" if is_cli else "api",
@@ -1931,7 +1831,7 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
 
     # Performance / Latency
     if not any(p["category"] == "performance" for p in proposals_meta):
-        target_files = recent_changed_paths[:3] or codebase["logic_files"][:3]
+        target_files = sanitize_target_files(recent_changed_paths[:3] or codebase["logic_files"][:3])
         additional_candidates.append({
             "category": "performance",
             "badge": "Performance",
@@ -1953,7 +1853,7 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
     if codebase["todos"] and not any(p["category"] in ("refactor", "robustness") for p in proposals_meta):
         todo_file = codebase["todos"][0]["file"]
         todo_line = codebase["todos"][0]["line"]
-        target_files = [t["file"] for t in codebase["todos"][:2]]
+        target_files = sanitize_target_files([t["file"] for t in codebase["todos"][:2]])
         additional_candidates.append({
             "category": "refactor",
             "badge": "Refactor",
@@ -1973,7 +1873,7 @@ def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any
 
     # Testing / DX
     if not any(p["category"] == "testing" for p in proposals_meta):
-        target_files = codebase["test_files"][:2] or [f"tests/test_{Path(f).stem}.py" if f.endswith(".py") else f"{f}.test.ts" for f in recent_changed_paths[:2]]
+        target_files = sanitize_target_files(codebase["test_files"][:2] or [f"tests/test_{Path(f).stem}.py" if f.endswith(".py") else f"{f}.test.ts" for f in recent_changed_paths[:2]])
         additional_candidates.append({
             "category": "testing",
             "badge": "Testing",
@@ -2162,25 +2062,13 @@ def is_plan_id_match(id_a: str, id_b: str) -> bool:
 
 def is_conversation_active(conv_id: str, max_age_seconds: int = 900) -> bool:
     """
-    Check if an Antigravity subagent conversation or Claude CLI process is actively running.
-    Inspects PID liveness for `claude-pid-*` or transcript log in
-    ~/.gemini/antigravity/brain/<conv_id>/.system_generated/logs/transcript.jsonl
+    Check if an Antigravity subagent conversation is actively running.
+    Inspects transcript log in ~/.gemini/antigravity/brain/<conv_id>/.system_generated/logs/transcript.jsonl
     """
     if not conv_id:
         return False
     if conv_id == "foreground-agent":
         return True
-    if conv_id.startswith(IN_SESSION_PREFIXES):
-        # Started by the plugin inside a Claude Code session; the plugin reports when it ends
-        # (agent-done), and reconcile_job times out one that never does.
-        return True
-    if conv_id.startswith("claude-pid-"):
-        try:
-            pid = int(conv_id.split("claude-pid-", 1)[1].strip())
-            os.kill(pid, 0)
-            return True
-        except (ValueError, ProcessLookupError, OSError):
-            return False
 
     conv_dir = BRAIN_DIR / conv_id
     t_file = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
@@ -2317,36 +2205,28 @@ def cancel_synthesis(repo_root: Path) -> Dict[str, Any]:
                 ]
                 save_state(global_state)
 
-        if conv_id.startswith("claude-pid-"):
+        # Notify the conversation via AgentAPI send-message
+        env = get_cached_ls_env()
+        agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+        if Path(agentapi_bin).exists():
+            msg = "[CANCEL-SYNTHESIS] Next steps refresh was cancelled by user. Stop synthesis immediately."
+            if "language_server" in Path(agentapi_bin).name:
+                cmd = [agentapi_bin, "agentapi", "send-message", conv_id, msg]
+            else:
+                cmd = [agentapi_bin, "send-message", conv_id, msg]
             try:
-                pid = int(conv_id[len("claude-pid-"):])
-                os.kill(pid, 15)
-                notified_chat = True
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    cwd=str(repo_root),
+                    env=env,
+                    timeout=8,
+                )
+                if proc.returncode == 0:
+                    notified_chat = True
             except Exception:
                 pass
-        elif resolve_host() != "claude":
-            # Notify the conversation via AgentAPI send-message
-            env = get_cached_ls_env()
-            agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-            if Path(agentapi_bin).exists():
-                msg = "[CANCEL-SYNTHESIS] Next steps refresh was cancelled by user. Stop synthesis immediately."
-                if "language_server" in Path(agentapi_bin).name:
-                    cmd = [agentapi_bin, "agentapi", "send-message", conv_id, msg]
-                else:
-                    cmd = [agentapi_bin, "send-message", conv_id, msg]
-                try:
-                    proc = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        cwd=str(repo_root),
-                        env=env,
-                        timeout=8,
-                    )
-                    if proc.returncode == 0:
-                        notified_chat = True
-                except Exception:
-                    pass
 
     proposals = []
     goal_data = load_goal(repo_root)
@@ -2654,20 +2534,8 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
                 active.append(conv_id)
                 save_state(st)
 
-    if not dispatched and host_mode in ("claude", "auto"):
-        claude_conv_id = spawn_claude_cli_agent(
-            prompt, repo_root, claude_permission_args("synthesis", repo_root),
-            LOGS_DIR / f"synthesis-{repo_slug(repo_root)}.log",
-        )
-        if claude_conv_id:
-            dispatched = True
-            conv_id = claude_conv_id
-            state_data["conversationId"] = conv_id
-            state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
-            track_active_conversation(conv_id)
-
     if not dispatched:
-        # Fallback to local deterministic synthesis if neither AgentAPI nor Claude CLI is available
+        # Fallback to local deterministic synthesis if AgentAPI is not available
         res = synthesize_next_steps(repo_root, force=True)
         complete_synthesis(repo_root)
         return {
@@ -2687,139 +2555,9 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
     }
 
 
-def find_claude_bin() -> Optional[str]:
-    if os.environ.get("WATCHDOG_CLAUDE_BACKGROUND") == "0":
-        return None
-    candidates = [
-        os.environ.get("CLAUDE_BIN", ""),
-        # The running Claude Code's own binary; the desktop app's is not on PATH.
-        os.environ.get("CLAUDE_CODE_EXECPATH", ""),
-        shutil.which("claude") or "",
-        str(HOME / ".claude" / "local" / "claude"),
-        str(HOME / ".local" / "bin" / "claude"),
-        "/opt/homebrew/bin/claude",
-        "/usr/local/bin/claude",
-    ]
-    for c in candidates:
-        if c and Path(c).exists():
-            return c
-    return None
-
-
-GIT_READ_RULES = [
-    f"Bash(git {cmd}:*)"
-    for cmd in ("status", "diff", "show", "log", "ls-files", "rev-parse", "rev-list", "blame")
-]
-CHECK_RULES = (
-    [f"Bash({pm} {verb}:*)" for pm in ("npm run", "pnpm run", "pnpm", "yarn", "bun run", "bun")
-     for verb in ("test", "lint", "typecheck", "build", "dev", "preview", "start")]
-    + [f"Bash({cmd}:*)" for cmd in (
-        "npm test", "npx tsc", "npx vitest", "npx jest", "npx eslint", "npx vite", "node --check",
-        "pytest", "python3 -m pytest", "python3 -m py_compile", "python3 -m http.server",
-        "python -m pytest", "python -m py_compile", "python -m http.server",
-        "cargo check", "cargo test", "go vet", "go test",
-    )]
-)
-
-
-def claude_permission_args(task: str, repo_root: Path, worktree: Optional[Path] = None) -> List[str]:
-    """
-    What a background `claude -p` session may do without asking, for each kind of task.
-    Nothing else is allowed: a headless session has nobody to ask, so the rest is denied.
-    Edit rules cover every file-writing tool; `//` starts an absolute path.
-    """
-    ctl_full = str(Path(__file__).resolve())
-    ctl_cmds = [
-        f'Bash(python3 "{ctl_full}" complete:*)',
-        f'Bash(python "{ctl_full}" complete:*)',
-        f'Bash(python3 {ctl_full} complete:*)',
-        f'Bash(python {ctl_full} complete:*)',
-        "Bash(python3 scripts/watchdog_ctl.py complete:*)",
-        "Bash(python scripts/watchdog_ctl.py complete:*)",
-        "Bash(python3 watchdog_ctl.py complete:*)",
-        "Bash(python watchdog_ctl.py complete:*)",
-        "Bash(watchdog complete:*)",
-        "Bash(./bin/watchdog.js complete:*)",
-        "Bash(npx watchdog complete:*)",
-    ]
-    if task == "audit":
-        # Fixes go in the isolated worktree, the report in the repository's audits folder.
-        audits = repo_root / ".antigravity" / "audits"
-        audits.mkdir(parents=True, exist_ok=True)
-        edits = [f"Edit(/{audits}/**)"] + ([f"Edit(/{worktree}/**)"] if worktree else [])
-        allowed = GIT_READ_RULES + CHECK_RULES + edits + [
-            "Bash(git add:*)", "Bash(git commit:*)",
-            *ctl_cmds,
-            f"Read(/{SKILL_PATH.parent}/**)", "mcp__playwright", "mcp__playwright:*",
-        ]
-        return ["--add-dir", str(audits), "--allowedTools", *allowed]
-    if task == "synthesis":
-        # Reads the repository; writes only the Next Steps plans.
-        plans = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
-        synthesis_cmds = [
-            f'Bash(python3 "{ctl_full}" complete-synthesis:*)',
-            f'Bash(python "{ctl_full}" complete-synthesis:*)',
-            f'Bash(python3 {ctl_full} complete-synthesis:*)',
-            f'Bash(python {ctl_full} complete-synthesis:*)',
-            "Bash(python3 scripts/watchdog_ctl.py complete-synthesis:*)",
-            "Bash(python scripts/watchdog_ctl.py complete-synthesis:*)",
-            "Bash(python3 watchdog_ctl.py complete-synthesis:*)",
-            "Bash(python watchdog_ctl.py complete-synthesis:*)",
-            "Bash(watchdog complete-synthesis:*)",
-        ]
-        allowed = GIT_READ_RULES + [
-            f"Edit(/{plans}/**)",
-            *synthesis_cmds,
-        ]
-        return ["--allowedTools", *allowed]
-    # "plan": the person chose to execute a plan in this repository, so it may edit and commit there.
-    allowed = GIT_READ_RULES + CHECK_RULES + [f"Edit(/{repo_root}/**)", "Bash(git add:*)", "Bash(git commit:*)"]
-    return ["--allowedTools", *allowed]
-
-
-def spawn_claude_cli_agent(
-    prompt: str, cwd: Path, permission_args: List[str], log_file: Optional[Path] = None
-) -> Optional[str]:
-    """
-    Launch a detached background Claude Code CLI session (`claude -p`) when running
-    outside Antigravity so the shared Sidepanel UI and hooks dispatch autonomous workers natively.
-    `permission_args` (from claude_permission_args) say what it may do without asking.
-    """
-    claude_bin = find_claude_bin()
-    if not claude_bin:
-        return None
-
-    ensure_dirs()
-    session_tag = f"claude-{int(time.time())}-{os.getpid()}"
-    target_log = log_file or (LOGS_DIR / f"{session_tag}.log")
-    env = dict(os.environ)
-    env["WATCHDOG_SESSION"] = "1"
-
-    try:
-        with open(target_log, "a", encoding="utf-8") as lf:
-            lf.write(f"\n[{now_iso()}] Spawning detached Claude Code agent ({session_tag}) in {cwd}\n")
-            proc = subprocess.Popen(
-                [claude_bin, "-p", prompt, *permission_args],
-                cwd=str(cwd),
-                env=env,
-                stdout=lf,
-                stderr=lf,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-            return f"claude-pid-{proc.pid}"
-    except Exception as exc:
-        try:
-            with open(target_log, "a", encoding="utf-8") as lf:
-                lf.write(f"[{now_iso()}] Failed to spawn Claude CLI agent: {exc}\n")
-        except Exception:
-            pass
-        return None
-
-
 def spawn_plan_agent(repo_root: Path, plan_title: str, plan_markdown: str) -> Optional[str]:
     """
-    Launch a background Antigravity or Claude Code agent conversation to execute a Next Steps plan.
+    Launch a background Antigravity agent conversation to execute a Next Steps plan.
     """
     prompt = f"""[NEXT-STEPS-SESSION]
 You are tasked with executing the following approved implementation plan:
@@ -2828,10 +2566,9 @@ You are tasked with executing the following approved implementation plan:
 
 Execute this plan step by step, adhering to the plan specifications, writing necessary tests, and verifying results.
 """
-    host_mode = resolve_host()
     env = get_cached_ls_env()
     agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-    if host_mode in ("antigravity", "auto") and Path(agentapi_bin).exists():
+    if Path(agentapi_bin).exists():
         title = f"Next Step: {plan_title}"
         if "language_server" in Path(agentapi_bin).name:
             cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
@@ -2855,10 +2592,6 @@ Execute this plan step by step, adhering to the plan specifications, writing nec
         except Exception:
             pass
 
-    if host_mode in ("claude", "auto") and not in_claude_session():
-        return spawn_claude_cli_agent(
-            prompt, repo_root, claude_permission_args("plan", repo_root), LOGS_DIR / f"plan-{repo_slug(repo_root)}.log"
-        )
     return None
 
 
@@ -2982,12 +2715,6 @@ def cancel_execution(repo_root: Path, plan_id: str) -> Dict[str, Any]:
         matched["summary"] = "Execution was stopped by user. Click Continue Execution to resume."
         conv_id = matched.get("conversationId")
         if conv_id:
-            if conv_id.startswith("claude-pid-"):
-                try:
-                    pid = int(conv_id[len("claude-pid-"):])
-                    os.kill(pid, 15)
-                except Exception:
-                    pass
             remove_active_conversation(conv_id)
         save_execution_state(repo_root, state)
         return {"ok": True, "planId": clean_id, "status": "interrupted"}
@@ -3273,7 +3000,7 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
         state = load_state()
         effective_ws_paths = list(workspace_paths or [])
 
-        # If no workspace paths were provided, discover active Antigravity/Claude workspaces
+        # If no workspace paths were provided, discover active Antigravity workspaces
         if not effective_ws_paths:
             if PROJECTS_DIR.exists():
                 try:
@@ -3285,18 +3012,6 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
                                 cp = clean_repo_path(raw_uri)
                                 if cp and cp.exists() and str(cp) not in effective_ws_paths:
                                     effective_ws_paths.append(str(cp))
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            if CLAUDE_SESSIONS_DIR.exists():
-                try:
-                    for sfile in sorted(CLAUDE_SESSIONS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]:
-                        try:
-                            sdata = json.loads(sfile.read_text(encoding="utf-8"))
-                            scwd = clean_repo_path(sdata.get("cwd"))
-                            if scwd and scwd.exists() and str(scwd) not in effective_ws_paths:
-                                effective_ws_paths.append(str(scwd))
                         except Exception:
                             pass
                 except Exception:
@@ -3735,8 +3450,7 @@ First, read your operating skill instructions using `view_file`:
 
 def spawn_detached_agent(job: Dict[str, Any]) -> bool:
     """
-    Launch a background review conversation via `agentapi new-conversation`
-    (with automatic fallback to detached `claude -p` when running in Claude Code).
+    Launch a background review conversation via `agentapi new-conversation`.
     """
     prompt = build_watchdog_prompt(job)
     title = f"Watchdog: {job['repo_name']} @ {job['short_sha']}"
@@ -3792,24 +3506,6 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
                     lf.write(f"[{now_iso()}] Failed to spawn agentapi: {exc}\n")
             except Exception:
                 pass
-
-    if host_mode in ("claude", "auto") and in_claude_session():
-        return False
-    if host_mode in ("claude", "auto"):
-        worktree = Path(job["worktree_path"])
-        permissions = claude_permission_args("audit", Path(job["repo_path"]), worktree if worktree.exists() else None)
-        claude_conv_id = spawn_claude_cli_agent(prompt, target_cwd, permissions, log_file)
-        if claude_conv_id:
-            job["conversation_id"] = claude_conv_id
-            track_active_conversation(claude_conv_id)
-            with StateLock():
-                st = load_state()
-                for j in st.get("jobs", []):
-                    if j["id"] == job["id"]:
-                        j["conversation_id"] = claude_conv_id
-                        break
-                save_state(st)
-            return True
 
     return False
 
@@ -3912,8 +3608,7 @@ def queue_commit(
             "started_at": None,
             "completed_at": None,
             "status": "queued",
-            # A Claude Code session starts the audits it queued itself (see `claim`).
-            "queued_by": "claude-session" if in_claude_session() else resolve_host(),
+            "queued_by": "antigravity",
             "verdict": "PENDING",
             "summary": "Queued for code & visual Watchdog review.",
             "bugs_count": 0,
@@ -4297,10 +3992,6 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
     stale_after = None
     if curr_status == "queued" and not conv_id:
         stale_after, why = QUEUED_TIMEOUT, "The audit never started. Click Continue Audit to start it."
-    elif curr_status == "running" and conv_id == "claude-claiming":
-        stale_after, why = CLAIM_TIMEOUT, "The audit request was not sent. Click Continue Audit to try again."
-    elif curr_status == "running" and conv_id and conv_id.startswith(IN_SESSION_PREFIXES):
-        stale_after, why = IN_SESSION_TIMEOUT, "The audit agent stopped before finishing. Click Continue Audit to resume."
     if stale_after is not None:
         since = j.get("started_at") if curr_status == "running" else j.get("queued_at")
         try:
@@ -4422,7 +4113,7 @@ def send_comment_to_job(job: Dict[str, Any], comment: str) -> Dict[str, Any]:
 
     conv_id = target_j.get("conversation_id") or find_watchdog_conversation_for_job(target_j)
     notified = False
-    if conv_id and not conv_id.startswith("claude-pid-") and resolve_host() != "claude":
+    if conv_id:
         env = get_cached_ls_env()
         agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
         if Path(agentapi_bin).exists():
@@ -4569,7 +4260,7 @@ When your checks and visual verification testing are finished:
 python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{target_job['sha']}" --verdict <PASS|FIXED_ON_BRANCH|NEEDS_ATTENTION> --summary "<concise summary>" --bugs-count <count> --fixes-committed <true|false>
 """
 
-        if conv_id and not conv_id.startswith("claude-pid-") and resolve_host() != "claude" and Path(agentapi_bin).exists():
+        if conv_id and Path(agentapi_bin).exists():
             if "language_server" in Path(agentapi_bin).name:
                 cmd = [agentapi_bin, "agentapi", "send-message", conv_id, continue_msg]
             else:
@@ -4587,15 +4278,6 @@ python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{
                     resumed_chat = True
             except Exception:
                 pass
-
-        if not resumed_chat and in_claude_session():
-            target_job["status"] = "queued"
-            target_job["queued_by"] = "claude-session"
-            target_job["conversation_id"] = None
-            target_job["queued_at"] = now_iso()
-            target_job["summary"] = "Waiting for Claude Code to resume the audit…"
-            save_state(st)
-            return {"ok": True, "resumed": True, "queued": True, "shortSha": target_job.get("short_sha")}
 
         if not resumed_chat:
             spawn_success = False
@@ -4784,7 +4466,7 @@ def main() -> int:
     cache_ls_env()
     p_common = argparse.ArgumentParser(add_help=False)
     p_common.add_argument("--json", action="store_true", help="Output JSON")
-    p_common.add_argument("--host", default="", choices=["", "auto", "antigravity", "claude"], help="Host environment")
+    p_common.add_argument("--host", default="antigravity", choices=["", "auto", "antigravity"], help="Host environment")
 
     parser = argparse.ArgumentParser(description="Antigravity Watchdog Controller", parents=[p_common])
     sub = parser.add_subparsers(dest="cmd")
@@ -4792,16 +4474,10 @@ def main() -> int:
     p_status = sub.add_parser("status", help="Show Watchdog status and jobs", parents=[p_common])
     p_status.add_argument("--repo", default="", help="Optional repository path filter")
 
-    p_claim = sub.add_parser("claim", help="Take queued audits for the Claude Code session to start", parents=[p_common])
-    p_claim.add_argument("--repo", default="")
-
-    p_mark = sub.add_parser("mark-running", help="Record the agent running a claimed audit", parents=[p_common])
+    p_mark = sub.add_parser("mark-running", help="Record the agent running an audit", parents=[p_common])
     p_mark.add_argument("--job-id", required=True)
     p_mark.add_argument("--conversation-id", default="")
     p_mark.add_argument("--failed", default="", help="Why the agent could not start; marks the audit interrupted")
-
-    p_done = sub.add_parser("agent-done", help="An in-session audit agent ended; interrupt its audit if unfinished", parents=[p_common])
-    p_done.add_argument("--conversation-id", required=True)
 
 
     p_sync = sub.add_parser(
@@ -4834,8 +4510,18 @@ def main() -> int:
     p_queue.add_argument("--sha", default="YOUNGEST")
     p_queue.add_argument("--base-sha", default="")
     p_queue.add_argument("--comment", default="", help="Optional user comment or focus note for the audit")
+    p_queue.add_argument("--notes", dest="comment", default="", help="Optional user comment or focus note (alias for --comment)")
     p_queue.add_argument("--no-dispatch", action="store_true")
     p_queue.add_argument("--force", action="store_true")
+
+    p_queue_commit = sub.add_parser("queue-commit", help="Queue a commit for Watchdog review (alias of queue)", parents=[p_common])
+    p_queue_commit.add_argument("--repo", required=True)
+    p_queue_commit.add_argument("--sha", default="YOUNGEST")
+    p_queue_commit.add_argument("--base-sha", default="")
+    p_queue_commit.add_argument("--comment", default="", help="Optional user comment or focus note for the audit")
+    p_queue_commit.add_argument("--notes", dest="comment", default="", help="Optional user comment or focus note (alias for --comment)")
+    p_queue_commit.add_argument("--no-dispatch", action="store_true")
+    p_queue_commit.add_argument("--force", action="store_true")
 
     p_comp = sub.add_parser("complete", help="Mark a Watchdog review job complete", parents=[p_common])
     p_comp.add_argument("--repo", required=True)
@@ -4861,6 +4547,10 @@ def main() -> int:
     p_ns.add_argument("--repo", required=True)
     p_ns.add_argument("--force", action="store_true")
 
+    p_synth = sub.add_parser("synthesize", help="Synthesize up to 4 structured /plan proposals for repository (alias of next-steps)", parents=[p_common])
+    p_synth.add_argument("--repo", required=True)
+    p_synth.add_argument("--force", action="store_true")
+
     p_disp_ns = sub.add_parser("dispatch-synthesis", help="Dispatch an on-demand agent to synthesize next steps", parents=[p_common])
     p_disp_ns.add_argument("--repo", required=True)
 
@@ -4877,8 +4567,19 @@ def main() -> int:
     p_goal.add_argument("repo_pos", nargs="?", default="", help="Optional repository path positional")
     p_goal.add_argument("--repo", default="")
     p_goal.add_argument("--set", dest="set_goal", default="")
+    p_goal.add_argument("--goal", dest="set_goal", default="", help="Set project goal (alias for --set)")
     p_goal.add_argument("--clear", action="store_true")
     p_goal.add_argument("--refresh", action="store_true", help="Review codebase & update project goal")
+
+    p_get_goal = sub.add_parser("get-goal", help="Get project goal (alias of goal)", parents=[p_common])
+    p_get_goal.add_argument("repo_pos", nargs="?", default="", help="Optional repository path positional")
+    p_get_goal.add_argument("--repo", default="")
+
+    p_set_goal = sub.add_parser("set-goal", help="Set project goal (alias of goal)", parents=[p_common])
+    p_set_goal.add_argument("repo_pos", nargs="?", default="", help="Optional repository path positional")
+    p_set_goal.add_argument("--repo", default="")
+    p_set_goal.add_argument("--goal", dest="set_goal", default="", help="Set project goal")
+    p_set_goal.add_argument("--set", dest="set_goal", default="", help="Set project goal")
 
     p_conv = sub.add_parser("conversations", help="List Antigravity conversations associated with repository", parents=[p_common])
     p_conv.add_argument("--repo", required=True)
@@ -4921,7 +4622,7 @@ def main() -> int:
     p_sc.add_argument("--job-id", default="")
 
     args, _ = parser.parse_known_args()
-    if getattr(args, "host", "") in ("antigravity", "claude"):
+    if getattr(args, "host", "") in ("antigravity", "auto"):
         os.environ["WATCHDOG_HOST"] = args.host
 
     if args.cmd == "send-comment":
@@ -4947,34 +4648,6 @@ def main() -> int:
         print(json.dumps(res, indent=2))
         return 0
 
-    if args.cmd == "claim":
-        root = resolve_git_root(args.repo) if args.repo else None
-        reconcile_jobs(root)
-        claimed = []
-        with StateLock():
-            state = load_state()
-            for j in state.get("jobs", []):
-                if j.get("status") != "queued" or j.get("queued_by") != "claude-session":
-                    continue
-                if root and not is_same_repo_path(j.get("repo_path"), root):
-                    continue
-                j["status"] = "running"
-                j["started_at"] = now_iso()
-                j["conversation_id"] = "claude-claiming"
-                j["summary"] = "Waiting for you to send the audit request in the Claude Code chat…"
-                claimed.append(dict(j, prompt=build_watchdog_prompt(j)))
-            if claimed:
-                save_state(state)
-        for c in claimed:
-            try:
-                rp = Path(c["repo_path"])
-                (rp / ".antigravity" / "tasks").mkdir(parents=True, exist_ok=True)
-                (rp / ".antigravity" / "audits").mkdir(parents=True, exist_ok=True)
-            except Exception:
-                pass
-        print(json.dumps({"ok": True, "ctl": str(Path(__file__).resolve()), "jobs": claimed}, indent=2))
-        return 0
-
     if args.cmd == "mark-running":
         with StateLock():
             state = load_state()
@@ -4992,18 +4665,6 @@ def main() -> int:
                 save_state(state)
         print(json.dumps({"ok": bool(job)}, indent=2))
         return 0 if job else 1
-
-    if args.cmd == "agent-done":
-        reconcile_jobs()
-        with StateLock():
-            state = load_state()
-            for j in state.get("jobs", []):
-                if j.get("conversation_id") == args.conversation_id and j.get("status") in ("running", "queued"):
-                    j["status"] = "interrupted"
-                    j["summary"] = "The audit agent stopped before finishing. Click Continue Audit to resume."
-            save_state(state)
-        print(json.dumps({"ok": True}, indent=2))
-        return 0
 
     if args.cmd == "status" or not args.cmd:
         root = resolve_git_root(args.repo) or Path(args.repo).resolve() if getattr(args, "repo", "") else None
@@ -5044,7 +4705,7 @@ def main() -> int:
         )
         return 0
 
-    if args.cmd == "queue":
+    if args.cmd in ("queue", "queue-commit"):
         root = resolve_git_root(args.repo)
         if not root:
             print(json.dumps({"ok": False, "error": f"Not a git repository: {args.repo}"}))
@@ -5185,7 +4846,7 @@ def main() -> int:
         print(json.dumps({"ok": True, "repo": str(root), "baseline_sha": youngest["sha"]}))
         return 0
 
-    if args.cmd == "next-steps":
+    if args.cmd in ("next-steps", "synthesize"):
         root = resolve_git_root(args.repo) or Path(args.repo).resolve()
         res = synthesize_next_steps(root, force=args.force)
         print(json.dumps(res, indent=2))
@@ -5215,7 +4876,7 @@ def main() -> int:
         print(json.dumps(res, indent=2))
         return 0
 
-    if args.cmd == "goal":
+    if args.cmd in ("goal", "get-goal", "set-goal"):
         repo_arg = args.repo or args.repo_pos or "."
         root = resolve_git_root(repo_arg) or Path(repo_arg).resolve()
         if not root.exists() or not root.is_dir():

@@ -181,11 +181,13 @@ function getHostMode() {
   try {
     const fromUrl = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('host') : null;
     if (fromUrl) return fromUrl;
-    if (typeof window !== 'undefined' && window.sidecar?.isStandalone) return 'claude';
   } catch {}
   return 'antigravity';
 }
 const hostMode = getHostMode();
+if (typeof window !== 'undefined') {
+  window.hostMode = hostMode;
+}
 
 const $ = (id) => {
   const el = document.getElementById(id);
@@ -1708,7 +1710,7 @@ async function sendReportToChat() {
       toast('Started new conversation with report');
     } else if (navigator?.clipboard?.writeText) {
       await navigator.clipboard.writeText(msg);
-      toast('Copied report prompt to clipboard for Claude Code!');
+      toast('Copied report prompt to clipboard!');
     } else {
       toast('No active conversation bridge available.', true);
     }
