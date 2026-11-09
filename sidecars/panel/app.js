@@ -291,6 +291,7 @@ let isRefreshingProposals = false;
 let isSynthesisCancelled = false;
 let isCancellingSynthesis = false;
 let isSyncing = false;
+let isExecutingPlan = false;
 
 const ICONS = {
   check: `<svg class="icon-svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>`,
@@ -1341,10 +1342,29 @@ function closePlanModal() {
 }
 
 async function executePlan(planId) {
+  if (isExecutingPlan) return;
   const activeRepo = getActiveRepo();
   if (!activeRepo) {
     toast('No repository detected.', true);
     return;
+  }
+
+  isExecutingPlan = true;
+  const cleanPlanId = String(planId || '').trim().replace(/^#/, '');
+  const modalBtn = $('modal-btn-execute');
+  const cardBtns = Array.from(document.querySelectorAll('button[data-action="execute-plan"]')).filter(
+    (b) => b.dataset.planId === planId || b.dataset.planId === cleanPlanId || b.dataset.planId === `#${cleanPlanId}`
+  );
+  const disabledBtns = [];
+  if (modalBtn && !modalBtn.disabled) {
+    modalBtn.disabled = true;
+    disabledBtns.push(modalBtn);
+  }
+  for (const b of cardBtns) {
+    if (!b.disabled) {
+      b.disabled = true;
+      disabledBtns.push(b);
+    }
   }
 
   try {
@@ -1352,6 +1372,13 @@ async function executePlan(planId) {
     const res = await callApi('/api/next-steps/execute', {
       body: { repo: activeRepo.repoPath, planId },
     });
+
+    if (res?.alreadyRunning) {
+      toast(res.error || 'Plan is already executing in an active agent conversation.', true);
+      closePlanModal();
+      await syncGit({ silent: true });
+      return;
+    }
 
     if (!res.ok) {
       toast(res.error || 'Execution dispatch failed', true);
@@ -1362,17 +1389,27 @@ async function executePlan(planId) {
 
     let conversationId = res.conversationId || null;
 
-    if (res.dispatched) {
+    if (res.dispatched || (res.conversationId && res.conversationId !== 'foreground-agent')) {
       toast(`Agent conversation started for "${stripEmojis(res.title)}"`);
     } else if (sidecar?.agent?.startConversation && res.prompt) {
       const convRes = await sidecar.agent.startConversation(res.prompt);
-      conversationId = convRes?.conversationId || convRes?.response?.conversationId || conversationId;
-      if (conversationId) {
+      const spawnedConvId =
+        convRes?.conversationId ||
+        convRes?.response?.conversationId ||
+        convRes?.response?.newConversation?.conversationId ||
+        null;
+      if (spawnedConvId) {
+        conversationId = spawnedConvId;
         await callApi('/api/next-steps/mark-running', {
-          body: { repo: activeRepo.repoPath, planId, conversationId },
+          body: { repo: activeRepo.repoPath, planId, conversationId: spawnedConvId },
         });
+        toast(`Launched agent conversation for "${stripEmojis(res.title)}"`);
+      } else if (navigator?.clipboard?.writeText && res.prompt) {
+        await navigator.clipboard.writeText(res.prompt);
+        toast(`Copied execution prompt for "${stripEmojis(res.title)}" to clipboard`);
+      } else {
+        toast(`Ready to execute "${stripEmojis(res.title)}"`);
       }
-      toast(`Launched agent conversation for "${stripEmojis(res.title)}"`);
     } else if (navigator?.clipboard?.writeText && res.prompt) {
       await navigator.clipboard.writeText(res.prompt);
       toast(`Copied execution prompt for "${stripEmojis(res.title)}" to clipboard`);
@@ -1383,6 +1420,11 @@ async function executePlan(planId) {
     await syncGit({ silent: true });
   } catch (err) {
     toast(`Execution error: ${err.message}`, true);
+  } finally {
+    for (const b of disabledBtns) {
+      b.disabled = false;
+    }
+    isExecutingPlan = false;
   }
 }
 
@@ -1554,7 +1596,11 @@ async function runAudit() {
     const prompt = res.job.prompt;
     if (sidecar?.agent?.startConversation && prompt) {
       const convRes = await sidecar.agent.startConversation(prompt);
-      const conversationId = convRes?.conversationId || convRes?.response?.conversationId || null;
+      const conversationId =
+        convRes?.conversationId ||
+        convRes?.response?.conversationId ||
+        convRes?.response?.newConversation?.conversationId ||
+        null;
       await callApi('/api/mark-running', { body: { jobId: res.job.id, conversationId } });
       toast(`Launched Watchdog for ${res.job.repo_name} @ ${res.job.short_sha}`);
     } else {

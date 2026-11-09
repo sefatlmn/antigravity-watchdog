@@ -2050,6 +2050,45 @@ flowchart TD
         "intelligence": cache_data["intelligence"],
     }
 
+def extract_conversation_id(data: Any) -> Optional[str]:
+    """
+    Robustly extract conversationId from various response structures returned by agentapi or sidecar:
+    - {"conversationId": "..."}
+    - {"response": {"conversationId": "..."}}
+    - {"response": {"newConversation": {"conversationId": "..."}}}
+    Safe against null values (e.g. {"response": None}).
+    """
+    if not isinstance(data, dict):
+        return None
+    if data.get("conversationId"):
+        return str(data["conversationId"])
+    resp = data.get("response")
+    if isinstance(resp, dict):
+        if resp.get("conversationId"):
+            return str(resp["conversationId"])
+        new_conv = resp.get("newConversation")
+        if isinstance(new_conv, dict) and new_conv.get("conversationId"):
+            return str(new_conv["conversationId"])
+    return None
+
+
+def is_plan_id_match(id_a: str, id_b: str) -> bool:
+    """Check if two plan identifiers match, accounting for '#' prefix, 'prop-' prefix, or numeric index."""
+    a = str(id_a or "").strip().lstrip("#")
+    b = str(id_b or "").strip().lstrip("#")
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a == f"prop-{b}" or b == f"prop-{a}":
+        return True
+    if a.startswith(f"prop-{b}-") or b.startswith(f"prop-{a}-"):
+        return True
+    if a.startswith(f"{b}-") or b.startswith(f"{a}-"):
+        return True
+    if a.endswith(f"-{b}") or b.endswith(f"-{a}"):
+        return True
+    return False
 
 
 def is_conversation_active(conv_id: str, max_age_seconds: int = 900) -> bool:
@@ -2530,11 +2569,7 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
                 dispatched = True
                 try:
                     data = json.loads(proc.stdout)
-                    conv_id = (
-                        data.get("conversationId")
-                        or data.get("response", {}).get("conversationId")
-                        or data.get("response", {}).get("newConversation", {}).get("conversationId")
-                    )
+                    conv_id = extract_conversation_id(data)
                 except Exception:
                     pass
         except Exception:
@@ -2745,7 +2780,7 @@ Execute this plan step by step, adhering to the plan specifications, writing nec
             )
             if proc.returncode == 0:
                 data = json.loads(proc.stdout)
-                conv_id = data.get("conversationId") or data.get("response", {}).get("conversationId")
+                conv_id = extract_conversation_id(data)
                 if conv_id:
                     return conv_id
         except Exception:
@@ -2781,7 +2816,7 @@ def load_execution_state(repo_root: Path) -> Dict[str, Any]:
 
 def save_execution_state(repo_root: Path, state: Dict[str, Any]) -> None:
     f = get_execution_state_file(repo_root)
-    tmp = f.with_suffix(".tmp")
+    tmp = f.with_suffix(f".{os.getpid()}_{threading.get_ident()}.tmp")
     tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
     tmp.replace(f)
 
@@ -2789,6 +2824,10 @@ def save_execution_state(repo_root: Path, state: Dict[str, Any]) -> None:
 def find_conversation_for_plan(plan_id: str, plan_title: str) -> Optional[str]:
     if not BRAIN_DIR.exists():
         return None
+    clean_id = str(plan_id or "").strip().lstrip("#")
+    id_patterns = [f"prop-{clean_id}", f"plan-{clean_id}", f"plan {clean_id}", f"Plan {clean_id}"]
+    if len(clean_id) >= 4:
+        id_patterns.append(clean_id)
     try:
         dirs = sorted([d for d in BRAIN_DIR.iterdir() if d.is_dir()], key=lambda d: d.stat().st_mtime, reverse=True)
         for d in dirs[:30]:
@@ -2797,9 +2836,15 @@ def find_conversation_for_plan(plan_id: str, plan_title: str) -> Optional[str]:
                 continue
             try:
                 with open(t_file, "r", encoding="utf-8", errors="ignore") as fp:
-                    header = fp.readline()
-                    if "[NEXT-STEPS-SESSION]" in header and (plan_id in header or (plan_title and plan_title in header)):
-                        return d.name
+                    for _ in range(10):
+                        line = fp.readline()
+                        if not line:
+                            break
+                        if "[NEXT-STEPS-SESSION]" in line:
+                            title_match = bool(plan_title and len(plan_title) >= 3 and plan_title.lower() in line.lower())
+                            id_match = any(pat.lower() in line.lower() for pat in id_patterns)
+                            if title_match or id_match or (plan_id and plan_id in line):
+                                return d.name
             except Exception:
                 pass
     except Exception:
@@ -2857,7 +2902,7 @@ def cancel_execution(repo_root: Path, plan_id: str) -> Dict[str, Any]:
     matched = executions.get(clean_id)
     if not matched:
         for k, v in executions.items():
-            if k == clean_id or k.endswith(f"-{clean_id}") or k.startswith(f"prop-{clean_id}"):
+            if k == clean_id or is_plan_id_match(k, clean_id):
                 matched = v
                 clean_id = k
                 break
@@ -3023,20 +3068,42 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = Tru
         plan_content = plan_path.read_text(encoding="utf-8")
         title = matched["title"]
 
-        conv_id = spawn_plan_agent(repo_root, title, plan_content) if spawn_agent else "foreground-agent"
-        prompt_text = f"[NEXT-STEPS-SESSION]\nImplement the approved plan '{title}':\n\n{plan_content}"
+        with StateLock():
+            # Active execution mutex: check if plan is already running with an active conversation
+            exec_state = load_execution_state(repo_root)
+            executions = exec_state.get("executions", {})
+            existing = executions.get(clean_id)
+            if not existing:
+                for k, v in executions.items():
+                    if k == clean_id or is_plan_id_match(k, clean_id):
+                        existing = v
+                        break
+            if isinstance(existing, dict) and existing.get("status") == "running":
+                existing_conv = existing.get("conversationId") or find_conversation_for_plan(clean_id, title)
+                if existing_conv and is_conversation_active(existing_conv):
+                    return {
+                        "ok": False,
+                        "alreadyRunning": True,
+                        "conversationId": existing_conv,
+                        "error": "Plan is already executing in an active agent conversation.",
+                    }
 
-        exec_record = mark_execution_running(repo_root, clean_id, conv_id, title) if spawn_agent else None
+            conv_id = spawn_plan_agent(repo_root, title, plan_content) if spawn_agent else "foreground-agent"
+            prompt_text = f"[NEXT-STEPS-SESSION]\nImplement the approved plan '{title}':\n\n{plan_content}"
 
-        return {
-            "ok": True,
-            "planId": clean_id,
-            "title": title,
-            "dispatched": bool(conv_id and conv_id != "foreground-agent"),
-            "conversationId": conv_id,
-            "prompt": prompt_text,
-            "execution": exec_record,
-        }
+            exec_record = mark_execution_running(repo_root, clean_id, conv_id, title) if spawn_agent else None
+            if exec_record and exec_record.get("conversationId") and not conv_id:
+                conv_id = exec_record["conversationId"]
+
+            return {
+                "ok": True,
+                "planId": clean_id,
+                "title": title,
+                "dispatched": bool(conv_id and conv_id != "foreground-agent"),
+                "conversationId": conv_id,
+                "prompt": prompt_text,
+                "execution": exec_record,
+            }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -3636,11 +3703,7 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
                 conv_id = None
                 try:
                     data = json.loads(proc.stdout)
-                    conv_id = (
-                        data.get("conversationId")
-                        or data.get("response", {}).get("conversationId")
-                        or data.get("response", {}).get("newConversation", {}).get("conversationId")
-                    )
+                    conv_id = extract_conversation_id(data)
                 except Exception:
                     pass
                 if conv_id:

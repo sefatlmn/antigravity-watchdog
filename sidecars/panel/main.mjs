@@ -1704,7 +1704,7 @@ app.api('/api/next-steps/plan', (data) => {
   }
 });
 
-// POST /api/next-steps/execute { repo, planId, host? }
+// POST /api/next-steps/execute { repo, planId, host?, noSpawn? }
 app.api('/api/next-steps/execute', (data) => {
   const repo = String(data?.repo || '').trim();
   const planId = String(data?.planId || '').trim();
@@ -1715,7 +1715,11 @@ app.api('/api/next-steps/execute', (data) => {
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['execute-plan', '--repo', repo, '--plan-id', planId], host);
+  const args = ['execute-plan', '--repo', repo, '--plan-id', planId];
+  if (data?.noSpawn) {
+    args.push('--no-spawn');
+  }
+  return runPythonCtl(args, host);
 });
 
 // POST /api/next-steps/cancel-execution { repo, planId }

@@ -1578,6 +1578,378 @@ print("OK")
     failed++
   }
 
+  try {
+    // Single-agent execution, JSON key parsing with newConversation, active execution mutex, and debounce guard
+    const { execFileSync } = await import('node:child_process')
+    const ctlScript = path.join(rootDir, 'scripts/watchdog_ctl.py')
+
+    // 1. Python Controller tests: newConversation parsing, active execution mutex, and recovered conversationId
+    const pyOutput = execFileSync('python3', [
+      '-c',
+      `
+import sys, json, tempfile, shutil
+from pathlib import Path
+sys.path.insert(0, ${JSON.stringify(rootDir)})
+import scripts.watchdog_ctl as ctl
+
+# Test JSON key parsing with newConversation
+data_nested = {"response": {"newConversation": {"conversationId": "nested-conv-123"}}}
+resp = data_nested.get("response") if isinstance(data_nested.get("response"), dict) else {}
+new_conv = resp.get("newConversation") if isinstance(resp.get("newConversation"), dict) else {}
+conv_id = (
+    data_nested.get("conversationId")
+    or resp.get("conversationId")
+    or new_conv.get("conversationId")
+)
+assert conv_id == "nested-conv-123", f"Expected nested-conv-123, got {conv_id}"
+
+# Test null-safety
+data_null_resp = {"response": None}
+resp_null = data_null_resp.get("response") if isinstance(data_null_resp.get("response"), dict) else {}
+new_conv_null = resp_null.get("newConversation") if isinstance(resp_null.get("newConversation"), dict) else {}
+conv_null_safe = (
+    data_null_resp.get("conversationId")
+    or resp_null.get("conversationId")
+    or new_conv_null.get("conversationId")
+)
+assert conv_null_safe is None
+
+# Test extract_conversation_id helper
+assert ctl.extract_conversation_id(data_nested) == "nested-conv-123"
+assert ctl.extract_conversation_id(data_null_resp) is None
+assert ctl.extract_conversation_id({"response": {"newConversation": None}}) is None
+assert ctl.extract_conversation_id({"conversationId": "direct-id"}) == "direct-id"
+assert ctl.extract_conversation_id({"response": {"conversationId": "resp-id"}}) == "resp-id"
+assert ctl.extract_conversation_id(None) is None
+assert ctl.extract_conversation_id("invalid") is None
+
+# Test is_plan_id_match helper
+assert ctl.is_plan_id_match("1", "prop-1") is True
+assert ctl.is_plan_id_match("#1", "prop-1") is True
+assert ctl.is_plan_id_match("prop-1-slug", "1") is True
+assert ctl.is_plan_id_match("prop-1-slug", "prop-1") is True
+assert ctl.is_plan_id_match("prop-2", "prop-1") is False
+
+# Test active execution mutex in execute_plan_in_agent
+temp_dir = Path(tempfile.mkdtemp())
+try:
+    ns_dir = temp_dir / ".antigravity" / "next_steps"
+    ns_dir.mkdir(parents=True)
+    plan_file = ns_dir / "plan-1-test.md"
+    plan_file.write_text("# Plan 1\\nDetails", encoding="utf-8")
+    (ns_dir / "proposals.json").write_text(json.dumps({
+        "proposals": [{
+            "id": "prop-1",
+            "title": "Test Plan 1",
+            "planPath": str(plan_file),
+            "planFile": "plan-1-test.md"
+        }]
+    }), encoding="utf-8")
+
+    # Set execution state as running with active conversation
+    (ns_dir / "execution_state.json").write_text(json.dumps({
+        "executions": {
+            "prop-1": {
+                "planId": "prop-1",
+                "title": "Test Plan 1",
+                "status": "running",
+                "conversationId": "foreground-agent"
+            }
+        }
+    }), encoding="utf-8")
+
+    # Mutex rejection test
+    res = ctl.execute_plan_in_agent(temp_dir, "prop-1", spawn_agent=False)
+    assert res.get("ok") is False, f"Expected ok: False, got {res}"
+    assert res.get("alreadyRunning") is True, f"Expected alreadyRunning: True, got {res}"
+    assert res.get("conversationId") == "foreground-agent"
+    assert "already executing in an active agent conversation" in res.get("error", "")
+
+    # When execution status is completed or interrupted -> mutex does not reject
+    (ns_dir / "execution_state.json").write_text(json.dumps({
+        "executions": {
+            "prop-1": {
+                "planId": "prop-1",
+                "title": "Test Plan 1",
+                "status": "completed",
+                "conversationId": "foreground-agent"
+            }
+        }
+    }), encoding="utf-8")
+    res_completed = ctl.execute_plan_in_agent(temp_dir, "prop-1", spawn_agent=False)
+    assert res_completed.get("ok") is True, f"Expected ok: True, got {res_completed}"
+    assert not res_completed.get("alreadyRunning")
+
+    # Test recovered conversationId updates conv_id and dispatched: True
+    plan_file_rec = ns_dir / "plan-rec-test.md"
+    plan_file_rec.write_text("# Plan Rec\\nDetails", encoding="utf-8")
+    (ns_dir / "proposals.json").write_text(json.dumps({
+        "proposals": [{
+            "id": "prop-rec",
+            "title": "Test Plan Rec",
+            "planPath": str(plan_file_rec)
+        }]
+    }), encoding="utf-8")
+    (ns_dir / "execution_state.json").write_text(json.dumps({
+        "executions": {
+            "prop-rec": {
+                "planId": "prop-rec",
+                "title": "Test Plan Rec",
+                "conversationId": "disk-recovered-conv-888",
+                "status": "interrupted"
+            }
+        }
+    }), encoding="utf-8")
+
+    orig_spawn = ctl.spawn_plan_agent
+    ctl.spawn_plan_agent = lambda repo, title, content: None
+    res_rec = ctl.execute_plan_in_agent(temp_dir, "prop-rec", spawn_agent=True)
+    assert res_rec.get("ok") is True
+    assert res_rec.get("dispatched") is True, f"dispatched must be True when recovered, got {res_rec.get('dispatched')}"
+    assert res_rec.get("conversationId") == "disk-recovered-conv-888"
+
+    # Test multi-threaded concurrency mutex with StateLock
+    import threading, time
+    plan_file_conc = ns_dir / "plan-conc-test.md"
+    plan_file_conc.write_text("# Plan Conc\\nDetails", encoding="utf-8")
+    (ns_dir / "proposals.json").write_text(json.dumps({
+        "proposals": [{
+            "id": "prop-conc",
+            "title": "Test Plan Conc",
+            "planPath": str(plan_file_conc)
+        }]
+    }), encoding="utf-8")
+    (ns_dir / "execution_state.json").write_text(json.dumps({"executions": {}}), encoding="utf-8")
+
+    ctl.spawn_plan_agent = lambda repo, title, content: (time.sleep(0.05) or "foreground-agent")
+    conc_results = []
+    def run_worker():
+        r = ctl.execute_plan_in_agent(temp_dir, "prop-conc", spawn_agent=True)
+        conc_results.append(r)
+    th1 = threading.Thread(target=run_worker)
+    th2 = threading.Thread(target=run_worker)
+    th1.start()
+    th2.start()
+    th1.join()
+    th2.join()
+    assert len(conc_results) == 2
+    ok_count = sum(1 for r in conc_results if r.get("ok") is True)
+    mutex_count = sum(1 for r in conc_results if r.get("alreadyRunning") is True)
+    assert ok_count == 1, f"Expected exactly 1 successful execution, got {ok_count}"
+    assert mutex_count == 1, f"Expected exactly 1 mutex rejection, got {mutex_count}"
+    ctl.spawn_plan_agent = orig_spawn
+finally:
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+print("PYTHON_MUTEX_AND_PARSE_OK")
+      `,
+    ], { encoding: 'utf8' })
+    assert.ok(pyOutput.includes('PYTHON_MUTEX_AND_PARSE_OK'))
+
+    // 2. Sidecar Backend: POST /api/next-steps/execute supports data?.noSpawn
+    const mainMjsRaw = fs.readFileSync(path.join(rootDir, 'sidecars/panel/main.mjs'), 'utf8')
+    assert.ok(mainMjsRaw.includes("if (data?.noSpawn)"), 'main.mjs must check data?.noSpawn')
+    assert.ok(mainMjsRaw.includes("args.push('--no-spawn')"), "main.mjs must append '--no-spawn' to args")
+
+    // 3. Frontend Webview app.js: debounce guard, button disabling, alreadyRunning, convRes key extraction
+    const appJsRaw = fs.readFileSync(path.join(rootDir, 'sidecars/panel/app.js'), 'utf8')
+    assert.ok(appJsRaw.includes("let isExecutingPlan = false;"), 'app.js must declare isExecutingPlan')
+    assert.ok(appJsRaw.includes("if (isExecutingPlan) return;"), 'app.js executePlan must check isExecutingPlan debounce guard')
+    assert.ok(appJsRaw.includes("res?.alreadyRunning"), 'app.js executePlan must handle res.alreadyRunning')
+    assert.ok(appJsRaw.includes("Plan is already executing in an active agent conversation"), 'app.js executePlan must toast already executing message')
+    assert.ok(appJsRaw.includes("convRes?.response?.newConversation?.conversationId"), 'app.js executePlan and runAudit must extract newConversation.conversationId')
+    assert.ok(appJsRaw.includes("res.dispatched || (res.conversationId && res.conversationId !== 'foreground-agent')"), 'app.js executePlan must eliminate race condition on backend dispatch')
+
+    // 4. Runtime test of executePlan in VM sandbox:
+    // Test that when res.alreadyRunning is returned, sidecar.agent.startConversation is NOT called!
+    const vm = await import('node:vm')
+    let startConvCalled = 0
+    let toastMessages = []
+
+    const elements = new Map()
+    function mockElement(tag = 'div') {
+      return {
+        tagName: tag.toUpperCase(),
+        style: {},
+        classList: { add() {}, remove() {}, contains: () => false, toggle() {} },
+        setAttribute() {},
+        removeAttribute() {},
+        getAttribute: () => null,
+        appendChild() {},
+        addEventListener() {},
+        removeEventListener() {},
+        innerHTML: '',
+        innerText: '',
+        textContent: '',
+        value: '',
+        hidden: false,
+        disabled: false,
+        dataset: {},
+        querySelector: () => null,
+        querySelectorAll: () => [],
+      }
+    }
+
+    const modalBtn = mockElement('button')
+    modalBtn.id = 'modal-btn-execute'
+    elements.set('modal-btn-execute', modalBtn)
+    const planModal = mockElement('div')
+    planModal.id = 'plan-modal'
+    elements.set('plan-modal', planModal)
+    const toastEl = mockElement('div')
+    toastEl.id = 'toast'
+    elements.set('toast', toastEl)
+
+    let currentExecuteApiResponse = {}
+    let lastToastMessage = ''
+
+    const testSandbox = {
+      window: null,
+      document: {
+        getElementById: (id) => elements.get(id) || mockElement(),
+        querySelector: (sel) => {
+          if (sel === '#modal-btn-execute') return modalBtn
+          return null
+        },
+        querySelectorAll: () => [],
+        addEventListener() {},
+      },
+      $: (id) => elements.get(id) || mockElement(),
+      localStorage: { getItem: () => null, setItem: () => {} },
+      sessionStorage: { getItem: () => null, setItem: () => {} },
+      location: { search: '' },
+      navigator: { clipboard: { writeText: async () => {} } },
+      setTimeout,
+      clearTimeout,
+      sidecar: {
+        agent: {
+          startConversation: async () => {
+            startConvCalled++
+            return { conversationId: 'fallback-agent-123' }
+          },
+        },
+        fetch: async (url, options = {}) => {
+          if (url.includes('/api/next-steps/execute')) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => currentExecuteApiResponse,
+            }
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true }),
+          }
+        },
+      },
+      addEventListener() {},
+      removeEventListener() {},
+      getComputedStyle: () => ({ getPropertyValue: () => '#0b0f19' }),
+      matchMedia: () => ({ matches: false }),
+      URLSearchParams,
+      console: { log() {}, warn() {}, error() {} },
+    }
+    testSandbox.window = testSandbox
+
+    // Run app.js in sandbox
+    vm.createContext(testSandbox)
+    vm.runInContext(appJsRaw, testSandbox)
+
+    testSandbox.renderDashboard({
+      activeRepos: [
+        { repoPath: '/test/repo', repoName: 'test-repo' },
+      ],
+    })
+
+    // 1. Test execute plan when alreadyRunning is true
+    currentExecuteApiResponse = {
+      ok: false,
+      alreadyRunning: true,
+      conversationId: 'existing-conv-1',
+      error: 'Plan is already executing in an active agent conversation.',
+    }
+    await testSandbox.executePlan('prop-1')
+    assert.equal(startConvCalled, 0, 'startConversation must NOT be called when alreadyRunning is true')
+    assert.ok(toastEl.textContent.includes('Plan is already executing in an active agent conversation'), `Must toast already executing message, got: ${toastEl.textContent}`)
+
+    // 2. Test successful backend dispatch (res.dispatched = true)
+    toastEl.textContent = ''
+    currentExecuteApiResponse = {
+      ok: true,
+      dispatched: true,
+      conversationId: 'backend-spawned-conv-777',
+      title: 'Test Plan',
+    }
+    await testSandbox.executePlan('prop-1')
+    assert.equal(startConvCalled, 0, 'startConversation must NOT be called when backend dispatched: true')
+    assert.ok(toastEl.textContent.includes('Agent conversation started'), `Must toast Agent conversation started, got: ${toastEl.textContent}`)
+
+    // 3. Test debounce guard: in-flight call returns immediately
+    let slowResolve
+    currentExecuteApiResponse = new Promise((resolve) => { slowResolve = resolve })
+    testSandbox.sidecar.fetch = async (url) => {
+      if (url.includes('/api/next-steps/execute')) {
+        const data = await currentExecuteApiResponse
+        return { ok: true, status: 200, json: async () => data }
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }
+    const p1 = testSandbox.executePlan('prop-1')
+    // While p1 is in-flight, execute button should be disabled and second call debounced
+    assert.equal(modalBtn.disabled, true, 'modal execute button must be disabled during in-flight request')
+    const p2 = testSandbox.executePlan('prop-1')
+    slowResolve({ ok: true, dispatched: true, conversationId: 'c1', title: 'Plan 1' })
+    await Promise.all([p1, p2])
+    assert.equal(modalBtn.disabled, false, 'modal execute button must be re-enabled after completion')
+
+    // 4. Test fallback to sidecar.agent.startConversation when backend did not dispatch
+    toastEl.textContent = ''
+    startConvCalled = 0
+    let lastMarkRunningCall = null
+    testSandbox.sidecar.fetch = async (url, options = {}) => {
+      if (url.includes('/api/next-steps/execute')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            dispatched: false,
+            conversationId: 'foreground-agent',
+            title: 'Test Plan Fallback',
+            prompt: 'Execute plan prompt',
+          }),
+        }
+      }
+      if (url.includes('/api/next-steps/mark-running')) {
+        lastMarkRunningCall = options.body ? (typeof options.body === 'string' ? JSON.parse(options.body) : options.body) : null
+        return { ok: true, status: 200, json: async () => ({ ok: true }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }
+    testSandbox.sidecar.agent.startConversation = async () => {
+      startConvCalled++
+      return {
+        response: {
+          newConversation: {
+            conversationId: 'vm-fallback-new-conv-999',
+          },
+        },
+      }
+    }
+    await testSandbox.executePlan('prop-1')
+    assert.equal(startConvCalled, 1, 'startConversation must be called when backend did not dispatch')
+    assert.equal(lastMarkRunningCall?.conversationId, 'vm-fallback-new-conv-999', 'mark-running must receive extracted newConversation ID')
+    assert.ok(toastEl.textContent.includes('Launched agent conversation'), `Must toast Launched agent conversation, got: ${toastEl.textContent}`)
+
+    console.log('✓ single-agent execution, JSON key parsing with newConversation, active execution mutex, and debounce guard verified')
+    passed++
+  } catch (err) {
+    console.error('✗ single-agent execution & mutex test')
+    console.error(err)
+    failed++
+  }
+
   console.log(`\n${passed} passed, ${failed} failed`)
   process.exit(failed > 0 ? 1 : 0)
 }
