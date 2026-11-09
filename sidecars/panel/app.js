@@ -31,7 +31,7 @@ function normalizeWsUri(u) {
   try {
     s = decodeURIComponent(s);
   } catch {}
-  if (/^\/[a-zA-Z]:[\\/]/.test(s)) {
+  if (/^\/[a-zA-Z]:([\\/]|$)/.test(s)) {
     s = s.slice(1);
   }
   return s.replace(/[\\/]+$/, '').replace(/\\/g, '/');

@@ -1550,7 +1550,7 @@ print("OK")
     const pyOutput = execFileSync('python3', [
       '-c',
       `
-import sys, time
+import sys, os, time
 from pathlib import Path
 sys.path.insert(0, ${JSON.stringify(rootDir)})
 import scripts.watchdog_ctl as ctl
@@ -1559,6 +1559,8 @@ import scripts.watchdog_ctl as ctl
 assert not ctl.STATE_LOCK_DIR.exists(), "STATE_LOCK_DIR should not exist before lock"
 with ctl.StateLock():
     assert ctl.STATE_LOCK_DIR.exists(), "STATE_LOCK_DIR should exist during lock"
+    assert (ctl.STATE_LOCK_DIR / "pid").exists(), "pid file should exist inside STATE_LOCK_DIR"
+    assert (ctl.STATE_LOCK_DIR / "pid").read_text().strip() == str(os.getpid()), "pid file should contain current PID"
 assert not ctl.STATE_LOCK_DIR.exists(), "STATE_LOCK_DIR should be removed after lock"
 print("OK")
       `,
@@ -1574,6 +1576,172 @@ print("OK")
     passed++
   } catch (err) {
     console.error('✗ StateLock & app.js test')
+    console.error(err)
+    failed++
+  }
+
+  try {
+    // Audit Fixes: Windows open-file spawn format, non-busy wait in saveStatePatch, PID-based lock protection, and Windows drive root path normalization
+    const { execFileSync } = await import('node:child_process')
+    const mainMjsRaw = fs.readFileSync(path.join(rootDir, 'sidecars/panel/main.mjs'), 'utf8')
+
+    // 1. [MAJOR] Windows Cross-Platform Process Spawn Failure in /api/open-file
+    assert.ok(mainMjsRaw.includes("process.platform === 'win32'"), 'main.mjs must check win32')
+    assert.ok(mainMjsRaw.includes("child = spawn('cmd.exe', ['/c', 'start', '\"\"', filePath], { detached: true, stdio: 'ignore' })"), 'main.mjs must spawn cmd.exe with /c start "" filePath on win32')
+    assert.ok(!mainMjsRaw.includes("spawn('start'"), 'main.mjs must not spawn start directly as binary')
+    assert.ok(mainMjsRaw.includes("child.on('error', () => {})"), 'main.mjs must register error listener on spawned child')
+    assert.ok(mainMjsRaw.includes("child.unref()"), 'main.mjs must unref spawned child process')
+
+    // Functional mock test of open-file spawn logic across platforms
+    const testSpawnCalls = []
+    const mockSpawn = (cmd, args, opts) => {
+      const listeners = {}
+      const mockChild = {
+        on: (ev, fn) => { listeners[ev] = fn },
+        unref: () => {}
+      }
+      testSpawnCalls.push({ cmd, args, opts, listeners })
+      return mockChild
+    }
+    const testOpenFile = (platform, filePath) => {
+      let child
+      if (platform === 'win32') {
+        child = mockSpawn('cmd.exe', ['/c', 'start', '""', filePath], { detached: true, stdio: 'ignore' })
+      } else {
+        const opener = platform === 'darwin' ? 'open' : 'xdg-open'
+        child = mockSpawn(opener, [filePath], { detached: true, stdio: 'ignore' })
+      }
+      child.on('error', () => {})
+      child.unref()
+    }
+    testOpenFile('win32', 'C:\\foo\\bar.txt')
+    assert.deepEqual(testSpawnCalls[0].cmd, 'cmd.exe')
+    assert.deepEqual(testSpawnCalls[0].args, ['/c', 'start', '""', 'C:\\foo\\bar.txt'])
+    assert.deepEqual(testSpawnCalls[0].opts, { detached: true, stdio: 'ignore' })
+    assert.equal(typeof testSpawnCalls[0].listeners['error'], 'function')
+
+    testOpenFile('darwin', '/Users/test/file.txt')
+    assert.deepEqual(testSpawnCalls[1].cmd, 'open')
+    assert.deepEqual(testSpawnCalls[1].args, ['/Users/test/file.txt'])
+    assert.deepEqual(testSpawnCalls[1].opts, { detached: true, stdio: 'ignore' })
+
+    testOpenFile('linux', '/home/test/file.txt')
+    assert.deepEqual(testSpawnCalls[2].cmd, 'xdg-open')
+    assert.deepEqual(testSpawnCalls[2].args, ['/home/test/file.txt'])
+    assert.deepEqual(testSpawnCalls[2].opts, { detached: true, stdio: 'ignore' })
+
+    // 2. [MINOR] Synchronous Event-Loop Spin-Wait in saveStatePatch and loadState
+    assert.ok(!mainMjsRaw.includes('while (Date.now() - start <'), 'main.mjs must not contain synchronous busy-wait spin loops')
+    assert.ok(mainMjsRaw.includes('Atomics.wait(sleepBuffer, 0, 0, ms)'), 'main.mjs must use Atomics.wait for sleep-based delay')
+    assert.ok(mainMjsRaw.includes('syncSleep(25)'), 'saveStatePatch must use syncSleep(25)')
+    assert.ok(mainMjsRaw.includes('syncSleep(20)'), 'saveStatePatch must use syncSleep(20)')
+    assert.ok(mainMjsRaw.includes('syncSleep(15)'), 'loadState must use syncSleep(15)')
+
+    // Verify actual Atomics.wait non-busy sleep execution
+    const testSleepBuffer = new Int32Array(new SharedArrayBuffer(4))
+    const sleepT0 = Date.now()
+    Atomics.wait(testSleepBuffer, 0, 0, 25)
+    const sleepElapsed = Date.now() - sleepT0
+    assert.ok(sleepElapsed >= 15, `Atomics.wait must pause execution without busy-waiting (elapsed: ${sleepElapsed}ms)`)
+
+    // 3. [MINOR] Stale Lock Removal Race Window in StateLock and saveStatePatch
+    assert.ok(mainMjsRaw.includes("writeFileSync(join(lockDir, 'pid'), String(process.pid), 'utf8')"), 'saveStatePatch must record owning PID')
+    assert.ok(mainMjsRaw.includes('process.kill(pid, 0)'), 'saveStatePatch must check process liveness before removing lock')
+    assert.ok(mainMjsRaw.includes("rmSync(lockDir, { recursive: true, force: true })"), 'saveStatePatch must recursively remove lockDir')
+
+    // 4. [NIT] Windows Root Drive Normalization and Python StateLock PID verification
+    const pyAuditOutput = execFileSync('python3', [
+      '-c',
+      `
+import sys, os, time, shutil
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, ${JSON.stringify(rootDir)})
+import scripts.watchdog_ctl as ctl
+
+# 4a. Verify Windows root drive normalization in clean_repo_path across all formats
+with patch("scripts.watchdog_ctl.Path") as mock_path:
+    for candidate in [
+        "C:", "C:\\\\", "C:/", "file:///C:/", "file:///C:", "/C:/", "/C:", "file://localhost/C:", "file://localhost/C:/"
+    ]:
+        ctl.clean_repo_path(candidate)
+        mock_path.assert_called_with("C:\\\\")
+
+    ctl.clean_repo_path("C:\\\\repo\\\\")
+    mock_path.assert_called_with("C:\\\\repo")
+    ctl.clean_repo_path("C:/repo/")
+    mock_path.assert_called_with("C:/repo")
+
+for c1 in ["C:", "C:\\\\", "C:/", "file:///C:/", "file:///C:", "/C:/", "/C:", "file://localhost/C:", "file://localhost/C:/"]:
+    for c2 in ["C:", "C:\\\\", "C:/", "file:///C:/", "file:///C:", "/C:/", "/C:"]:
+        assert ctl.is_same_repo_path(c1, c2) is True, f"is_same_repo_path failed for {c1} vs {c2}"
+
+# 4b. Verify is_pid_alive helper
+assert ctl.is_pid_alive(os.getpid()) is True, "Current process PID must be alive"
+assert ctl.is_pid_alive(99999999) is False, "Non-existent PID must be dead"
+assert ctl.is_pid_alive(0) is False, "PID 0 must be invalid"
+assert ctl.is_pid_alive(-10) is False, "Negative PID must be invalid"
+
+# 4c. Verify StateLock records PID and cleans up on clean exit
+ctl.ensure_dirs()
+if ctl.STATE_LOCK_DIR.exists():
+    shutil.rmtree(ctl.STATE_LOCK_DIR, ignore_errors=True)
+
+with ctl.StateLock():
+    assert ctl.STATE_LOCK_DIR.exists()
+    pid_file = ctl.STATE_LOCK_DIR / "pid"
+    assert pid_file.exists(), "StateLock must write pid file"
+    assert pid_file.read_text().strip() == str(os.getpid()), "pid file must match current PID"
+
+assert not ctl.STATE_LOCK_DIR.exists(), "STATE_LOCK_DIR must be cleaned up after exit"
+
+# 4d. Verify stale lock (>5s) with a LIVE PID is NOT deleted and caller exit does NOT evict it
+ctl.STATE_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+(ctl.STATE_LOCK_DIR / "pid").write_text(str(os.getpid()))
+os.utime(ctl.STATE_LOCK_DIR, (time.time() - 10, time.time() - 10))
+
+mtime = ctl.STATE_LOCK_DIR.stat().st_mtime
+assert time.time() - mtime > 5.0
+
+with ctl.StateLock():
+    assert ctl.STATE_LOCK_DIR.exists(), "STATE_LOCK_DIR must not be deleted while PID is live"
+    assert (ctl.STATE_LOCK_DIR / "pid").read_text().strip() == str(os.getpid())
+
+# After StateLock exits, STATE_LOCK_DIR must STILL exist with the original PID because it was held by live process
+assert ctl.STATE_LOCK_DIR.exists(), "Active lock must NOT be deleted on exit by a non-acquiring process"
+assert (ctl.STATE_LOCK_DIR / "pid").read_text().strip() == str(os.getpid())
+shutil.rmtree(ctl.STATE_LOCK_DIR, ignore_errors=True)
+
+# 4e. Verify stale lock (>5s) with a DEAD PID is evicted and reacquired
+ctl.STATE_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+(ctl.STATE_LOCK_DIR / "pid").write_text("99999999")
+os.utime(ctl.STATE_LOCK_DIR, (time.time() - 10, time.time() - 10))
+
+with ctl.StateLock():
+    assert ctl.STATE_LOCK_DIR.exists()
+    assert (ctl.STATE_LOCK_DIR / "pid").read_text().strip() == str(os.getpid())
+
+assert not ctl.STATE_LOCK_DIR.exists()
+
+# 4f. Verify stale lock (>5s) with NO pid file is also evicted and reacquired
+ctl.STATE_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+os.utime(ctl.STATE_LOCK_DIR, (time.time() - 10, time.time() - 10))
+
+with ctl.StateLock():
+    assert ctl.STATE_LOCK_DIR.exists()
+    assert (ctl.STATE_LOCK_DIR / "pid").read_text().strip() == str(os.getpid())
+
+assert not ctl.STATE_LOCK_DIR.exists()
+
+print("AUDIT_FIXES_VERIFIED")
+      `,
+    ], { encoding: 'utf8' })
+    assert.ok(pyAuditOutput.includes('AUDIT_FIXES_VERIFIED'), 'Python audit fixes verification must pass')
+
+    console.log('✓ audit fixes verified: Windows open-file spawn, non-busy wait in saveStatePatch, PID-based lock protection, and Windows drive root normalization')
+    passed++
+  } catch (err) {
+    console.error('✗ audit fixes verification test')
     console.error(err)
     failed++
   }

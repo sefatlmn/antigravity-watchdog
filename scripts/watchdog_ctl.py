@@ -9,6 +9,7 @@ fix-branch application, and cleanup for the global Antigravity Watchdog plugin.
 
 import argparse
 import datetime
+import errno
 import hashlib
 import json
 import os
@@ -119,10 +120,37 @@ def default_state() -> Dict[str, Any]:
     }
 
 
+def is_pid_alive(pid: int) -> bool:
+    """Check if a process with the given PID is alive across platforms."""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            SYNCHRONIZE = 0x00100000
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = ctypes.windll.kernel32.OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid
+            )
+            if not handle:
+                return ctypes.GetLastError() == 5  # ERROR_ACCESS_DENIED means process exists
+            alive = (ctypes.windll.kernel32.WaitForSingleObject(handle, 0) == 0x00000102)
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return bool(alive)
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, OSError) as e:
+        return getattr(e, "errno", None) == errno.EPERM
+
+
 class StateLock:
     _depth: int = 0
     _fp: Optional[Any] = None
     _thread_lock = threading.RLock()
+    _dir_acquired: bool = False
 
     def __enter__(self) -> "StateLock":
         StateLock._thread_lock.acquire()
@@ -148,16 +176,34 @@ class StateLock:
                     fp.close()
                     raise
                 # Coordinate with sidecar panel's directory lock
+                StateLock._dir_acquired = False
                 for _ in range(40):
                     try:
                         STATE_LOCK_DIR.mkdir(parents=True, exist_ok=False)
+                        StateLock._dir_acquired = True
+                        try:
+                            (STATE_LOCK_DIR / "pid").write_text(str(os.getpid()), encoding="utf-8")
+                        except Exception:
+                            pass
                         break
                     except FileExistsError:
                         try:
                             mtime = STATE_LOCK_DIR.stat().st_mtime
                             if time.time() - mtime > 5.0:
-                                shutil.rmtree(STATE_LOCK_DIR, ignore_errors=True)
-                                continue
+                                pid_file = STATE_LOCK_DIR / "pid"
+                                is_alive = False
+                                if pid_file.exists():
+                                    try:
+                                        pid_str = pid_file.read_text(encoding="utf-8").strip()
+                                        if pid_str.isdigit():
+                                            pid = int(pid_str)
+                                            if pid > 0:
+                                                is_alive = is_pid_alive(pid)
+                                    except Exception:
+                                        pass
+                                if not is_alive:
+                                    shutil.rmtree(STATE_LOCK_DIR, ignore_errors=True)
+                                    continue
                         except Exception:
                             pass
                         time.sleep(0.025)
@@ -173,10 +219,12 @@ class StateLock:
         try:
             StateLock._depth = max(0, StateLock._depth - 1)
             if StateLock._depth == 0:
-                try:
-                    shutil.rmtree(STATE_LOCK_DIR, ignore_errors=True)
-                except Exception:
-                    pass
+                if StateLock._dir_acquired:
+                    try:
+                        shutil.rmtree(STATE_LOCK_DIR, ignore_errors=True)
+                    except Exception:
+                        pass
+                    StateLock._dir_acquired = False
                 if StateLock._fp is not None:
                     try:
                         if fcntl is not None:
@@ -398,9 +446,14 @@ def clean_repo_path(path_str: Any) -> Optional[Path]:
             s = urllib.parse.unquote(s)
         except Exception:
             pass
-    if re.match(r"^/[a-zA-Z]:[\\/]", s):
+    if re.match(r"^/[a-zA-Z]:([\\/]|$)", s):
         s = s[1:]
-    s = s.rstrip("/\\")
+    if re.match(r"^[a-zA-Z]:[/\\]*$", s):
+        s = s[:2] + "\\"
+    else:
+        s = s.rstrip("/\\")
+        if re.match(r"^[a-zA-Z]:$", s):
+            s = s + "\\"
     if not s:
         return None
     try:
@@ -479,8 +532,24 @@ def is_same_repo_path(p1: Any, p2: Any) -> bool:
     c2 = clean_repo_path(p2)
     if c1 and c2 and c1 == c2:
         return True
-    s1 = str(p1).strip().replace("\\", "/").rstrip("/")
-    s2 = str(p2).strip().replace("\\", "/").rstrip("/")
+    s1 = str(p1).strip()
+    s2 = str(p2).strip()
+    if re.match(r"^file://", s1, re.I):
+        s1 = re.sub(r"^file://(localhost)?", "", s1, flags=re.I)
+    if re.match(r"^file://", s2, re.I):
+        s2 = re.sub(r"^file://(localhost)?", "", s2, flags=re.I)
+    if re.match(r"^/[a-zA-Z]:([\\/]|$)", s1):
+        s1 = s1[1:]
+    if re.match(r"^/[a-zA-Z]:([\\/]|$)", s2):
+        s2 = s2[1:]
+    if re.match(r"^[a-zA-Z]:[/\\]*$", s1):
+        s1 = s1[:2] + "/"
+    else:
+        s1 = s1.replace("\\", "/").rstrip("/")
+    if re.match(r"^[a-zA-Z]:[/\\]*$", s2):
+        s2 = s2[:2] + "/"
+    else:
+        s2 = s2.replace("\\", "/").rstrip("/")
     if s1 == s2 or s1.lower() == s2.lower():
         return True
     try:

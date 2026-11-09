@@ -1,8 +1,16 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+function syncSleep(ms) {
+  if (!ms || ms <= 0) return;
+  try {
+    Atomics.wait(sleepBuffer, 0, 0, ms);
+  } catch {}
+}
 // Antigravity launches sidecars with ANTIGRAVITY_SIDECAR_WEB_PORT and provides `sidecar_sdk`;
 // anywhere else (a plain browser) the bundled stand-in serves the same routes.
 const isStandaloneMode = !process.env.ANTIGRAVITY_SIDECAR_WEB_PORT;
@@ -28,20 +36,23 @@ function normalizeFsPath(uriOrPath) {
       if (!s.includes('#') || s.includes('%23')) {
         s = fileURLToPath(s);
       } else {
-        s = s.replace(/^file:\/\/(localhost)?/, '');
+        s = s.replace(/^file:\/\/(localhost)?/i, '');
         try { s = decodeURIComponent(s); } catch {}
       }
     } catch {
-      s = s.replace(/^file:\/\/(localhost)?/, '');
+      s = s.replace(/^file:\/\/(localhost)?/i, '');
       try { s = decodeURIComponent(s); } catch {}
     }
   } else if (/%[0-9a-fA-F]{2}/.test(s)) {
     try { s = decodeURIComponent(s); } catch {}
   }
-  if (/^\/[a-zA-Z]:[\\/]/.test(s)) {
+  if (/^\/[a-zA-Z]:([\\/]|$)/.test(s)) {
     s = s.slice(1);
   }
-  return s.replace(/\/+$/, '');
+  if (/^[a-zA-Z]:[/\\]*$/.test(s)) {
+    return s.slice(0, 2) + '\\';
+  }
+  return s.replace(/[/\\]+$/, '');
 }
 
 function extractJson(text) {
@@ -352,8 +363,7 @@ function loadState(skipReconcile = false) {
         break;
       }
     } catch {}
-    const start = Date.now();
-    while (Date.now() - start < 15) {}
+    syncSleep(15);
   }
   if (!state || typeof state !== 'object') {
     state = {
@@ -635,17 +645,37 @@ function saveStatePatch(patch) {
     try {
       mkdirSync(lockDir);
       acquired = true;
+      try {
+        writeFileSync(join(lockDir, 'pid'), String(process.pid), 'utf8');
+      } catch {}
       break;
     } catch {
       try {
         const stats = statSync(lockDir);
         if (Date.now() - stats.mtimeMs > 5000) {
-          rmdirSync(lockDir);
-          continue;
+          const pidFile = join(lockDir, 'pid');
+          let isAlive = false;
+          try {
+            if (existsSync(pidFile)) {
+              const pidStr = readFileSync(pidFile, 'utf8').trim();
+              const pid = parseInt(pidStr, 10);
+              if (Number.isInteger(pid) && pid > 0) {
+                try {
+                  process.kill(pid, 0);
+                  isAlive = true;
+                } catch (err) {
+                  isAlive = err?.code === 'EPERM';
+                }
+              }
+            }
+          } catch {}
+          if (!isAlive) {
+            try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
+            continue;
+          }
         }
       } catch {}
-      const start = Date.now();
-      while (Date.now() - start < 25) {}
+      syncSleep(25);
     }
   }
 
@@ -656,8 +686,7 @@ function saveStatePatch(patch) {
         current = loadState(true);
         if (current && typeof current === 'object' && Object.keys(current).length > 0) break;
       } catch {}
-      const start = Date.now();
-      while (Date.now() - start < 20) {}
+      syncSleep(20);
     }
     const next = { ...current, ...patch };
     const tmpFile = `${STATE_FILE}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
@@ -669,7 +698,7 @@ function saveStatePatch(patch) {
     return patch;
   } finally {
     if (acquired) {
-      try { rmdirSync(lockDir); } catch {}
+      try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
     }
   }
 }
@@ -1755,16 +1784,25 @@ app.api('/api/next-steps/mark-running', (data) => {
 app.api('/api/open-file', (data) => {
   const uri = String(data?.uri || data?.path || '').trim();
   if (!uri) return { ok: false, error: 'No URI provided' };
-  let filePath = uri.replace(/^file:\/\//i, '').replace(/#.*$/, '');
+  let filePath = uri.replace(/^file:\/\/(localhost)?/i, '').replace(/#.*$/, '');
   try {
     filePath = decodeURIComponent(filePath);
   } catch {}
+  if (/^\/[a-zA-Z]:([\\/]|$)/.test(filePath)) {
+    filePath = filePath.slice(1);
+  }
   if (!existsSync(filePath)) {
     return { ok: false, error: `File not found: ${filePath}` };
   }
   try {
-    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-    const child = spawn(opener, [filePath], { detached: true, stdio: 'ignore' });
+    let child;
+    if (process.platform === 'win32') {
+      child = spawn('cmd.exe', ['/c', 'start', '""', filePath], { detached: true, stdio: 'ignore' });
+    } else {
+      const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+      child = spawn(opener, [filePath], { detached: true, stdio: 'ignore' });
+    }
+    child.on('error', () => {});
     child.unref();
     return { ok: true, path: filePath };
   } catch (err) {

@@ -61,13 +61,16 @@ export function resolveRepo(repo?: string): string {
       try {
         s = decodeURIComponent(s);
       } catch {}
-      if (/^\/[a-zA-Z]:[\\/]/.test(s)) {
-        s = s.slice(1);
-      }
     } else if (s.includes("%")) {
       try {
         s = decodeURIComponent(s);
       } catch {}
+    }
+    if (/^\/[a-zA-Z]:([\\/]|$)/.test(s)) {
+      s = s.slice(1);
+    }
+    if (/^[a-zA-Z]:[/\\]*$/.test(s)) {
+      return s.slice(0, 2) + "\\";
     }
     return resolve(s);
   }
