@@ -131,18 +131,29 @@ class StateLock:
                 ensure_dirs()
                 fp = open(LOCK_FILE, "a+")
                 try:
-                    if fcntl is not None:
-                        fcntl.flock(fp.fileno(), fcntl.LOCK_EX)
-                    else:
+                    file_acquired = False
+                    for _ in range(40):
                         try:
-                            import msvcrt
-                            if fp.tell() == 0:
-                                fp.write("0")
-                                fp.flush()
-                            fp.seek(0)
-                            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
-                        except Exception:
-                            pass
+                            if fcntl is not None:
+                                fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                file_acquired = True
+                                break
+                            else:
+                                try:
+                                    import msvcrt
+                                    if fp.tell() == 0:
+                                        fp.write("0")
+                                        fp.flush()
+                                    fp.seek(0)
+                                    msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+                                    file_acquired = True
+                                    break
+                                except Exception:
+                                    pass
+                        except (BlockingIOError, OSError):
+                            time.sleep(0.025)
+                    if not file_acquired:
+                        raise TimeoutError(f"Timed out acquiring file state lock: {LOCK_FILE}")
                     StateLock._fp = fp
                 except Exception:
                     fp.close()
@@ -181,6 +192,24 @@ class StateLock:
                         time.sleep(0.025)
                     except Exception:
                         break
+                if not StateLock._dir_acquired:
+                    if StateLock._fp is not None:
+                        try:
+                            if fcntl is not None:
+                                fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
+                            else:
+                                try:
+                                    import msvcrt
+                                    StateLock._fp.seek(0)
+                                    msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_UNLCK, 1)
+                                except Exception:
+                                    pass
+                        finally:
+                            try:
+                                StateLock._fp.close()
+                            finally:
+                                StateLock._fp = None
+                    raise TimeoutError(f"Timed out acquiring directory state lock: {STATE_LOCK_DIR}")
             StateLock._depth += 1
             return self
         except Exception:
@@ -1119,65 +1148,75 @@ def deep_analyze_codebase(repo_root: Path, head_sha: str = "HEAD") -> Dict[str, 
 
     # 1. Traverse directory tree
     try:
-        for p in repo_root.rglob("*"):
-            if not p.is_file():
-                continue
-            rel_str = str(p.relative_to(repo_root))
+        for root, dirs, files in os.walk(str(repo_root)):
+            # In-place directory pruning to avoid traversing ignored subtrees like node_modules
+            dirs[:] = [
+                d for d in dirs
+                if d not in SKIP_SCAN_DIRS and not d.startswith(".") and d != "worktrees"
+            ]
+            root_path = Path(root)
+            for file_name in files:
+                p = root_path / file_name
+                try:
+                    rel_p = p.relative_to(repo_root)
+                except ValueError:
+                    continue
+                rel_str = rel_p.as_posix()
+                parts = rel_p.parts
 
-            # Skip ignored directories
-            parts = p.relative_to(repo_root).parts
-            if any(part in SKIP_SCAN_DIRS or part.startswith(".") for part in parts[:-1]):
-                continue
-            if ".antigravity" in parts or "worktrees" in parts:
-                continue
+                # Skip ignored directories
+                if any(part in SKIP_SCAN_DIRS or part.startswith(".") for part in parts[:-1]):
+                    continue
+                if ".antigravity" in parts or "worktrees" in parts:
+                    continue
 
-            ext = p.suffix.lower()
-            fname = p.name.lower()
+                ext = p.suffix.lower()
+                fname = file_name.lower()
 
-            if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".rs", ".go", ".cpp", ".c", ".h", ".html", ".css", ".scss", ".vue", ".svelte"):
-                codebase["all_source_files"].append(rel_str)
+                if ext in (".ts", ".tsx", ".js", ".jsx", ".mjs", ".py", ".rs", ".go", ".cpp", ".c", ".h", ".html", ".css", ".scss", ".vue", ".svelte"):
+                    codebase["all_source_files"].append(rel_str)
 
-                # Classify into architectural layers
-                if fname in ("index.html", "main.mjs", "app.js", "main.py", "app.py", "server.js", "server.py", "cli.py", "index.ts", "main.ts", "main.tsx", "watchdog_ctl.py"):
-                    codebase["entry_points"].append(rel_str)
-                elif ext in (".tsx", ".jsx", ".vue", ".svelte", ".html", ".css", ".scss") or "sidecars/panel" in rel_str or "ui" in parts:
-                    codebase["ui_files"].append(rel_str)
-                elif "test" in fname or "spec" in fname or "tests" in parts or "test" in parts:
-                    codebase["test_files"].append(rel_str)
-                    codebase["has_tests"] = True
-                else:
-                    codebase["logic_files"].append(rel_str)
+                    # Classify into architectural layers
+                    if fname in ("index.html", "main.mjs", "app.js", "main.py", "app.py", "server.js", "server.py", "cli.py", "index.ts", "main.ts", "main.tsx", "watchdog_ctl.py"):
+                        codebase["entry_points"].append(rel_str)
+                    elif ext in (".tsx", ".jsx", ".vue", ".svelte", ".html", ".css", ".scss") or "sidecars/panel" in rel_str or "ui" in parts:
+                        codebase["ui_files"].append(rel_str)
+                    elif "test" in fname or "spec" in fname or "tests" in parts or "test" in parts:
+                        codebase["test_files"].append(rel_str)
+                        codebase["has_tests"] = True
+                    else:
+                        codebase["logic_files"].append(rel_str)
 
-                if ext in (".ts", ".tsx"):
-                    codebase["languages"].add("TypeScript")
-                elif ext in (".js", ".jsx", ".mjs"):
-                    codebase["languages"].add("JavaScript")
-                elif ext == ".py":
-                    codebase["languages"].add("Python")
-                elif ext in (".html", ".css", ".scss"):
-                    codebase["languages"].add("Web UI")
-                elif ext == ".rs":
-                    codebase["languages"].add("Rust")
-                elif ext == ".go":
-                    codebase["languages"].add("Go")
+                    if ext in (".ts", ".tsx"):
+                        codebase["languages"].add("TypeScript")
+                    elif ext in (".js", ".jsx", ".mjs"):
+                        codebase["languages"].add("JavaScript")
+                    elif ext == ".py":
+                        codebase["languages"].add("Python")
+                    elif ext in (".html", ".css", ".scss"):
+                        codebase["languages"].add("Web UI")
+                    elif ext == ".rs":
+                        codebase["languages"].add("Rust")
+                    elif ext == ".go":
+                        codebase["languages"].add("Go")
 
-                # Scan for debt markers in source comments
-                if p.stat().st_size < 250000 and len(codebase["todos"]) < 30:
-                    try:
-                        for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
-                            stripped = line.strip()
-                            if TODO_COMMENT_RE.search(stripped) and len(stripped) < 140:
-                                codebase["todos"].append({
-                                    "file": rel_str,
-                                    "line": i,
-                                    "text": stripped,
-                                })
-                                if len(codebase["todos"]) >= 30:
-                                    break
-                    except Exception:
-                        pass
-            elif fname in ("package.json", "tsconfig.json", "pyproject.toml", "cargo.toml", "vite.config.ts", "vite.config.js", "docker-compose.yml"):
-                codebase["config_files"].append(rel_str)
+                    # Scan for debt markers in source comments
+                    if p.stat().st_size < 250000 and len(codebase["todos"]) < 30:
+                        try:
+                            for i, line in enumerate(p.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                                stripped = line.strip()
+                                if TODO_COMMENT_RE.search(stripped) and len(stripped) < 140:
+                                    codebase["todos"].append({
+                                        "file": rel_str,
+                                        "line": i,
+                                        "text": stripped,
+                                    })
+                                    if len(codebase["todos"]) >= 30:
+                                        break
+                        except Exception:
+                            pass
+                elif fname in ("package.json", "tsconfig.json", "pyproject.toml", "cargo.toml", "vite.config.ts", "vite.config.js", "docker-compose.yml"):
+                    codebase["config_files"].append(rel_str)
     except Exception:
         pass
 

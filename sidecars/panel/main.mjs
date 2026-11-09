@@ -1,8 +1,11 @@
-import { execFileSync, spawn } from 'node:child_process';
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFile, execFileSync, spawn } from 'node:child_process';
+import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
 function syncSleep(ms) {
@@ -52,6 +55,59 @@ function normalizeFsPath(uriOrPath) {
     return s.slice(0, 2) + '\\';
   }
   return s.replace(/[/\\]+$/, '');
+}
+
+function getRealPath(p) {
+  try {
+    if (typeof realpathSync.native === 'function') {
+      return realpathSync.native(p);
+    }
+    return realpathSync(p);
+  } catch {
+    return resolve(p);
+  }
+}
+
+function isPathInside(parentDir, targetPath) {
+  if (!parentDir || !targetPath) return false;
+  try {
+    const parentResolved = resolve(parentDir);
+    const targetResolved = resolve(targetPath);
+
+    if (existsSync(parentResolved) && existsSync(targetResolved)) {
+      const parentReal = getRealPath(parentResolved);
+      const targetReal = getRealPath(targetResolved);
+      const relReal = relative(parentReal, targetReal);
+      return relReal === '' || (!relReal.startsWith('..') && !isAbsolute(relReal));
+    }
+
+    const rel = relative(parentResolved, targetResolved);
+    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+  } catch {
+    return false;
+  }
+}
+
+function getActiveWorkspacePaths() {
+  const ws = new Set();
+  for (const pw of discoverActiveProjectWorkspaces()) {
+    if (pw) ws.add(resolve(pw));
+  }
+  for (const sw of activeStandaloneWorkspaces) {
+    if (sw && existsSync(sw)) ws.add(resolve(sw));
+  }
+  try {
+    const state = loadState(true);
+    if (state.active_workspace && existsSync(state.active_workspace)) {
+      ws.add(resolve(state.active_workspace));
+    }
+    if (state.repos && typeof state.repos === 'object') {
+      for (const r of Object.keys(state.repos)) {
+        if (existsSync(r)) ws.add(resolve(r));
+      }
+    }
+  } catch {}
+  return Array.from(ws);
 }
 
 function extractJson(text) {
@@ -238,7 +294,7 @@ function getGitBin() {
   return 'git';
 }
 
-function runPythonCtl(args, hostOverride = '') {
+async function runPythonCtl(args, hostOverride = '') {
   const candidates = resolvedPythonBin
     ? [resolvedPythonBin]
     : [process.env.PYTHON_BIN, '/opt/homebrew/bin/python3', '/usr/local/bin/python3', '/usr/bin/python3', 'python3', 'python'].filter(Boolean);
@@ -258,13 +314,14 @@ function runPythonCtl(args, hostOverride = '') {
   let lastErr = null;
   for (const bin of candidates) {
     try {
-      const out = execFileSync(bin, fullArgs, {
+      const { stdout } = await execFileAsync(bin, fullArgs, {
         encoding: 'utf8',
         timeout: 60000,
+        maxBuffer: 20 * 1024 * 1024,
         env: childEnv,
       });
       resolvedPythonBin = bin;
-      const parsed = extractJson(out);
+      const parsed = extractJson(stdout);
       return parsed !== null ? parsed : {};
     } catch (err) {
       if (err.code === 'ENOENT') {
@@ -281,18 +338,19 @@ function runPythonCtl(args, hostOverride = '') {
   throw lastErr || new Error('Python not found');
 }
 
-function runGit(repoPath, args) {
+async function runGit(repoPath, args) {
   try {
     const gitBin = getGitBin();
-    return execFileSync(gitBin, ['-C', repoPath, ...args], {
+    const { stdout } = await execFileAsync(gitBin, ['-C', repoPath, ...args], {
       encoding: 'utf8',
       timeout: 12000,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: 20 * 1024 * 1024,
       env: {
         ...process.env,
         PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
       },
-    }).trim();
+    });
+    return (stdout || '').trim();
   } catch {
     return '';
   }
@@ -557,7 +615,11 @@ function reconcileJobs(state) {
   }
 
   if (modified) {
-    saveStatePatch({ jobs: state.jobs });
+    try {
+      saveStatePatch({ jobs: state.jobs });
+    } catch (err) {
+      console.warn('reconcileJobs failed to persist state patch:', err.message);
+    }
   }
   return state;
 }
@@ -604,6 +666,10 @@ function saveStatePatch(patch) {
     }
   }
 
+  if (!acquired) {
+    throw new Error(`Timed out waiting for state lock: ${lockDir}`);
+  }
+
   try {
     let current = {};
     for (let r = 0; r < 5; r++) {
@@ -628,9 +694,9 @@ function saveStatePatch(patch) {
   }
 }
 
-function getRepoRecentCommits(repoPath, limit = 12) {
+async function getRepoRecentCommits(repoPath, limit = 12) {
   const fmt = '%H\x1f%h\x1f%ct\x1f%cr\x1f%an\x1f%T\x1f%s';
-  const raw = runGit(repoPath, [
+  const raw = await runGit(repoPath, [
     'log',
     '--exclude=fix/watchdog-*',
     '--branches',
@@ -677,7 +743,7 @@ function getRepoRecentCommits(repoPath, limit = 12) {
   return commits.slice(0, limit);
 }
 
-function discoverCandidateGitRoots(uriOrPath) {
+async function discoverCandidateGitRoots(uriOrPath) {
   if (!uriOrPath) return [];
   const fsPath = normalizeFsPath(uriOrPath);
   if (!fsPath || !existsSync(fsPath)) return [];
@@ -695,7 +761,7 @@ function discoverCandidateGitRoots(uriOrPath) {
   const candidates = [];
   const seen = new Set();
 
-  const directRoot = runGit(dir, ['rev-parse', '--show-toplevel']);
+  const directRoot = await runGit(dir, ['rev-parse', '--show-toplevel']);
   if (directRoot) {
     const resolved = resolve(directRoot);
     if (!resolved.includes('watchdog/worktrees') && !resolved.includes('.antigravity/worktrees')) {
@@ -742,11 +808,11 @@ const DOC_FILENAMES = new Set([
   '.prettierignore', '.eslintignore', '.npmignore', '.dockerignore', '.mailmap'
 ]);
 
-function isDocsOnlyCommit(repoPath, sha, subject = '') {
+async function isDocsOnlyCommit(repoPath, sha, subject = '') {
   const s = (subject || '').trim().toLowerCase();
   const isDocsConventionalCommit = /^docs?(\([^)]+\))?:/i.test(s);
 
-  const out = runGit(repoPath, ['show', '--pretty=', '--name-only', sha]);
+  const out = await runGit(repoPath, ['show', '--pretty=', '--name-only', sha]);
   if (!out) return false;
   const files = out.split('\n').map((str) => str.trim()).filter(Boolean);
   if (files.length === 0) return true;
@@ -761,7 +827,7 @@ function isDocsOnlyCommit(repoPath, sha, subject = '') {
     if (ext && DOC_EXTS.has(ext)) continue;
 
     if (baseName === 'package.json' && isDocsConventionalCommit) {
-      const pkgDiff = runGit(repoPath, ['diff', '-U0', `${sha}~1..${sha}`, '--', f]);
+      const pkgDiff = await runGit(repoPath, ['diff', '-U0', `${sha}~1..${sha}`, '--', f]);
       if (pkgDiff) {
         const addedRemoved = pkgDiff
           .split('\n')
@@ -777,14 +843,14 @@ function isDocsOnlyCommit(repoPath, sha, subject = '') {
   return true;
 }
 
-function inspectSingleRepo(topLevel) {
+async function inspectSingleRepo(topLevel) {
   try {
-    const isGit = runGit(topLevel, ['rev-parse', '--is-inside-work-tree']) === 'true';
+    const isGit = (await runGit(topLevel, ['rev-parse', '--is-inside-work-tree'])) === 'true';
     if (!isGit) return null;
 
-    const recentCommits = getRepoRecentCommits(topLevel, 12);
-    const branch = runGit(topLevel, ['rev-parse', '--abbrev-ref', 'HEAD']) || 'HEAD';
-    const fixBranchesRaw = runGit(topLevel, ['branch', '--list', 'fix/watchdog-*', '--format=%(refname:short)']);
+    const recentCommits = await getRepoRecentCommits(topLevel, 12);
+    const branch = (await runGit(topLevel, ['rev-parse', '--abbrev-ref', 'HEAD'])) || 'HEAD';
+    const fixBranchesRaw = await runGit(topLevel, ['branch', '--list', 'fix/watchdog-*', '--format=%(refname:short)']);
     const fixBranches = fixBranchesRaw ? fixBranchesRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [];
 
     const auditsDir = join(topLevel, '.antigravity', 'audits');
@@ -857,8 +923,7 @@ function inspectSingleRepo(topLevel) {
           let isAncestor = false;
           try {
             const gitBin = getGitBin();
-            execFileSync(gitBin, ['-C', topLevel, 'merge-base', '--is-ancestor', initSha, latestSha], {
-              stdio: 'ignore',
+            await execFileAsync(gitBin, ['-C', topLevel, 'merge-base', '--is-ancestor', initSha, latestSha], {
               timeout: 5000,
               env: {
                 ...process.env,
@@ -1003,7 +1068,7 @@ function inspectSingleRepo(topLevel) {
     }
 
     const youngest = recentCommits[0];
-    const isDocsOnly = isDocsOnlyCommit(topLevel, youngest.sha, youngest.subject);
+    const isDocsOnly = await isDocsOnlyCommit(topLevel, youngest.sha, youngest.subject);
     youngest.isDocsOnly = isDocsOnly;
 
     return {
@@ -1091,7 +1156,7 @@ function discoverActiveProjectWorkspaces() {
   return ws;
 }
 
-function collectActiveRepos(uris, state, targetRepo = '') {
+async function collectActiveRepos(uris, state, targetRepo = '') {
   const roots = [];
   const seen = new Set();
 
@@ -1108,7 +1173,7 @@ function collectActiveRepos(uris, state, targetRepo = '') {
   }
 
   for (const u of effectiveUris) {
-    for (const root of discoverCandidateGitRoots(u)) {
+    for (const root of await discoverCandidateGitRoots(u)) {
       if (!seen.has(root)) {
         seen.add(root);
         roots.push(root);
@@ -1118,7 +1183,7 @@ function collectActiveRepos(uris, state, targetRepo = '') {
 
   if (roots.length === 0 && state.repos) {
     for (const repoPath of Object.keys(state.repos)) {
-      for (const root of discoverCandidateGitRoots(repoPath)) {
+      for (const root of await discoverCandidateGitRoots(repoPath)) {
         if (!seen.has(root)) {
           seen.add(root);
           roots.push(root);
@@ -1131,7 +1196,7 @@ function collectActiveRepos(uris, state, targetRepo = '') {
   if (roots.length === 0 && Array.isArray(state.jobs)) {
     for (const j of state.jobs) {
       if (j.repo_path) {
-        for (const root of discoverCandidateGitRoots(j.repo_path)) {
+        for (const root of await discoverCandidateGitRoots(j.repo_path)) {
           if (!seen.has(root)) {
             seen.add(root);
             roots.push(root);
@@ -1150,7 +1215,7 @@ function collectActiveRepos(uris, state, targetRepo = '') {
       process.cwd(),
     ].filter(Boolean);
     for (const ec of envCandidates) {
-      for (const root of discoverCandidateGitRoots(ec)) {
+      for (const root of await discoverCandidateGitRoots(ec)) {
         if (!seen.has(root)) {
           seen.add(root);
           roots.push(root);
@@ -1159,7 +1224,8 @@ function collectActiveRepos(uris, state, targetRepo = '') {
     }
   }
 
-  let repos = roots.map((r) => inspectSingleRepo(r)).filter(Boolean);
+  const inspected = await Promise.all(roots.map((r) => inspectSingleRepo(r)));
+  let repos = inspected.filter(Boolean);
 
   // Drop empty-tree outer wrapper repos if any non-empty repo exists
   const hasNonEmpty = repos.some((r) => r.head && !r.head.isEmptyTree);
@@ -1192,7 +1258,7 @@ function collectActiveRepos(uris, state, targetRepo = '') {
 }
 
 // POST /api/dashboard { workspaceUris?, repoPath?, repo? }
-const handleDashboard = (data) => {
+const handleDashboard = async (data) => {
   try {
     const state = loadState();
     const uris = [];
@@ -1215,7 +1281,7 @@ const handleDashboard = (data) => {
         if (norm && !uris.includes(norm)) uris.push(norm);
       }
     }
-    const activeRepos = collectActiveRepos(uris, state, targetRepo);
+    const activeRepos = await collectActiveRepos(uris, state, targetRepo);
 
     return {
       ok: true,
@@ -1240,7 +1306,7 @@ app.api('/api/dashboard', handleDashboard);
 app.api('/api/dashboard', handleDashboard, 'GET');
 
 // POST /api/sync & /api/git-state & /api/git_state { repoPath?, workspaceUris?, repo? }
-const handleGitState = (data) => {
+const handleGitState = async (data) => {
   try {
     const uris = [];
     const targetRepo = data?.repoPath || data?.repo;
@@ -1269,12 +1335,12 @@ const handleGitState = (data) => {
     }
     let syncRes = {};
     try {
-      syncRes = runPythonCtl(ctlArgs);
+      syncRes = await runPythonCtl(ctlArgs);
     } catch (pythonErr) {
       console.warn('Python ctl sync warning:', pythonErr.message);
     }
     const state = loadState();
-    const activeRepos = collectActiveRepos(uris, state, targetRepo);
+    const activeRepos = await collectActiveRepos(uris, state, targetRepo);
 
     return {
       ok: true,
@@ -1323,7 +1389,7 @@ app.api('/api/settings', (data) => {
 });
 
 // POST /api/trigger { repoPath, sha, comment?, host? }
-app.api('/api/trigger', (data) => {
+app.api('/api/trigger', async (data) => {
   const repoPath = String(data?.repoPath || '').trim();
   const sha = String(data?.sha || 'YOUNGEST').trim();
   const comment = String(data?.comment || '').trim();
@@ -1344,7 +1410,7 @@ app.api('/api/trigger', (data) => {
 
   if (running) {
     if (comment) {
-      runPythonCtl(['send-comment', '--repo', repoPath, '--comment', comment, '--job-id', running.id || ''], host);
+      await runPythonCtl(['send-comment', '--repo', repoPath, '--comment', comment, '--job-id', running.id || ''], host);
       return {
         ok: true,
         alreadyRunning: true,
@@ -1366,7 +1432,7 @@ app.api('/api/trigger', (data) => {
   if (comment) {
     ctlArgs.push('--comment', comment);
   }
-  const result = runPythonCtl(ctlArgs, host);
+  const result = await runPythonCtl(ctlArgs, host);
   return result;
 });
 
@@ -1396,16 +1462,16 @@ app.api('/api/mark-running', (data) => {
 });
 
 // POST /api/dispatch { jobId?, host? }
-app.api('/api/dispatch', (data) => {
+app.api('/api/dispatch', async (data) => {
   const jobId = data?.jobId ? String(data.jobId).trim() : '';
   const host = String(data?.host || '').trim();
   const args = ['dispatch'];
   if (jobId) args.push('--job-id', jobId);
-  return runPythonCtl(args, host);
+  return await runPythonCtl(args, host);
 });
 
 // POST /api/continue-audit { jobId?, repoPath?, sha?, host? }
-app.api('/api/continue-audit', (data) => {
+app.api('/api/continue-audit', async (data) => {
   const jobId = String(data?.jobId || '').trim();
   const repoPath = String(data?.repoPath || '').trim();
   const sha = String(data?.sha || '').trim();
@@ -1416,11 +1482,11 @@ app.api('/api/continue-audit', (data) => {
   if (repoPath) ctlArgs.push('--repo', repoPath);
   if (sha) ctlArgs.push('--sha', sha);
 
-  return runPythonCtl(ctlArgs, host);
+  return await runPythonCtl(ctlArgs, host);
 });
 
 // POST /api/send-comment { repoPath?, comment, jobId?, host? }
-app.api('/api/send-comment', (data) => {
+app.api('/api/send-comment', async (data) => {
   const repoPath = String(data?.repoPath || '').trim();
   const comment = String(data?.comment || '').trim();
   const jobId = String(data?.jobId || '').trim();
@@ -1437,7 +1503,7 @@ app.api('/api/send-comment', (data) => {
   if (repoPath) ctlArgs.push('--repo', repoPath);
   if (jobId) ctlArgs.push('--job-id', jobId);
 
-  return runPythonCtl(ctlArgs, host);
+  return await runPythonCtl(ctlArgs, host);
 });
 
 function isAllowedArtifactPath(filePath) {
@@ -1446,9 +1512,17 @@ function isAllowedArtifactPath(filePath) {
   if (!resolved.endsWith('.md') && !resolved.endsWith('.json')) {
     return false;
   }
-  const normResolved = resolved.replace(/\\/g, '/');
-  const normWatchdog = WATCHDOG_DIR.replace(/\\/g, '/');
-  return normResolved.includes('/.antigravity/') || normResolved.startsWith(normWatchdog);
+  if (isPathInside(WATCHDOG_DIR, resolved)) {
+    return true;
+  }
+  const activeRoots = getActiveWorkspacePaths();
+  for (const root of activeRoots) {
+    const antigravityDir = join(root, '.antigravity');
+    if (isPathInside(antigravityDir, resolved)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // POST /api/report { reportPath }
@@ -1470,7 +1544,7 @@ app.api('/api/report', (data) => {
 });
 
 // POST /api/apply-fix { repoPath, sha, mode }
-app.api('/api/apply-fix', (data) => {
+app.api('/api/apply-fix', async (data) => {
   const repoPath = String(data?.repoPath || '').trim();
   const sha = String(data?.sha || '').trim();
   const mode = data?.mode === 'merge' ? 'merge' : 'cherry-pick';
@@ -1480,7 +1554,7 @@ app.api('/api/apply-fix', (data) => {
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['apply-fix', '--repo', repoPath, '--sha', sha, '--mode', mode]);
+  return await runPythonCtl(['apply-fix', '--repo', repoPath, '--sha', sha, '--mode', mode]);
 });
 
 // POST /api/archive-job { jobId, archived }
@@ -1509,7 +1583,7 @@ app.api('/api/archive-job', (data) => {
 });
 
 // POST /api/next-steps { repo }
-app.api('/api/next-steps', (data) => {
+app.api('/api/next-steps', async (data) => {
   const repo = String(data?.repo || '').trim();
   if (!repo) {
     return new Response(JSON.stringify({ error: 'Missing repo' }), {
@@ -1517,11 +1591,11 @@ app.api('/api/next-steps', (data) => {
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['check-synthesis', '--repo', repo]);
+  return await runPythonCtl(['check-synthesis', '--repo', repo]);
 });
 
 // POST /api/next-steps/refresh { repo, host? }
-app.api('/api/next-steps/refresh', (data) => {
+app.api('/api/next-steps/refresh', async (data) => {
   const repo = String(data?.repo || '').trim();
   const host = String(data?.host || '').trim();
   if (!repo) {
@@ -1531,7 +1605,7 @@ app.api('/api/next-steps/refresh', (data) => {
     });
   }
   try {
-    return runPythonCtl(['dispatch-synthesis', '--repo', repo], host);
+    return await runPythonCtl(['dispatch-synthesis', '--repo', repo], host);
   } catch (err) {
     const nextStepsDir = join(repo, '.antigravity', 'next_steps');
     const synthStateFile = join(nextStepsDir, 'synthesis_state.json');
@@ -1548,7 +1622,7 @@ app.api('/api/next-steps/refresh', (data) => {
 });
 
 // POST /api/next-steps/cancel { repo, host? }
-app.api('/api/next-steps/cancel', (data) => {
+app.api('/api/next-steps/cancel', async (data) => {
   const repo = String(data?.repo || '').trim();
   const host = String(data?.host || '').trim();
   if (!repo) {
@@ -1557,11 +1631,11 @@ app.api('/api/next-steps/cancel', (data) => {
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['cancel-synthesis', '--repo', repo], host);
+  return await runPythonCtl(['cancel-synthesis', '--repo', repo], host);
 });
 
 // POST /api/next-steps/goal { repo, goal?, clear?, refresh? }
-app.api('/api/next-steps/goal', (data) => {
+app.api('/api/next-steps/goal', async (data) => {
   const repo = String(data?.repo || '').trim();
   const host = String(data?.host || '').trim();
   if (!repo) {
@@ -1579,7 +1653,7 @@ app.api('/api/next-steps/goal', (data) => {
     args.push('--set', String(data.goal).trim());
   }
   try {
-    return runPythonCtl(args, host);
+    return await runPythonCtl(args, host);
   } catch (err) {
     return new Response(JSON.stringify({ error: err.message || 'Failed to update goal' }), {
       status: 500,
@@ -1589,7 +1663,7 @@ app.api('/api/next-steps/goal', (data) => {
 });
 
 // POST /api/next-steps/conversations { repo }
-app.api('/api/next-steps/conversations', (data) => {
+app.api('/api/next-steps/conversations', async (data) => {
   const repo = String(data?.repo || '').trim();
   if (!repo) {
     return new Response(JSON.stringify({ error: 'Missing repo' }), {
@@ -1597,11 +1671,11 @@ app.api('/api/next-steps/conversations', (data) => {
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['conversations', '--repo', repo, '--json']);
+  return await runPythonCtl(['conversations', '--repo', repo, '--json']);
 });
 
 // POST /api/next-steps/transcript { conversationId, limit? }
-app.api('/api/next-steps/transcript', (data) => {
+app.api('/api/next-steps/transcript', async (data) => {
   const cid = String(data?.conversationId || '').trim();
   if (!cid) {
     return new Response(JSON.stringify({ error: 'Missing conversationId' }), {
@@ -1610,7 +1684,7 @@ app.api('/api/next-steps/transcript', (data) => {
     });
   }
   const limit = parseInt(data?.limit, 10) || 5;
-  return runPythonCtl(['transcript', '--conversation-id', cid, '--limit', String(limit)]);
+  return await runPythonCtl(['transcript', '--conversation-id', cid, '--limit', String(limit)]);
 });
 
 // POST /api/next-steps/plan { repo, planPath?, planFile? }
@@ -1639,7 +1713,7 @@ app.api('/api/next-steps/plan', (data) => {
 });
 
 // POST /api/next-steps/execute { repo, planId, host?, noSpawn? }
-app.api('/api/next-steps/execute', (data) => {
+app.api('/api/next-steps/execute', async (data) => {
   const repo = String(data?.repo || '').trim();
   const planId = String(data?.planId || '').trim();
   const host = String(data?.host || '').trim();
@@ -1653,11 +1727,11 @@ app.api('/api/next-steps/execute', (data) => {
   if (data?.noSpawn) {
     args.push('--no-spawn');
   }
-  return runPythonCtl(args, host);
+  return await runPythonCtl(args, host);
 });
 
 // POST /api/next-steps/cancel-execution { repo, planId }
-app.api('/api/next-steps/cancel-execution', (data) => {
+app.api('/api/next-steps/cancel-execution', async (data) => {
   const repo = String(data?.repo || '').trim();
   const planId = String(data?.planId || '').trim();
   if (!repo || !planId) {
@@ -1666,11 +1740,11 @@ app.api('/api/next-steps/cancel-execution', (data) => {
       contentType: 'application/json',
     });
   }
-  return runPythonCtl(['cancel-execution', '--repo', repo, '--plan-id', planId]);
+  return await runPythonCtl(['cancel-execution', '--repo', repo, '--plan-id', planId]);
 });
 
 // POST /api/next-steps/mark-running { repo, planId, conversationId }
-app.api('/api/next-steps/mark-running', (data) => {
+app.api('/api/next-steps/mark-running', async (data) => {
   const repo = String(data?.repo || '').trim();
   const planId = String(data?.planId || '').trim();
   const convId = String(data?.conversationId || '').trim();
@@ -1682,8 +1756,17 @@ app.api('/api/next-steps/mark-running', (data) => {
   }
   const args = ['mark-execution-running', '--repo', repo, '--plan-id', planId];
   if (convId) args.push('--conversation-id', convId);
-  return runPythonCtl(args);
+  return await runPythonCtl(args);
 });
+
+const DANGEROUS_OPEN_EXTENSIONS = new Set([
+  '.exe', '.bat', '.cmd', '.sh', '.app', '.ps1',
+  '.bin', '.com', '.msi', '.vbs', '.vbe', '.wsf',
+  '.wsh', '.scr', '.pif', '.cpl', '.command', '.tool',
+  '.bash', '.zsh', '.csh', '.fish', '.desktop',
+  '.jar', '.hta', '.reg', '.scpt', '.applescript',
+  '.psm1', '.psd1', '.inf', '.ins', '.isp', '.msc'
+]);
 
 // POST /api/open-file { uri | path }
 app.api('/api/open-file', (data) => {
@@ -1696,20 +1779,34 @@ app.api('/api/open-file', (data) => {
   if (/^\/[a-zA-Z]:([\\/]|$)/.test(filePath)) {
     filePath = filePath.slice(1);
   }
-  if (!existsSync(filePath)) {
+  const resolved = resolve(filePath);
+  if (!existsSync(resolved)) {
     return { ok: false, error: `File not found: ${filePath}` };
   }
+
+  const ext = extname(resolved).toLowerCase();
+  const realExt = extname(getRealPath(resolved)).toLowerCase();
+  if (DANGEROUS_OPEN_EXTENSIONS.has(ext) || DANGEROUS_OPEN_EXTENSIONS.has(realExt)) {
+    return { ok: false, error: `Opening executable files (${ext || realExt}) is disallowed for security reasons.` };
+  }
+
+  const allowedRoots = [WATCHDOG_DIR, ...getActiveWorkspacePaths()];
+  const isAllowed = allowedRoots.some((root) => isPathInside(root, resolved));
+  if (!isAllowed) {
+    return { ok: false, error: 'Access denied: path is outside active workspaces and watchdog directory' };
+  }
+
   try {
     let child;
     if (process.platform === 'win32') {
-      child = spawn('cmd.exe', ['/c', 'start', '""', filePath], { detached: true, stdio: 'ignore' });
+      child = spawn('cmd.exe', ['/c', 'start', '""', resolved], { detached: true, stdio: 'ignore' });
     } else {
       const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
-      child = spawn(opener, [filePath], { detached: true, stdio: 'ignore' });
+      child = spawn(opener, [resolved], { detached: true, stdio: 'ignore' });
     }
     child.on('error', () => {});
     child.unref();
-    return { ok: true, path: filePath };
+    return { ok: true, path: resolved };
   } catch (err) {
     return { ok: false, error: err.message };
   }

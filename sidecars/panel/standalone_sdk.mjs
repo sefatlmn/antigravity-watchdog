@@ -41,8 +41,22 @@ export class SidecarApp {
       const provided = req.headers['x-sidecar-token'] || url.searchParams.get('token') || cookieToken || bearerToken;
 
       const remoteIp = req.socket?.remoteAddress || '';
-      const isLoopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(remoteIp) ||
-        (typeof req.headers.host === 'string' && (req.headers.host.startsWith('127.0.0.1') || req.headers.host.startsWith('localhost')));
+      const isRemoteLoopback =
+        remoteIp === '127.0.0.1' ||
+        remoteIp === '::1' ||
+        remoteIp === '::ffff:127.0.0.1' ||
+        remoteIp.startsWith('127.') ||
+        remoteIp.startsWith('::ffff:127.');
+      const hostHeader = typeof req.headers.host === 'string' ? req.headers.host.trim() : '';
+      const isHostLoopback = /^(?:127(?:\.\d+){3}|localhost|\[::1\])(?::\d+)?$/i.test(hostHeader);
+      const isLoopback = isRemoteLoopback && isHostLoopback;
+
+      // Reject non-loopback requests unconditionally (prevents DNS rebinding and host spoofing)
+      if (!isLoopback) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized: non-loopback access denied' }));
+        return;
+      }
 
       const isSafeEndpoint = req.method === 'GET' || [
         '/api/dashboard',
@@ -51,16 +65,10 @@ export class SidecarApp {
         '/api/git_state',
         '/api/health',
         '/api/active-workspace',
-        '/api/open-file',
       ].includes(url.pathname);
 
       // Like the real SDK, non-GET mutating calls need the token; reads and status queries are open on loopback.
       if (!isSafeEndpoint && provided !== this.#token) {
-        res.writeHead(401, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'unauthorized' }));
-        return;
-      }
-      if (!isLoopback && provided !== this.#token) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;

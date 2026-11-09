@@ -1,5 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process';
+import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -181,6 +183,37 @@ async function main() {
         body: JSON.stringify({}),
       });
       assert.equal(mutResHeader.status, 200);
+
+      // 6. /api/open-file is not a safe endpoint, requires auth token
+      testApp.api('/api/open-file', () => ({ ok: true }));
+      const openResNoToken = await fetch(`http://127.0.0.1:${testPort}/api/open-file`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      assert.equal(openResNoToken.status, 401, '/api/open-file must require token authentication');
+
+      // 7. Non-loopback Host header returns 401 (preventing DNS rebinding)
+      for (const badHost of ['attacker.com', 'localhost.attacker.com', '127.0.0.1.attacker.com', 'attacker.com:60242']) {
+        const rebindStatus = await new Promise((resolve, reject) => {
+          const req = http.request({
+            hostname: '127.0.0.1',
+            port: testPort,
+            path: '/api/dashboard',
+            method: 'POST',
+            headers: {
+              'Host': badHost,
+              'Content-Type': 'application/json',
+              'x-sidecar-token': cookieToken,
+            },
+          }, (res) => {
+            resolve(res.statusCode);
+          });
+          req.on('error', reject);
+          req.end(JSON.stringify({}));
+        });
+        assert.equal(rebindStatus, 401, `Non-loopback Host header (${badHost}) must be rejected with 401`);
+      }
     } finally {
       testServer.close();
     }
@@ -194,9 +227,16 @@ async function main() {
 
     // Cross-platform open-file spawn logic
     assert.ok(mainMjsRaw.includes("process.platform === 'win32'"), 'main.mjs must check win32');
-    assert.ok(mainMjsRaw.includes("child = spawn('cmd.exe', ['/c', 'start', '\"\"', filePath], { detached: true, stdio: 'ignore' })"));
     assert.ok(mainMjsRaw.includes("child.on('error', () => {})"));
     assert.ok(mainMjsRaw.includes("child.unref()"));
+    assert.ok(mainMjsRaw.includes("DANGEROUS_OPEN_EXTENSIONS"), 'main.mjs must define dangerous extensions list');
+    assert.ok(mainMjsRaw.includes("isPathInside"), 'main.mjs must check workspace confinement');
+    assert.ok(mainMjsRaw.includes("Timed out waiting for state lock:"), 'saveStatePatch must throw explicit timeout error');
+    assert.ok(mainMjsRaw.includes("async function runGit"), 'main.mjs must declare runGit as async');
+    assert.ok(mainMjsRaw.includes("async function runPythonCtl"), 'main.mjs must declare runPythonCtl as async');
+    assert.ok(!mainMjsRaw.includes("normResolved.includes('/.antigravity/')"), 'main.mjs must not use loose substring matching for .antigravity');
+    assert.ok(mainMjsRaw.includes("isPathInside(WATCHDOG_DIR, resolved)"), 'isAllowedArtifactPath must anchor to WATCHDOG_DIR');
+    assert.ok(mainMjsRaw.includes("join(root, '.antigravity')"), 'isAllowedArtifactPath must anchor to active workspace .antigravity');
 
     // Non-busy wait using Atomics.wait
     assert.ok(!mainMjsRaw.includes('while (Date.now() - start <'), 'main.mjs must not contain synchronous busy-wait spin loops');
@@ -219,6 +259,58 @@ async function main() {
 
     // Ensure host in api/health is strictly 'antigravity'
     assert.ok(mainMjsRaw.includes("host: 'antigravity'"), 'api/health must report host as antigravity');
+
+    // Functional verification of isPathInside and symlink escape prevention
+    const tmpTestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wd-test-conf-'));
+    try {
+      const insideFile = path.join(tmpTestDir, 'safe.txt');
+      fs.writeFileSync(insideFile, 'safe');
+      const outsideFile = path.join(os.tmpdir(), `outside-target-${Date.now()}.txt`);
+      fs.writeFileSync(outsideFile, 'secret');
+
+      const symlinkToOutside = path.join(tmpTestDir, 'sym-outside.txt');
+      const symlinkToInside = path.join(tmpTestDir, 'sym-inside.txt');
+      try {
+        fs.symlinkSync(outsideFile, symlinkToOutside);
+        fs.symlinkSync(insideFile, symlinkToInside);
+      } catch {}
+
+      const isPathInsideMatch = mainMjsRaw.match(/function getRealPath[\s\S]*?function isPathInside\([^)]*\)\s*\{[\s\S]*?\n\}/);
+      assert.ok(isPathInsideMatch, 'isPathInside function must be extractable from main.mjs');
+      const testIsPathInside = new Function('resolve', 'relative', 'isAbsolute', 'existsSync', 'realpathSync', `
+        ${isPathInsideMatch[0]}
+        return isPathInside;
+      `)(path.resolve, path.relative, path.isAbsolute, fs.existsSync, fs.realpathSync);
+
+      assert.equal(testIsPathInside(tmpTestDir, insideFile), true, 'Direct child file must be inside');
+      assert.equal(testIsPathInside(tmpTestDir, outsideFile), false, 'Outside file must not be inside');
+      if (fs.existsSync(symlinkToOutside)) {
+        assert.equal(testIsPathInside(tmpTestDir, symlinkToOutside), false, 'Symlink pointing outside workspace must NOT be considered inside');
+        assert.equal(testIsPathInside(tmpTestDir, symlinkToInside), true, 'Symlink pointing inside workspace must be considered inside');
+      }
+      fs.rmSync(outsideFile, { force: true });
+    } finally {
+      fs.rmSync(tmpTestDir, { recursive: true, force: true });
+    }
+
+    // Functional verification of isAllowedArtifactPath
+    const isAllowedMatch = mainMjsRaw.match(/function isAllowedArtifactPath\([^)]*\)\s*\{[\s\S]*?\n\}/);
+    assert.ok(isAllowedMatch, 'isAllowedArtifactPath function must be extractable from main.mjs');
+    const mockWatchdogDir = path.join(os.tmpdir(), 'watchdog-mock');
+    const mockWorkspace = path.join(os.tmpdir(), 'ws-mock');
+    const testIsAllowedArtifactPath = new Function('resolve', 'join', 'isPathInside', 'getActiveWorkspacePaths', 'WATCHDOG_DIR', `
+      ${isAllowedMatch[0]}
+      return isAllowedArtifactPath;
+    `)(path.resolve, path.join, (parent, target) => {
+      const rel = path.relative(path.resolve(parent), path.resolve(target));
+      return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    }, () => [mockWorkspace], mockWatchdogDir);
+
+    assert.equal(testIsAllowedArtifactPath(path.join(mockWatchdogDir, 'report.md')), true, 'WATCHDOG_DIR .md must be allowed');
+    assert.equal(testIsAllowedArtifactPath(path.join(mockWorkspace, '.antigravity', 'plan.json')), true, 'Workspace .antigravity .json must be allowed');
+    assert.equal(testIsAllowedArtifactPath(path.join(mockWorkspace, 'src', 'fake.md')), false, 'Workspace outside .antigravity must be disallowed');
+    assert.equal(testIsAllowedArtifactPath('/arbitrary/path/with/.antigravity/fake.md'), false, 'Arbitrary path with .antigravity substring must be disallowed');
+    assert.equal(testIsAllowedArtifactPath(path.join(mockWorkspace, '.antigravity', 'evil.sh')), false, 'Non-md/json must be disallowed');
   });
 
   // =========================================================================
@@ -459,6 +551,47 @@ with ctl.StateLock():
     final_st.pop("__test_counter__", None)
     ctl.save_state(final_st)
 
+# Test StateLock explicit TimeoutError on contention
+timed_out_raised = False
+try:
+    ctl.STATE_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    (ctl.STATE_LOCK_DIR / "pid").write_text(str(os.getpid()), encoding="utf-8")
+    def try_lock():
+        global timed_out_raised
+        try:
+            with ctl.StateLock():
+                pass
+        except TimeoutError:
+            timed_out_raised = True
+    t_lock = threading.Thread(target=try_lock)
+    t_lock.start()
+    t_lock.join()
+finally:
+    shutil.rmtree(ctl.STATE_LOCK_DIR, ignore_errors=True)
+assert timed_out_raised is True, "StateLock must raise TimeoutError on contention timeout"
+
+# Test StateLock explicit TimeoutError on file lock contention
+timed_out_file_lock = False
+try:
+    with open(ctl.LOCK_FILE, "a+") as f_held:
+        if ctl.fcntl is not None:
+            ctl.fcntl.flock(f_held.fileno(), ctl.fcntl.LOCK_EX)
+        def try_flock():
+            global timed_out_file_lock
+            try:
+                with ctl.StateLock():
+                    pass
+            except TimeoutError:
+                timed_out_file_lock = True
+        t_flock = threading.Thread(target=try_flock)
+        t_flock.start()
+        t_flock.join()
+        if ctl.fcntl is not None:
+            ctl.fcntl.flock(f_held.fileno(), ctl.fcntl.LOCK_UN)
+finally:
+    pass
+assert timed_out_file_lock is True, "StateLock must raise TimeoutError on file lock contention"
+
 # 2. Path normalization & Windows compatibility
 assert ctl.is_same_repo_path("/path/to/repo/", "/path/to/repo") is True
 assert ctl.is_same_repo_path("C:\\\\repo\\\\sub", "C:/repo/sub") is True
@@ -561,6 +694,19 @@ with tempfile.TemporaryDirectory() as tmp_goal_repo:
 res_codebase = ctl.deep_analyze_codebase(Path(${JSON.stringify(rootDir)}))
 self_matches = [t for t in res_codebase.get("todos", []) if "watchdog_ctl.py" in t.get("file", "")]
 assert not self_matches, f"TODO scanner should not self-match: {self_matches}"
+
+with tempfile.TemporaryDirectory() as tmp_prune:
+    pr_root = Path(tmp_prune)
+    (pr_root / "src").mkdir()
+    (pr_root / "src" / "index.js").write_text("// TODO: legitimate task\\nconsole.log(1)", encoding="utf-8")
+    (pr_root / "node_modules").mkdir()
+    (pr_root / "node_modules" / "bad.js").write_text("// TODO: should be ignored\\n", encoding="utf-8")
+    (pr_root / ".antigravity").mkdir()
+    (pr_root / ".antigravity" / "hidden.js").write_text("// TODO: should be ignored\\n", encoding="utf-8")
+    pr_codebase = ctl.deep_analyze_codebase(pr_root)
+    assert any("src/index.js" in f or "src\\\\index.js" in f for f in pr_codebase["all_source_files"]), "src/index.js must be found"
+    assert not any("node_modules" in f for f in pr_codebase["all_source_files"]), "node_modules must be pruned"
+    assert not any(".antigravity" in f for f in pr_codebase["all_source_files"]), ".antigravity must be pruned"
 
 # 9. Next Steps Proposal Target Files Integrity (No deleted files allowed)
 proposals_res = ctl.synthesize_next_steps(Path(${JSON.stringify(rootDir)}), force=True)
