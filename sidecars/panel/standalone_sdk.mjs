@@ -9,13 +9,19 @@ import { createServer } from 'node:http';
 const BIND_HOST = '127.0.0.1';
 
 export class Response {
-  constructor(body, { contentType = 'text/plain', status = 200, headers } = {}) {
+  /**
+   * @param {string | Buffer} body
+   * @param {{ contentType?: string, status?: number, headers?: Record<string, string> }} [options]
+   */
+  constructor(body, { contentType = 'text/plain', status = 200, headers = undefined } = {}) {
     this.body = body;
     this.contentType = contentType;
     this.status = status;
     this.headers = headers;
   }
 }
+
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 export class SidecarApp {
   #pages = new Map();
@@ -32,13 +38,18 @@ export class SidecarApp {
 
   run() {
     const server = createServer(async (req, res) => {
-      const url = new URL(req.url, `http://${BIND_HOST}`);
-      const cookieHeader = req.headers.cookie || '';
-      const cookieMatch = cookieHeader.match(/(?:^|;\s*)sidecar_token=([^;]+)/);
-      const cookieToken = cookieMatch ? cookieMatch[1] : null;
-      const authHeader = req.headers.authorization;
-      const bearerToken = (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) ? authHeader.slice(7).trim() : null;
-      const provided = req.headers['x-sidecar-token'] || url.searchParams.get('token') || cookieToken || bearerToken;
+      try {
+        const url = new URL(req.url || '/', `http://${BIND_HOST}`);
+        const cookieHeader = req.headers.cookie || '';
+        const cookieMatch = cookieHeader.match(/(?:^|;\s*)sidecar_token=([^;]+)/);
+        const cookieToken = cookieMatch ? cookieMatch[1] : null;
+        const authHeader = req.headers.authorization;
+        const bearerToken = (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) ? authHeader.slice(7).trim() : null;
+        const rawHeaderToken = req.headers['x-sidecar-token'];
+        const headerToken = Array.isArray(rawHeaderToken) ? rawHeaderToken[0] : rawHeaderToken;
+        const queryToken = url.searchParams.get('token');
+        const candidates = [headerToken, queryToken, cookieToken, bearerToken].filter(Boolean);
+        const provided = candidates[0] || null;
 
       const remoteIp = req.socket?.remoteAddress || '';
       const isRemoteLoopback =
@@ -68,7 +79,7 @@ export class SidecarApp {
       ].includes(url.pathname);
 
       // Like the real SDK, non-GET mutating calls need the token; reads and status queries are open on loopback.
-      if (!isSafeEndpoint && provided !== this.#token) {
+      if (!isSafeEndpoint && !candidates.includes(this.#token)) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;
@@ -107,33 +118,72 @@ export class SidecarApp {
         return;
       }
 
-      let body = '';
-      req.on('data', (chunk) => { body += chunk; });
-      req.on('end', async () => {
-        try {
-          const data = {};
-          for (const [key, value] of url.searchParams.entries()) {
-            if (key.toLowerCase() !== 'token') data[key] = value;
-          }
-          if (body) Object.assign(data, JSON.parse(body));
-          const result = await handler(data, req);
-          if (result instanceof Response) {
-            res.writeHead(result.status || 200, { 'Content-Type': result.contentType, ...result.headers });
-            res.end(result.body);
+        const chunks = [];
+        let bodyBytes = 0;
+        let payloadTooLarge = false;
+        req.on('data', (chunk) => {
+          if (payloadTooLarge) return;
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          bodyBytes += buf.length;
+          if (bodyBytes > MAX_BODY_BYTES) {
+            payloadTooLarge = true;
+            if (!res.headersSent) {
+              res.writeHead(413, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Payload too large' }));
+            }
+            req.destroy();
             return;
           }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify(result));
-        } catch (err) {
+          chunks.push(buf);
+        });
+        req.on('end', async () => {
+          if (payloadTooLarge) return;
+          try {
+            const body = Buffer.concat(chunks).toString('utf8');
+            const data = {};
+            for (const [key, value] of url.searchParams.entries()) {
+              if (key.toLowerCase() !== 'token') data[key] = value;
+            }
+            if (body) {
+              let parsed;
+              try {
+                parsed = JSON.parse(body);
+              } catch {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+                return;
+              }
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                Object.assign(data, parsed);
+              }
+            }
+            const result = await handler(data, req);
+            if (result instanceof Response) {
+              res.writeHead(result.status || 200, { 'Content-Type': result.contentType, ...result.headers });
+              res.end(result.body);
+              return;
+            }
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(result));
+          } catch (err) {
+            if (!res.headersSent) {
+              res.writeHead(500, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: err?.message || String(err) }));
+            }
+          }
+        });
+      } catch (err) {
+        if (!res.headersSent) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
+          res.end(JSON.stringify({ error: err?.message || String(err) }));
         }
-      });
+      }
     });
 
     return new Promise((resolve) => {
       server.listen(this.#port, BIND_HOST, () => {
-        const { port } = server.address();
+        const addr = server.address();
+        const port = typeof addr === 'object' && addr ? addr.port : 0;
         // The line a person opens in a browser to reach the panel.
         console.log(`WATCHDOG_PANEL_URL=http://${BIND_HOST}:${port}/?token=${this.#token}`);
         resolve(server);

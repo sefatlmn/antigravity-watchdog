@@ -195,7 +195,7 @@ The typography pairs Apple/System UI sans-serif for UI labels and prose with cle
 - **Card Title / Markdown H3** (SemiBold 600, 13px, line-height 1.35, tracking -0.005em): Card titles, repo name, proposal titles.
 - **Body / Prose** (Regular 400, 12px, line-height 1.55, text-wrap pretty): Proposal summaries, goal statements, and report markdown.
 - **Control / Label** (Medium 500 / SemiBold 600, 12px / 11px, line-height 1.25): Tab labels, primary/secondary buttons, input placeholders.
-- **Telemetry & Hashes** (SemiBold 600 / Medium 500, 11px, tracking 0.01em, tabular-nums): Commit SHAs, branch tags, file chips, and timestamps.
+- **Telemetry & Hashes** (SemiBold 600 / Medium 500, 11px, tracking 0.01em, tabular-nums): Commit SHAs, branch tags, inline code spans, and timestamps.
 - **Micro-Badges & Tags** (SemiBold 600, 10px, uppercase, tracking 0.03em, tabular-nums): Status tags, difficulty tags, tab counters.
 
 ### Named Rules
@@ -238,7 +238,7 @@ Per user direction, the system is **flat with minimal shadows and glow**. Depth 
 The form language balances technical precision with subtle corner softening:
 
 - **Progress Bar Indicator:** `border-radius: 2px`.
-- **Compact Elements (Tags, File Chips):** `border-radius: 4px` (`{rounded.sm}`).
+- **Compact Elements (Tags, Badges):** `border-radius: 4px` (`{rounded.sm}`).
 - **Card Action Controls (Buttons, Badges, Cancel Actions):** `border-radius: 5px` (`{rounded.action}`).
 - **Interactive Controls (Buttons, Inputs, Tabs):** `border-radius: 6px` (`{rounded.md}`).
 - **Surface Containers (Cards, Wells):** `border-radius: 8px` (`{rounded.card}`).

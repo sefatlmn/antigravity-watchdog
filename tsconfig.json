@@ -8,5 +8,10 @@
     "noEmit": true,
     "strict": false
   },
-  "include": ["types", "sidecars/panel/view-model.js"]
+  "include": [
+    "types",
+    "sidecars/panel/view-model.js",
+    "sidecars/panel/main.mjs",
+    "sidecars/panel/standalone_sdk.mjs"
+  ]
 }

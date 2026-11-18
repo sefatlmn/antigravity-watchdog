@@ -119,10 +119,28 @@ def is_pid_alive(pid: int) -> bool:
 
 
 class StateLock:
+    MAX_RETRIES: int = 80
     _depth: int = 0
     _fp: Optional[Any] = None
     _thread_lock = threading.RLock()
     _dir_acquired: bool = False
+
+    @staticmethod
+    def _unlock_fp(fp: Any) -> None:
+        if fp is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(fp.fileno(), fcntl.LOCK_UN)
+            else:
+                try:
+                    import msvcrt
+                    fp.seek(0)
+                    msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                except Exception:
+                    pass
+        finally:
+            fp.close()
 
     def __enter__(self) -> "StateLock":
         StateLock._thread_lock.acquire()
@@ -132,24 +150,21 @@ class StateLock:
                 fp = open(LOCK_FILE, "a+")
                 try:
                     file_acquired = False
-                    for _ in range(40):
+                    for _ in range(StateLock.MAX_RETRIES):
                         try:
                             if fcntl is not None:
                                 fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                                 file_acquired = True
                                 break
                             else:
-                                try:
-                                    import msvcrt
-                                    if fp.tell() == 0:
-                                        fp.write("0")
-                                        fp.flush()
-                                    fp.seek(0)
-                                    msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
-                                    file_acquired = True
-                                    break
-                                except Exception:
-                                    pass
+                                import msvcrt
+                                if fp.tell() == 0:
+                                    fp.write("0")
+                                    fp.flush()
+                                fp.seek(0)
+                                msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+                                file_acquired = True
+                                break
                         except (BlockingIOError, OSError):
                             time.sleep(0.025)
                     if not file_acquired:
@@ -160,7 +175,7 @@ class StateLock:
                     raise
                 # Coordinate with sidecar panel's directory lock
                 StateLock._dir_acquired = False
-                for _ in range(40):
+                for _ in range(StateLock.MAX_RETRIES):
                     try:
                         STATE_LOCK_DIR.mkdir(parents=True, exist_ok=False)
                         StateLock._dir_acquired = True
@@ -185,7 +200,14 @@ class StateLock:
                                     except Exception:
                                         pass
                                 if not is_alive:
-                                    shutil.rmtree(STATE_LOCK_DIR, ignore_errors=True)
+                                    stale_dir = STATE_LOCK_DIR.with_name(
+                                        f"state.json.lock.stale.{os.getpid()}.{time.time_ns()}"
+                                    )
+                                    try:
+                                        STATE_LOCK_DIR.rename(stale_dir)
+                                        shutil.rmtree(stale_dir, ignore_errors=True)
+                                    except OSError:
+                                        pass
                                     continue
                         except Exception:
                             pass
@@ -193,22 +215,10 @@ class StateLock:
                     except Exception:
                         break
                 if not StateLock._dir_acquired:
-                    if StateLock._fp is not None:
-                        try:
-                            if fcntl is not None:
-                                fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
-                            else:
-                                try:
-                                    import msvcrt
-                                    StateLock._fp.seek(0)
-                                    msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_UNLCK, 1)
-                                except Exception:
-                                    pass
-                        finally:
-                            try:
-                                StateLock._fp.close()
-                            finally:
-                                StateLock._fp = None
+                    try:
+                        StateLock._unlock_fp(StateLock._fp)
+                    finally:
+                        StateLock._fp = None
                     raise TimeoutError(f"Timed out acquiring directory state lock: {STATE_LOCK_DIR}")
             StateLock._depth += 1
             return self
@@ -228,22 +238,32 @@ class StateLock:
                     StateLock._dir_acquired = False
                 if StateLock._fp is not None:
                     try:
-                        if fcntl is not None:
-                            fcntl.flock(StateLock._fp.fileno(), fcntl.LOCK_UN)
-                        else:
-                            try:
-                                import msvcrt
-                                StateLock._fp.seek(0)
-                                msvcrt.locking(StateLock._fp.fileno(), msvcrt.LK_UNLCK, 1)
-                            except Exception:
-                                pass
+                        StateLock._unlock_fp(StateLock._fp)
                     finally:
-                        try:
-                            StateLock._fp.close()
-                        finally:
-                            StateLock._fp = None
+                        StateLock._fp = None
         finally:
             StateLock._thread_lock.release()
+
+
+def atomic_write_json(path: Path, data: Any, mode: Optional[int] = None) -> None:
+    """Atomically write JSON data to `path` via a unique sibling temp file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_file = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
+    payload = json.dumps(data, indent=2)
+    try:
+        if mode is not None:
+            fd = os.open(str(tmp_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as fp:
+                fp.write(payload)
+        else:
+            tmp_file.write_text(payload, encoding="utf-8")
+        tmp_file.replace(path)
+    except Exception:
+        try:
+            tmp_file.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
 
 def load_state() -> Dict[str, Any]:
@@ -263,9 +283,7 @@ def save_state(state: Dict[str, Any]) -> None:
     ensure_dirs()
     if len(state.get("jobs", [])) > 100:
         state["jobs"] = state["jobs"][:100]
-    tmp_file = STATE_FILE.with_name(f"state.{os.getpid()}.{threading.get_ident()}.{time.time_ns()}.tmp")
-    tmp_file.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    tmp_file.replace(STATE_FILE)
+    atomic_write_json(STATE_FILE, state)
 
 
 def cache_ls_env() -> None:
@@ -280,8 +298,7 @@ def cache_ls_env() -> None:
     found = {k: os.environ[k] for k in keys if os.environ.get(k)}
     if found.get("ANTIGRAVITY_LS_ADDRESS") and found.get("ANTIGRAVITY_CSRF_TOKEN"):
         try:
-            ENV_CACHE_FILE.write_text(json.dumps(found, indent=2), encoding="utf-8")
-            os.chmod(ENV_CACHE_FILE, 0o600)
+            atomic_write_json(ENV_CACHE_FILE, found, mode=0o600)
         except Exception:
             pass
 
@@ -424,20 +441,31 @@ def get_youngest_commit(
 
 def _repo_head_score(repo: Path) -> Tuple[int, int]:
     """Return (is_non_empty_tree, youngest_commit_timestamp) for sorting candidate git roots."""
-    youngest, _ = get_youngest_commit(repo, limit=3)
-    if not youngest:
+    rc, out, _ = run_git(
+        repo,
+        ["log", "-1", "--exclude=fix/watchdog-*", "--branches", "--tags", "HEAD", "--date-order", "--format=%T\x1f%ct"],
+    )
+    if rc != 0 or not out:
+        rc, out, _ = run_git(repo, ["log", "-1", "--format=%T\x1f%ct", "HEAD"])
+    if rc != 0 or not out:
         return (0, 0)
-    non_empty = 0 if youngest.get("is_empty_tree") else 1
-    return (non_empty, int(youngest.get("timestamp", 0)))
+    parts = out.splitlines()[0].strip().split("\x1f")
+    tree_hash = parts[0].strip() if parts else ""
+    try:
+        ts = int(parts[1].strip()) if len(parts) > 1 else 0
+    except ValueError:
+        ts = 0
+    non_empty = 0 if (not tree_hash or tree_hash == EMPTY_TREE_HASH) else 1
+    return (non_empty, ts)
 
 
-def clean_repo_path(path_str: Any) -> Optional[Path]:
-    """Clean and resolve a repository or workspace path, handling file:// URIs, percent-encoding, and Windows drive letters."""
-    if not path_str:
-        return None
-    s = str(path_str).strip()
-    if s.startswith("file://"):
-        s = re.sub(r"^file://(localhost)?", "", s)
+def _normalize_path_str(path_val: Any) -> str:
+    """Normalize a filesystem path or file:// URI into a clean slash-normalized string."""
+    if not path_val:
+        return ""
+    s = str(path_val).strip()
+    if s.lower().startswith("file://"):
+        s = re.sub(r"^file://(localhost)?", "", s, flags=re.I)
         try:
             s = urllib.parse.unquote(s)
         except Exception:
@@ -449,17 +477,21 @@ def clean_repo_path(path_str: Any) -> Optional[Path]:
             pass
     if re.match(r"^/[a-zA-Z]:([\\/]|$)", s):
         s = s[1:]
-    if re.match(r"^[a-zA-Z]:[/\\]*$", s):
-        s = s[:2] + "\\"
-    else:
-        s = s.rstrip("/\\")
-        if re.match(r"^[a-zA-Z]:$", s):
-            s = s + "\\"
+    s = s.replace("\\", "/")
+    if re.match(r"^[a-zA-Z]:/*$", s):
+        return s[:2] + "/"
+    return s.rstrip("/")
+
+
+def clean_repo_path(path_str: Any) -> Optional[Path]:
+    """Clean and resolve a repository or workspace path, handling file:// URIs, percent-encoding, and Windows drive letters."""
+    s = _normalize_path_str(path_str)
     if not s:
         return None
+    if re.match(r"^[a-zA-Z]:/$", s):
+        s = s[:2] + "\\"
     try:
-        p = Path(s).expanduser().resolve()
-        return p
+        return Path(s).expanduser().resolve()
     except Exception:
         return None
 
@@ -485,6 +517,8 @@ def discover_git_roots(path_str: str) -> List[Path]:
     if rc == 0 and out:
         root = Path(out).resolve()
         if "watchdog/worktrees" not in str(root) and ".antigravity/worktrees" not in str(root):
+            if root == p and _repo_head_score(root)[0] == 1:
+                return [root]
             candidates.append(root)
             seen.add(str(root))
 
@@ -529,40 +563,135 @@ def resolve_git_root(path_str: str) -> Optional[Path]:
 def is_same_repo_path(p1: Any, p2: Any) -> bool:
     if not p1 or not p2:
         return False
+    n1 = _normalize_path_str(p1)
+    n2 = _normalize_path_str(p2)
+    if not n1 or not n2:
+        return False
+    is_win_drive = bool(re.match(r"^[a-zA-Z]:", n1) or re.match(r"^[a-zA-Z]:", n2))
+    case_insensitive = is_win_drive or sys.platform in ("win32", "darwin")
+    if n1 == n2 or (case_insensitive and n1.lower() == n2.lower()):
+        return True
+    if is_win_drive and sys.platform != "win32":
+        return False
     c1 = clean_repo_path(p1)
     c2 = clean_repo_path(p2)
-    if c1 and c2 and c1 == c2:
-        return True
-    s1 = str(p1).strip()
-    s2 = str(p2).strip()
-    if re.match(r"^file://", s1, re.I):
-        s1 = re.sub(r"^file://(localhost)?", "", s1, flags=re.I)
-    if re.match(r"^file://", s2, re.I):
-        s2 = re.sub(r"^file://(localhost)?", "", s2, flags=re.I)
-    if re.match(r"^/[a-zA-Z]:([\\/]|$)", s1):
-        s1 = s1[1:]
-    if re.match(r"^/[a-zA-Z]:([\\/]|$)", s2):
-        s2 = s2[1:]
-    if re.match(r"^[a-zA-Z]:[/\\]*$", s1):
-        s1 = s1[:2] + "/"
-    else:
-        s1 = s1.replace("\\", "/").rstrip("/")
-    if re.match(r"^[a-zA-Z]:[/\\]*$", s2):
-        s2 = s2[:2] + "/"
-    else:
-        s2 = s2.replace("\\", "/").rstrip("/")
-    if s1 == s2 or s1.lower() == s2.lower():
-        return True
-    try:
-        r1 = Path(s1).resolve()
-        r2 = Path(s2).resolve()
-        if r1 == r2:
+    if c1 and c2:
+        if c1 == c2:
             return True
-        norm1 = str(r1).replace("\\", "/").rstrip("/")
-        norm2 = str(r2).replace("\\", "/").rstrip("/")
-        return norm1 == norm2 or norm1.lower() == norm2.lower()
+        rn1 = str(c1).replace("\\", "/").rstrip("/")
+        rn2 = str(c2).replace("\\", "/").rstrip("/")
+        return rn1 == rn2 or (case_insensitive and rn1.lower() == rn2.lower())
+    return False
+
+
+def invoke_agentapi(
+    subcmd_args: List[str],
+    cwd: Optional[Path] = None,
+    timeout: int = 10,
+    log_file: Optional[Path] = None,
+) -> Optional[subprocess.CompletedProcess]:
+    """Invoke Antigravity's agentapi CLI uniformly with diagnostics logging."""
+    env = get_cached_ls_env()
+    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
+    if not Path(agentapi_bin).exists():
+        return None
+    if "language_server" in Path(agentapi_bin).name:
+        cmd = [agentapi_bin, "agentapi"] + subcmd_args
+    else:
+        cmd = [agentapi_bin] + subcmd_args
+    target_log = log_file or (LOGS_DIR / "agentapi.log")
+    effective_cwd = str(cwd) if cwd and Path(cwd).exists() else str(Path.cwd())
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=effective_cwd,
+            env=env,
+            timeout=timeout,
+        )
+        if log_file is not None or proc.returncode != 0:
+            try:
+                ensure_dirs()
+                with open(target_log, "a", encoding="utf-8") as lf:
+                    lf.write(f"\n[{now_iso()}] agentapi {' '.join(subcmd_args[:2])} rc={proc.returncode}\n")
+                    if log_file is not None and proc.stdout:
+                        lf.write(f"STDOUT:\n{proc.stdout}\n")
+                    if proc.stderr:
+                        lf.write(f"STDERR:\n{proc.stderr}\n")
+            except Exception:
+                pass
+        return proc
+    except Exception as exc:
+        try:
+            ensure_dirs()
+            with open(target_log, "a", encoding="utf-8") as lf:
+                lf.write(f"[{now_iso()}] Failed to invoke agentapi ({' '.join(subcmd_args[:2])}): {exc}\n")
+        except Exception:
+            pass
+        return None
+
+
+def read_last_transcript_step(t_file: Path) -> Optional[Dict[str, Any]]:
+    """Read the latest valid JSON step from the tail of a transcript.jsonl file."""
+    if not t_file.exists():
+        return None
+    try:
+        with open(t_file, "rb") as fp:
+            fp.seek(0, 2)
+            size = fp.tell()
+            for tail_bytes in (65536, 524288):
+                fp.seek(max(0, size - tail_bytes), 0)
+                chunk = fp.read().decode("utf-8", errors="ignore")
+                for line in reversed(chunk.splitlines()):
+                    line = line.strip()
+                    if line.startswith("{"):
+                        try:
+                            parsed = json.loads(line)
+                            if isinstance(parsed, dict) and "type" in parsed:
+                                return parsed
+                        except Exception:
+                            pass
+                if size <= tail_bytes:
+                    break
     except Exception:
+        pass
+    return None
+
+
+def _parse_workspace_uris(w_uris: Any) -> List[str]:
+    if not w_uris:
+        return []
+    raw_list: List[str] = []
+    if isinstance(w_uris, list):
+        raw_list = [str(x) for x in w_uris if x]
+    elif isinstance(w_uris, str):
+        s = w_uris.strip()
+        if not s:
+            return []
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    raw_list = [str(x) for x in parsed if x]
+            except Exception:
+                raw_list = [s]
+        else:
+            raw_list = [part.strip() for part in s.split(",") if part.strip()]
+    return [_normalize_path_str(u) for u in raw_list if _normalize_path_str(u)]
+
+
+def _workspace_uri_matches_repo(uri_norm: str, repo_norm: str, parent_norm: str) -> bool:
+    if not uri_norm or not repo_norm:
         return False
+    u = uri_norm.lower() if sys.platform in ("win32", "darwin") else uri_norm
+    r = repo_norm.lower() if sys.platform in ("win32", "darwin") else repo_norm
+    p = parent_norm.lower() if (parent_norm and sys.platform in ("win32", "darwin")) else parent_norm
+    if u == r or u.startswith(r + "/"):
+        return True
+    if p and u == p:
+        return True
+    return False
 
 
 # -----------------------------------------------------------------------------
@@ -573,18 +702,25 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
     """
     Find all Antigravity conversations associated with this repository.
     Matches via:
-    1. Direct folder matching in `conversation_summaries.db` (workspace_uris containing repo path or repo name)
-    2. Parent workspace folders up to home
-    3. Project resource mapping in ~/.gemini/config/projects/*.json
-    4. Transcript content search (fallback when workspace_uris was left empty)
+    1. Exact repo or immediate parent workspace matching in `conversation_summaries.db`
+    2. Project resource mapping in ~/.gemini/config/projects/*.json
+    3. Bounded fallback on blank-URI rows only
     """
-    repo_str = str(repo_root.resolve())
+    repo_resolved = repo_root.resolve()
+    repo_str = str(repo_resolved)
+    repo_norm = _normalize_path_str(repo_resolved)
     repo_name = repo_root.name
-    ancestors: List[str] = []
-    curr = repo_root.resolve().parent
-    while curr and curr != HOME and curr != Path("/"):
-        ancestors.append(str(curr))
-        curr = curr.parent
+
+    parent_dir = repo_resolved.parent
+    parent_norm = ""
+    if (
+        parent_dir
+        and parent_dir != repo_resolved
+        and parent_dir != HOME
+        and parent_dir != Path("/")
+        and (parent_dir / repo_root.name).resolve() == repo_resolved
+    ):
+        parent_norm = _normalize_path_str(parent_dir)
 
     conversations: List[Dict[str, Any]] = []
     seen_ids = set()
@@ -602,15 +738,21 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
                     pid = pdata.get("id") or pfile.stem
                     resources = pdata.get("projectResources", {}).get("resources", [])
                     for res in resources:
-                        f_uri = res.get("folderUri", "")
-                        for check_p in [repo_str] + ancestors:
-                            if check_p in f_uri or f_uri.replace("file://", "").rstrip("/") == check_p:
-                                matched_project_ids.add(pid)
-                                break
+                        f_uri = res.get("folderUri") or (res.get("gitFolder") or {}).get("folderUri") or ""
+                        uri_norm = _normalize_path_str(f_uri)
+                        if _workspace_uri_matches_repo(uri_norm, repo_norm, parent_norm):
+                            matched_project_ids.add(pid)
+                            break
                 except Exception:
                     pass
         except Exception:
             pass
+
+    name_re = (
+        re.compile(r"(?:^|[/\\\s\"'_-])" + re.escape(repo_name.lower()) + r"(?:$|[/\\\s\"'_-])")
+        if repo_name and len(repo_name) > 3
+        else None
+    )
 
     try:
         conn = sqlite3.connect(str(CONVERSATION_SUMMARIES_DB))
@@ -625,6 +767,7 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
         rows = cur.fetchall()
         conn.close()
 
+        transcript_scans = 0
         for row in rows:
             cid, title, preview, step_count, mtime, pid, w_uris = row
             if not cid or cid in seen_ids:
@@ -635,32 +778,32 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
             if pid and pid in matched_project_ids:
                 matches = True
 
-            # 2. Workspace URIs match
-            if not matches and w_uris:
-                for check_p in [repo_str] + ancestors:
-                    if check_p in w_uris or check_p.replace(" ", "%20") in w_uris:
+            # 2. Exact / immediate-parent workspace URI match
+            parsed_uris = _parse_workspace_uris(w_uris)
+            if not matches and parsed_uris:
+                for uri_norm in parsed_uris:
+                    if _workspace_uri_matches_repo(uri_norm, repo_norm, parent_norm):
                         matches = True
                         break
 
-            # 3. Fallback: check repo_name match in workspace_uris, title, or preview
-            if not matches and repo_name and len(repo_name) > 3:
-                combined_text = f"{title or ''} {preview or ''} {w_uris or ''}".lower()
-                if repo_name.lower() in combined_text:
+            # 3. Fallback (only when workspace_uris is blank): check repo_name boundary match in title/preview
+            if not matches and not parsed_uris and name_re is not None:
+                combined_text = f"{title or ''} {preview or ''}".lower()
+                if name_re.search(combined_text):
                     matches = True
 
-            # 4. Deep fallback: inspect transcript header/cwd if workspace_uris was blank
-            if not matches:
+            # 4. Deep fallback (bounded, blank workspace_uris only): inspect transcript header/cwd
+            if not matches and not parsed_uris and transcript_scans < 25:
                 t_file = BRAIN_DIR / cid / ".system_generated" / "logs" / "transcript.jsonl"
                 if t_file.exists():
+                    transcript_scans += 1
                     try:
                         with open(t_file, "r", encoding="utf-8", errors="ignore") as tf:
-                            lines_checked = 0
-                            for line in tf:
-                                if repo_str in line or (repo_name in line and len(repo_name) > 4):
+                            for lines_checked, line in enumerate(tf):
+                                if repo_str in line or (repo_norm and repo_norm in line):
                                     matches = True
                                     break
-                                lines_checked += 1
-                                if lines_checked > 60:
+                                if lines_checked >= 60:
                                     break
                     except Exception:
                         pass
@@ -688,7 +831,7 @@ def get_conversation_user_requests(
     conv_id: str, limit: int = 5, transcript_path: Optional[Path] = None
 ) -> List[str]:
     """
-    Extract recent user requests from an Antigravity conversation transcript.
+    Extract chronological user requests from an Antigravity conversation transcript.
     """
     t_file: Optional[Path] = None
     if transcript_path and Path(transcript_path).exists():
@@ -708,16 +851,31 @@ def get_conversation_user_requests(
                     continue
                 try:
                     step = json.loads(line)
-                    req_text = ""
                     step_type = str(step.get("type", "")).upper()
+                    if step_type in ("PLANNER_RESPONSE", "MODEL", "GENERIC", "TOOL_RESPONSE"):
+                        continue
+                    req_text = ""
                     content = str(step.get("content", ""))
-                    if step_type in ("USER_INPUT", "USER") or "<USER_REQUEST>" in content:
+                    if step_type in ("USER_INPUT", "USER"):
                         m = re.search(r"<USER_REQUEST>(.*?)</USER_REQUEST>", content, re.DOTALL)
-                        req_text = m.group(1).strip() if m else content.strip()
-                    elif "<original_task>" in content or "content=Task:" in content:
+                        if m:
+                            req_text = m.group(1).strip()
+                        else:
+                            cleaned = re.sub(
+                                r"<(ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE)>.*?</\1>",
+                                "",
+                                content,
+                                flags=re.DOTALL,
+                            )
+                            req_text = cleaned.strip()
+                    elif step_type == "SYSTEM_MESSAGE" and ("<original_task>" in content or "content=Task:" in content):
                         m = re.search(r"<original_task>(.*?)</original_task>", content, re.DOTALL)
                         if not m:
-                            m = re.search(r"content=(?:<original_task>\s*)?(Task:\s*.*?)(?:\n\n|</original_task>|$)", content, re.DOTALL)
+                            m = re.search(
+                                r"content=(?:<original_task>\s*)?(Task:\s*.*?)(?:\n\n|</original_task>|$)",
+                                content,
+                                re.DOTALL,
+                            )
                         if m:
                             req_text = m.group(1).strip()
                             req_text = re.sub(r"</?[A-Za-z0-9_]+>.*$", "", req_text, flags=re.DOTALL).strip()
@@ -759,9 +917,9 @@ def deep_analyze_conversations(repo_root: Path, convs: List[Dict[str, Any]]) -> 
         if not cid:
             continue
 
-        # 1. Collect requests from transcript
+        # 1. Collect requests from transcript (newest first within each newest-first conversation)
         reqs = get_conversation_user_requests(cid, limit=6)
-        for r in reqs:
+        for r in reversed(reqs):
             cleaned = re.sub(r"\s+", " ", r).strip()
             # Strip slash command prefixes like /impeccable, /plan, /audit
             cleaned = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", cleaned).strip()
@@ -1242,10 +1400,10 @@ def deep_analyze_codebase(repo_root: Path, head_sha: str = "HEAD") -> Dict[str, 
         rc_diff, diff_out, _ = run_git(repo_root, ["diff", "--name-status", "HEAD~1..HEAD"])
     if rc_diff == 0 and diff_out:
         for line in diff_out.splitlines():
-            parts = line.strip().split("\t", 1)
-            if len(parts) == 2:
+            parts = line.strip().split("\t")
+            if len(parts) >= 2:
                 status_code = parts[0].strip()
-                file_rel = parts[1].strip()
+                file_rel = parts[-1].strip()
                 if status_code != "D" and (repo_root / file_rel).is_file():
                     codebase["changed_files_head"].append({"status": status_code, "path": file_rel})
 
@@ -1260,10 +1418,24 @@ def deep_analyze_codebase(repo_root: Path, head_sha: str = "HEAD") -> Dict[str, 
             if len(parts) == 2:
                 status_code = parts[0].strip()
                 file_rel = parts[1].strip()
+                if " -> " in file_rel:
+                    file_rel = file_rel.split(" -> ")[-1].strip()
+                file_rel = file_rel.strip('"')
                 if "D" not in status_code and (repo_root / file_rel).is_file():
                     codebase["dirty_files"].append({"status": status_code, "path": file_rel})
 
     return codebase
+
+
+def _sync_goal_to_proposals(ns_dir: Path, goal_data: Dict[str, Any]) -> None:
+    proposals_file = ns_dir / "proposals.json"
+    if proposals_file.exists():
+        try:
+            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
+            p_data["goal"] = goal_data
+            atomic_write_json(proposals_file, p_data)
+        except Exception:
+            pass
 
 
 def load_goal(repo_root: Path) -> Dict[str, Any]:
@@ -1346,12 +1518,12 @@ def load_goal(repo_root: Path) -> Dict[str, Any]:
                 "updatedAt": now_iso(),
             }
 
-    # 5. Conversation intent
+    # 5. Conversation intent (earliest prompt from earliest conversation)
     convs = get_project_conversations(repo_root)
     if convs:
         sorted_convs = sorted(convs, key=lambda c: c.get("lastModifiedTime") or "")
         for c in sorted_convs:
-            reqs = get_conversation_user_requests(c["conversationId"], limit=1)
+            reqs = get_conversation_user_requests(c["conversationId"], limit=50)
             if reqs:
                 first_req = reqs[0].split("\n")[0].strip()
                 first_req = re.sub(r"^/([a-zA-Z0-9_\-]+)\s*", "", first_req).strip()
@@ -1390,31 +1562,18 @@ def save_goal_override(repo_root: Path, goal_text: str) -> Dict[str, Any]:
         "source": "User Override",
         "updatedAt": now_iso(),
     }
-    goal_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    proposals_file = ns_dir / "proposals.json"
-    if proposals_file.exists():
-        try:
-            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
-            p_data["goal"] = data
-            proposals_file.write_text(json.dumps(p_data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+    atomic_write_json(goal_file, data)
+    _sync_goal_to_proposals(ns_dir, data)
     return data
 
 
 def clear_goal_override(repo_root: Path) -> Dict[str, Any]:
-    goal_file = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME / "goal.json"
+    ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
+    goal_file = ns_dir / "goal.json"
     if goal_file.exists():
         goal_file.unlink()
     data = load_goal(repo_root)
-    proposals_file = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME / "proposals.json"
-    if proposals_file.exists():
-        try:
-            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
-            p_data["goal"] = data
-            proposals_file.write_text(json.dumps(p_data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+    _sync_goal_to_proposals(ns_dir, data)
     return data
 
 
@@ -1595,36 +1754,13 @@ def refresh_project_goal(repo_root: Path) -> Dict[str, Any]:
         "updatedAt": now_iso(),
     }
 
-    # Save to goal.json
+    # Save to goal.json and synchronize proposals.json
     ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
     ns_dir.mkdir(parents=True, exist_ok=True)
-    goal_file = ns_dir / "goal.json"
-    goal_file.write_text(json.dumps(goal_data, indent=2), encoding="utf-8")
-
-    # Update proposals.json goal field if present, leaving proposals unchanged
-    proposals_file = ns_dir / "proposals.json"
-    if proposals_file.exists():
-        try:
-            p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
-            p_data["goal"] = goal_data
-            proposals_file.write_text(json.dumps(p_data, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+    atomic_write_json(ns_dir / "goal.json", goal_data)
+    _sync_goal_to_proposals(ns_dir, goal_data)
 
     return goal_data
-
-
-def analyze_codebase_delta(repo_root: Path, sha: str = "HEAD") -> Dict[str, Any]:
-    """
-    Backwards-compatible wrapper around deep_analyze_codebase.
-    """
-    deep = deep_analyze_codebase(repo_root, head_sha=sha)
-    return {
-        "changedFiles": deep["changed_files_head"],
-        "languages": deep["languages"],
-        "recentSubjects": [c["subject"] for c in deep["recent_commits"][:5]],
-        "todos": deep["todos"][:5],
-    }
 
 
 def synthesize_next_steps(repo_root: Path, force: bool = False) -> Dict[str, Any]:
@@ -2041,7 +2177,7 @@ flowchart TD
             "todosCount": len(codebase["todos"]),
         },
     }
-    proposals_file.write_text(json.dumps(cache_data, indent=2), encoding="utf-8")
+    atomic_write_json(proposals_file, cache_data)
 
     exec_data = load_execution_state(repo_root)
     executions = exec_data.get("executions", {})
@@ -2094,8 +2230,6 @@ def is_plan_id_match(id_a: str, id_b: str) -> bool:
         return True
     if a.startswith(f"{b}-") or b.startswith(f"{a}-"):
         return True
-    if a.endswith(f"-{b}") or b.endswith(f"-{a}"):
-        return True
     return False
 
 
@@ -2126,23 +2260,7 @@ def is_conversation_active(conv_id: str, max_age_seconds: int = 900) -> bool:
         if age > max_age_seconds:
             return False
 
-        last_step = None
-        with open(t_file, "rb") as fp:
-            fp.seek(0, 2)
-            size = fp.tell()
-            fp.seek(max(0, size - 65536), 0)
-            chunk = fp.read().decode("utf-8", errors="ignore")
-            lines = chunk.strip().split("\n")
-            for line in reversed(lines):
-                line = line.strip()
-                if line and line.startswith("{"):
-                    try:
-                        parsed = json.loads(line)
-                        if isinstance(parsed, dict) and "type" in parsed:
-                            last_step = parsed
-                            break
-                    except Exception:
-                        pass
+        last_step = read_last_transcript_step(t_file)
 
         if not last_step:
             return True
@@ -2196,16 +2314,10 @@ def complete_synthesis(repo_root: Path) -> Dict[str, Any]:
     conv_id = state_data.get("conversationId")
     state_data["status"] = "ready"
     state_data["completedAt"] = now_iso()
-    state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+    atomic_write_json(state_file, state_data)
 
     if conv_id:
-        with StateLock():
-            global_state = load_state()
-            if "active_watchdog_conversations" in global_state:
-                global_state["active_watchdog_conversations"] = [
-                    c for c in global_state["active_watchdog_conversations"] if c != conv_id
-                ]
-                save_state(global_state)
+        remove_active_conversation(conv_id)
 
     return {"ok": True, "status": "ready"}
 
@@ -2231,41 +2343,15 @@ def cancel_synthesis(repo_root: Path) -> Dict[str, Any]:
     s_data["status"] = "cancelled"
     s_data["cancelledAt"] = now_iso()
     s_data["reason"] = "user_cancelled"
-    state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+    atomic_write_json(state_file, s_data)
 
     notified_chat = False
     if conv_id:
-        # Remove from global active conversations
-        with StateLock():
-            global_state = load_state()
-            if "active_watchdog_conversations" in global_state:
-                global_state["active_watchdog_conversations"] = [
-                    c for c in global_state["active_watchdog_conversations"] if c != conv_id
-                ]
-                save_state(global_state)
-
-        # Notify the conversation via AgentAPI send-message
-        env = get_cached_ls_env()
-        agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-        if Path(agentapi_bin).exists():
-            msg = "[CANCEL-SYNTHESIS] Next steps refresh was cancelled by user. Stop synthesis immediately."
-            if "language_server" in Path(agentapi_bin).name:
-                cmd = [agentapi_bin, "agentapi", "send-message", conv_id, msg]
-            else:
-                cmd = [agentapi_bin, "send-message", conv_id, msg]
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    cwd=str(repo_root),
-                    env=env,
-                    timeout=8,
-                )
-                if proc.returncode == 0:
-                    notified_chat = True
-            except Exception:
-                pass
+        remove_active_conversation(conv_id)
+        msg = "[CANCEL-SYNTHESIS] Next steps refresh was cancelled by user. Stop synthesis immediately."
+        proc = invoke_agentapi(["send-message", conv_id, msg], cwd=repo_root, timeout=8)
+        if proc is not None and proc.returncode == 0:
+            notified_chat = True
 
     proposals = []
     goal_data = load_goal(repo_root)
@@ -2339,7 +2425,7 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
                     if elapsed > 900:  # 15-minute safety timeout
                         s_data["status"] = "failed"
                         s_data["error"] = "Synthesis timed out after 15 minutes."
-                        state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+                        atomic_write_json(state_file, s_data)
                         status_val = "failed"
                         is_synthesizing = False
                     elif conv_id:
@@ -2353,7 +2439,7 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
                             else:
                                 s_data["status"] = "failed"
                                 s_data["error"] = "Synthesis agent terminated without generating proposals."
-                                state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+                                atomic_write_json(state_file, s_data)
                                 status_val = "failed"
                                 is_synthesizing = False
                     else:
@@ -2361,7 +2447,7 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
                             s_data["status"] = "failed"
                             s_data["error"] = "Synthesis process did not record a conversation ID."
                             try:
-                                state_file.write_text(json.dumps(s_data, indent=2), encoding="utf-8")
+                                atomic_write_json(state_file, s_data)
                             except Exception:
                                 pass
                             status_val = "failed"
@@ -2377,6 +2463,7 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
             s_data["error"] = str(exc)
 
     proposals = []
+    conversations_count = 0
     goal_data = load_goal(repo_root)
     if proposals_file.exists():
         try:
@@ -2384,6 +2471,7 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
             proposals = p_data.get("proposals", [])
             if p_data.get("goal"):
                 goal_data = p_data["goal"]
+            conversations_count = int((p_data.get("intelligence") or {}).get("conversationsAnalyzed", 0))
         except Exception:
             pass
 
@@ -2395,7 +2483,7 @@ def check_synthesis_status(repo_root: Path) -> Dict[str, Any]:
         "error": s_data.get("error"),
         "proposals": proposals,
         "goal": goal_data,
-        "conversationsCount": len(get_project_conversations(repo_root)),
+        "conversationsCount": conversations_count,
     }
 
 
@@ -2431,12 +2519,13 @@ def dispatch_synthesis_agent(repo_root: Path) -> Dict[str, Any]:
         "commitSha": head_sha,
         "shortSha": short_sha,
     }
-    state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
+    atomic_write_json(state_file, state_data)
 
     # Format completed commits (anti-repetition mandate!)
     commits_lines = []
     for c in recent[:15]:
-        commits_lines.append(f"- Commit {c['short_sha']} ({c.get('date', '')}): {c['subject']}")
+        c_date = c.get("relative_time") or c.get("committed_at") or c.get("date", "")
+        commits_lines.append(f"- Commit {c['short_sha']} ({c_date}): {c['subject']}")
     formatted_commits = "\n".join(commits_lines) if commits_lines else f"- {short_sha}: {subject}"
 
     # Format recent user requests
@@ -2532,46 +2621,24 @@ python3 "{ctl_script_path}" complete-synthesis --repo "{str(repo_root)}"
 """
 
     host_mode = resolve_host()
-    env = get_cached_ls_env()
-    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
     title = f"Next Steps Synthesizer: {repo_root.name} @ {short_sha}"
 
     dispatched = False
     conv_id = None
-    if host_mode in ("antigravity", "auto") and Path(agentapi_bin).exists():
-        if "language_server" in Path(agentapi_bin).name:
-            cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
-        else:
-            cmd = [agentapi_bin, "new-conversation", f"--title={title}", prompt]
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=str(repo_root),
-                env=env,
-                timeout=12,
-            )
-            if proc.returncode == 0:
-                dispatched = True
-                try:
-                    data = json.loads(proc.stdout)
-                    conv_id = extract_conversation_id(data)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+    if host_mode in ("antigravity", "auto"):
+        proc = invoke_agentapi(["new-conversation", f"--title={title}", prompt], cwd=repo_root, timeout=12)
+        if proc is not None and proc.returncode == 0:
+            dispatched = True
+            try:
+                data = json.loads(proc.stdout)
+                conv_id = extract_conversation_id(data)
+            except Exception:
+                pass
 
     if dispatched and conv_id:
         state_data["conversationId"] = conv_id
-        state_file.write_text(json.dumps(state_data, indent=2), encoding="utf-8")
-        with StateLock():
-            st = load_state()
-            active = st.setdefault("active_watchdog_conversations", [])
-            if conv_id not in active:
-                active.append(conv_id)
-                save_state(st)
+        atomic_write_json(state_file, state_data)
+        track_active_conversation(conv_id)
 
     if not dispatched:
         # Fallback to local deterministic synthesis if AgentAPI is not available
@@ -2605,32 +2672,16 @@ You are tasked with executing the following approved implementation plan:
 
 Execute this plan step by step, adhering to the plan specifications, writing necessary tests, and verifying results.
 """
-    env = get_cached_ls_env()
-    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-    if Path(agentapi_bin).exists():
-        title = f"Next Step: {plan_title}"
-        if "language_server" in Path(agentapi_bin).name:
-            cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
-        else:
-            cmd = [agentapi_bin, "new-conversation", f"--title={title}", prompt]
-
+    title = f"Next Step: {plan_title}"
+    proc = invoke_agentapi(["new-conversation", f"--title={title}", prompt], cwd=repo_root, timeout=10)
+    if proc is not None and proc.returncode == 0:
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=str(repo_root),
-                env=env,
-                timeout=10,
-            )
-            if proc.returncode == 0:
-                data = json.loads(proc.stdout)
-                conv_id = extract_conversation_id(data)
-                if conv_id:
-                    return conv_id
+            data = json.loads(proc.stdout)
+            conv_id = extract_conversation_id(data)
+            if conv_id:
+                return conv_id
         except Exception:
             pass
-
     return None
 
 
@@ -2656,10 +2707,7 @@ def load_execution_state(repo_root: Path) -> Dict[str, Any]:
 
 
 def save_execution_state(repo_root: Path, state: Dict[str, Any]) -> None:
-    f = get_execution_state_file(repo_root)
-    tmp = f.with_suffix(f".{os.getpid()}_{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    tmp.replace(f)
+    atomic_write_json(get_execution_state_file(repo_root), state)
 
 
 def find_conversation_for_plan(plan_id: str, plan_title: str) -> Optional[str]:
@@ -2725,12 +2773,7 @@ def mark_execution_running(
     save_execution_state(repo_root, state)
 
     if conv_id:
-        with StateLock():
-            st = load_state()
-            active = st.setdefault("active_watchdog_conversations", [])
-            if conv_id not in active:
-                active.append(conv_id)
-            save_state(st)
+        track_active_conversation(conv_id)
 
     return exec_record
 
@@ -2800,39 +2843,21 @@ def reconcile_executions(repo_root: Path) -> Dict[str, Any]:
         if conv_id and conv_id != "foreground-agent":
             if not is_conversation_active(conv_id, max_age_seconds=900):
                 t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
-                if t_file.exists():
-                    try:
-                        last_line = ""
-                        with open(t_file, "rb") as fp:
-                            fp.seek(0, 2)
-                            size = fp.tell()
-                            fp.seek(max(0, size - 65536), 0)
-                            chunk = fp.read().decode("utf-8", errors="ignore")
-                            for line in reversed(chunk.splitlines()):
-                                line = line.strip()
-                                if line.startswith("{"):
-                                    last_line = line
-                                    break
-                        if last_line:
-                            parsed = json.loads(last_line)
-                            step_status = parsed.get("status")
-                            step_type = parsed.get("type")
-                            if step_status in ("ERROR", "CANCELLED", "CANCELED"):
-                                item["status"] = "interrupted"
-                                item["completedAt"] = now_iso()
-                                item["summary"] = "Agent execution was interrupted or cancelled before completion. Click Continue Execution to resume."
-                                modified = True
-                            elif step_type == "PLANNER_RESPONSE" and not parsed.get("tool_calls"):
-                                item["status"] = "completed"
-                                item["completedAt"] = now_iso()
-                                item["summary"] = "Plan execution completed by agent."
-                                modified = True
-                            else:
-                                item["status"] = "interrupted"
-                                item["completedAt"] = now_iso()
-                                item["summary"] = "Execution was interrupted before completion. Click Continue Execution to resume."
-                                modified = True
-                    except Exception:
+                parsed = read_last_transcript_step(t_file) if t_file.exists() else None
+                if parsed is not None:
+                    step_status = parsed.get("status")
+                    step_type = parsed.get("type")
+                    if step_status in ("ERROR", "CANCELLED", "CANCELED"):
+                        item["status"] = "interrupted"
+                        item["completedAt"] = now_iso()
+                        item["summary"] = "Agent execution was interrupted or cancelled before completion. Click Continue Execution to resume."
+                        modified = True
+                    elif step_type == "PLANNER_RESPONSE" and not parsed.get("tool_calls"):
+                        item["status"] = "completed"
+                        item["completedAt"] = now_iso()
+                        item["summary"] = "Plan execution completed by agent."
+                        modified = True
+                    else:
                         item["status"] = "interrupted"
                         item["completedAt"] = now_iso()
                         item["summary"] = "Execution was interrupted before completion. Click Continue Execution to resume."
@@ -2840,7 +2865,11 @@ def reconcile_executions(repo_root: Path) -> Dict[str, Any]:
                 else:
                     item["status"] = "interrupted"
                     item["completedAt"] = now_iso()
-                    item["summary"] = "Agent process exited before committing changes. Click Continue Execution to resume."
+                    item["summary"] = (
+                        "Execution was interrupted before completion. Click Continue Execution to resume."
+                        if t_file.exists()
+                        else "Agent process exited before committing changes. Click Continue Execution to resume."
+                    )
                     modified = True
                 remove_active_conversation(conv_id)
         else:
@@ -2903,8 +2932,8 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = Tru
         plan_content = plan_path.read_text(encoding="utf-8")
         title = matched["title"]
 
+        # Active execution mutex check under StateLock (no subprocess calls inside lock)
         with StateLock():
-            # Active execution mutex: check if plan is already running with an active conversation
             exec_state = load_execution_state(repo_root)
             executions = exec_state.get("executions", {})
             existing = executions.get(clean_id)
@@ -2923,22 +2952,22 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = Tru
                         "error": "Plan is already executing in an active agent conversation.",
                     }
 
-            conv_id = spawn_plan_agent(repo_root, title, plan_content) if spawn_agent else "foreground-agent"
-            prompt_text = f"[NEXT-STEPS-SESSION]\nImplement the approved plan '{title}':\n\n{plan_content}"
+        conv_id = spawn_plan_agent(repo_root, title, plan_content) if spawn_agent else "foreground-agent"
+        prompt_text = f"[NEXT-STEPS-SESSION]\nImplement the approved plan '{title}':\n\n{plan_content}"
 
-            exec_record = mark_execution_running(repo_root, clean_id, conv_id, title) if spawn_agent else None
-            if exec_record and exec_record.get("conversationId") and not conv_id:
-                conv_id = exec_record["conversationId"]
+        exec_record = mark_execution_running(repo_root, clean_id, conv_id, title) if spawn_agent else None
+        if exec_record and exec_record.get("conversationId") and not conv_id:
+            conv_id = exec_record["conversationId"]
 
-            return {
-                "ok": True,
-                "planId": clean_id,
-                "title": title,
-                "dispatched": bool(conv_id and conv_id != "foreground-agent"),
-                "conversationId": conv_id,
-                "prompt": prompt_text,
-                "execution": exec_record,
-            }
+        return {
+            "ok": True,
+            "planId": clean_id,
+            "title": title,
+            "dispatched": bool(conv_id and conv_id != "foreground-agent"),
+            "conversationId": conv_id,
+            "prompt": prompt_text,
+            "execution": exec_record,
+        }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -2971,23 +3000,23 @@ def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
     ns_dir = repo_root / ".antigravity" / NEXT_STEPS_DIR_NAME
     proposals_file = ns_dir / "proposals.json"
     proposals = []
+    conversations_count = 0
     if proposals_file.exists():
         try:
             p_data = json.loads(proposals_file.read_text(encoding="utf-8"))
             proposals = p_data.get("proposals", [])
+            conversations_count = int((p_data.get("intelligence") or {}).get("conversationsAnalyzed", 0))
         except Exception:
             pass
 
-    reconcile_executions(repo_root)
-    exec_data = load_execution_state(repo_root)
-    executions = exec_data.get("executions", {})
+    rec_res = reconcile_executions(repo_root)
+    executions = rec_res.get("executions", {}) if isinstance(rec_res, dict) else {}
     for p in proposals:
         p_id = p.get("id")
         if p_id and p_id in executions:
             p["execution"] = executions[p_id]
 
     goal_data = load_goal(repo_root)
-    convs = get_project_conversations(repo_root)
 
     if not youngest:
         return {
@@ -3002,7 +3031,7 @@ def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
             "goal": goal_data,
             "proposals": proposals,
             "executions": executions,
-            "conversationsCount": len(convs),
+            "conversationsCount": conversations_count,
         }
 
     return {
@@ -3025,7 +3054,7 @@ def inspect_repo_details(repo_root: Path) -> Optional[Dict[str, Any]]:
         "goal": goal_data,
         "proposals": proposals,
         "executions": executions,
-        "conversationsCount": len(convs),
+        "conversationsCount": conversations_count,
     }
 
 
@@ -3035,150 +3064,154 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
     (including nested ones), find the youngest commit in each, prune stale empty-tree
     wrapper repos, update baseline SHAs in state.json, and return the synced summary.
     """
-    with StateLock():
-        state = load_state()
-        effective_ws_paths = list(workspace_paths or [])
+    state_snapshot = load_state()
+    effective_ws_paths = list(workspace_paths or [])
 
-        # If no workspace paths were provided, discover active Antigravity workspaces
-        if not effective_ws_paths:
-            if PROJECTS_DIR.exists():
+    # If no workspace paths were provided, discover active Antigravity workspaces
+    if not effective_ws_paths and PROJECTS_DIR.exists():
+        try:
+            for pfile in sorted(PROJECTS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]:
                 try:
-                    for pfile in sorted(PROJECTS_DIR.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]:
-                        try:
-                            pdata = json.loads(pfile.read_text(encoding="utf-8"))
-                            for res in pdata.get("projectResources", {}).get("resources", []):
-                                raw_uri = res.get("folderUri") or (res.get("gitFolder") or {}).get("folderUri")
-                                cp = clean_repo_path(raw_uri)
-                                if cp and cp.exists() and str(cp) not in effective_ws_paths:
-                                    effective_ws_paths.append(str(cp))
-                        except Exception:
-                            pass
+                    pdata = json.loads(pfile.read_text(encoding="utf-8"))
+                    for res in pdata.get("projectResources", {}).get("resources", []):
+                        raw_uri = res.get("folderUri") or (res.get("gitFolder") or {}).get("folderUri")
+                        cp = clean_repo_path(raw_uri)
+                        if cp and cp.exists() and str(cp) not in effective_ws_paths:
+                            effective_ws_paths.append(str(cp))
                 except Exception:
                     pass
+        except Exception:
+            pass
 
-        requested_roots = set()
-        discovered_roots: List[Path] = []
-        seen_roots = set()
+    requested_roots = set()
+    discovered_roots: List[Path] = []
+    seen_roots = set()
 
-        for wp in effective_ws_paths:
-            if not wp:
-                continue
-            for r in discover_git_roots(wp):
-                requested_roots.add(str(r))
-                if str(r) not in seen_roots:
-                    seen_roots.add(str(r))
-                    discovered_roots.append(r)
+    for wp in effective_ws_paths:
+        if not wp:
+            continue
+        for r in discover_git_roots(wp):
+            requested_roots.add(str(r))
+            if str(r) not in seen_roots:
+                seen_roots.add(str(r))
+                discovered_roots.append(r)
 
-        for tracked_path in list(state.get("repos", {}).keys()):
-            for r in discover_git_roots(tracked_path):
-                if str(r) not in seen_roots:
-                    seen_roots.add(str(r))
-                    discovered_roots.append(r)
+    for tracked_path in list(state_snapshot.get("repos", {}).keys()):
+        for r in discover_git_roots(tracked_path):
+            if str(r) not in seen_roots:
+                seen_roots.add(str(r))
+                discovered_roots.append(r)
 
-        repo_details: List[Dict[str, Any]] = []
-        for r in discovered_roots:
-            details = inspect_repo_details(r)
-            if details:
-                details["inRequestedWorkspace"] = (
-                    (str(r) in requested_roots) if requested_roots else True
-                )
-                repo_details.append(details)
-
-        # Sort by: (inRequestedWorkspace, not is_empty_tree, youngestCommit.timestamp) DESC
-        def _sort_key(d: Dict[str, Any]):
-            in_req = 1 if d.get("inRequestedWorkspace", True) else 0
-            yc = d.get("youngestCommit")
-            if not yc:
-                return (in_req, 0, 0)
-            non_empty = 0 if yc.get("is_empty_tree") else 1
-            ts = int(yc.get("timestamp", 0))
-            return (in_req, non_empty, ts)
-
-        repo_details.sort(key=_sort_key, reverse=True)
-
-        # Prune any tracked outer wrapper repo in state["repos"] that has an empty-tree commit
-        # or contains a nested active repository inside it
-        new_repos_state: Dict[str, Any] = {}
-        empty_wrapper_paths = set()
-        for d in repo_details:
-            rpath = d["repoPath"]
-            norm_rpath = str(rpath).replace("\\", "/").rstrip("/")
-            yc = d.get("youngestCommit")
-            has_nested_child = any(
-                other["repoPath"] != rpath and (
-                    str(other["repoPath"]).replace("\\", "/").rstrip("/").startswith(norm_rpath + "/")
-                )
-                for other in repo_details
+    repo_details: List[Dict[str, Any]] = []
+    for r in discovered_roots:
+        details = inspect_repo_details(r)
+        if details:
+            details["inRequestedWorkspace"] = (
+                (str(r) in requested_roots) if requested_roots else True
             )
-            if yc and yc.get("is_empty_tree") and has_nested_child:
-                empty_wrapper_paths.add(rpath)
-                continue
-            if yc:
-                new_repos_state[rpath] = {
-                    "name": d["repoName"],
-                    "baseline_sha": yc["sha"],
-                    "youngest_short_sha": yc["short_sha"],
-                    "youngest_subject": yc["subject"],
-                    "youngest_committed_at": yc.get("committed_at", ""),
-                    "updated_at": now_iso(),
-                }
-            else:
-                new_repos_state[rpath] = {
-                    "name": d["repoName"],
-                    "baseline_sha": "",
-                    "youngest_short_sha": "",
-                    "youngest_subject": "No commits yet",
-                    "youngest_committed_at": "",
-                    "updated_at": now_iso(),
-                }
+            repo_details.append(details)
 
-        # Also check any previous state["repos"] entries that were empty wrappers of discovered repos
-        for old_rpath in list(state.get("repos", {}).keys()):
-            norm_old = str(old_rpath).replace("\\", "/").rstrip("/")
-            if any(
-                d["repoPath"] != old_rpath and (
-                    str(d["repoPath"]).replace("\\", "/").rstrip("/").startswith(norm_old + "/")
-                )
-                for d in repo_details
-            ):
-                info = get_commit_info(Path(old_rpath), "HEAD")
-                if not info or info.get("is_empty_tree"):
-                    empty_wrapper_paths.add(old_rpath)
+    # Sort by: (inRequestedWorkspace, not is_empty_tree, youngestCommit.timestamp) DESC
+    def _sort_key(d: Dict[str, Any]):
+        in_req = 1 if d.get("inRequestedWorkspace", True) else 0
+        yc = d.get("youngestCommit")
+        if not yc:
+            return (in_req, 0, 0)
+        non_empty = 0 if yc.get("is_empty_tree") else 1
+        ts = int(yc.get("timestamp", 0))
+        return (in_req, non_empty, ts)
 
-        # Filter out empty wrapper repos from repo_details and state["jobs"]
+    repo_details.sort(key=_sort_key, reverse=True)
+
+    # Prune any tracked outer wrapper repo in state["repos"] that has an empty-tree commit
+    # or contains a nested active repository inside it
+    new_repos_state: Dict[str, Any] = {}
+    empty_wrapper_paths = set()
+    for d in repo_details:
+        rpath = d["repoPath"]
+        norm_rpath = str(rpath).replace("\\", "/").rstrip("/")
+        yc = d.get("youngestCommit")
+        has_nested_child = any(
+            other["repoPath"] != rpath and (
+                str(other["repoPath"]).replace("\\", "/").rstrip("/").startswith(norm_rpath + "/")
+            )
+            for other in repo_details
+        )
+        if yc and yc.get("is_empty_tree") and has_nested_child:
+            empty_wrapper_paths.add(rpath)
+            continue
+        if yc:
+            new_repos_state[rpath] = {
+                "name": d["repoName"],
+                "baseline_sha": yc["sha"],
+                "youngest_short_sha": yc["short_sha"],
+                "youngest_subject": yc["subject"],
+                "youngest_committed_at": yc.get("committed_at", ""),
+                "updated_at": now_iso(),
+            }
+        else:
+            new_repos_state[rpath] = {
+                "name": d["repoName"],
+                "baseline_sha": "",
+                "youngest_short_sha": "",
+                "youngest_subject": "No commits yet",
+                "youngest_committed_at": "",
+                "updated_at": now_iso(),
+            }
+
+    for old_rpath in list(state_snapshot.get("repos", {}).keys()):
+        norm_old = str(old_rpath).replace("\\", "/").rstrip("/")
+        if any(
+            d["repoPath"] != old_rpath and (
+                str(d["repoPath"]).replace("\\", "/").rstrip("/").startswith(norm_old + "/")
+            )
+            for d in repo_details
+        ):
+            info = get_commit_info(Path(old_rpath), "HEAD")
+            if not info or info.get("is_empty_tree"):
+                empty_wrapper_paths.add(old_rpath)
+
+    if empty_wrapper_paths:
+        repo_details = [
+            d for d in repo_details
+            if not any(is_same_repo_path(d["repoPath"], ep) for ep in empty_wrapper_paths)
+        ]
+
+    # Check fix branches outside lock so git subprocesses don't hold StateLock
+    applied_fix_job_ids = set()
+    delete_fix_branches: List[Tuple[Path, str]] = []
+    for j in state_snapshot.get("jobs", []):
+        if j.get("fixes_committed") and j.get("fix_branch") and not j.get("fixes_applied"):
+            jr_path = Path(j.get("repo_path", ""))
+            fb = j["fix_branch"]
+            if jr_path.exists():
+                rc_fb, _, _ = run_git(jr_path, ["rev-parse", "--verify", f"refs/heads/{fb}"])
+                if rc_fb != 0:
+                    applied_fix_job_ids.add(j.get("id"))
+                    continue
+                rc_d, diff_out, _ = run_git(jr_path, ["diff", f"HEAD..{fb}"])
+                if rc_d == 0 and not diff_out.strip():
+                    applied_fix_job_ids.add(j.get("id"))
+                    delete_fix_branches.append((jr_path, fb))
+    for jr_path, fb in delete_fix_branches:
+        run_git(jr_path, ["branch", "-D", fb])
+
+    with StateLock():
+        state = load_state()
         if empty_wrapper_paths:
-            repo_details = [
-                d for d in repo_details
-                if not any(is_same_repo_path(d["repoPath"], ep) for ep in empty_wrapper_paths)
-            ]
             state["jobs"] = [
                 j for j in state.get("jobs", [])
                 if not any(is_same_repo_path(j.get("repo_path"), ep) for ep in empty_wrapper_paths)
             ]
 
-        # Reconcile any running, queued, or interrupted jobs against disk reports or conversation state
         for j in state.get("jobs", []):
-            reconcile_job(j)
+            reconcile_job(j, state)
+            if j.get("id") in applied_fix_job_ids and j.get("fixes_committed") and not j.get("fixes_applied"):
+                j["fixes_applied"] = True
+                j["fixes_committed"] = False
+                j["fix_branch"] = None
 
-        # Reconcile any completed jobs whose fix commits have already been applied to HEAD
-        for j in state.get("jobs", []):
-            if j.get("fixes_committed") and j.get("fix_branch") and not j.get("fixes_applied"):
-                jr_path = Path(j.get("repo_path", ""))
-                fb = j["fix_branch"]
-                if jr_path.exists():
-                    rc_fb, _, _ = run_git(jr_path, ["rev-parse", "--verify", f"refs/heads/{fb}"])
-                    if rc_fb != 0:
-                        j["fixes_applied"] = True
-                        j["fixes_committed"] = False
-                        j["fix_branch"] = None
-                        continue
-                    rc_d, diff_out, _ = run_git(jr_path, ["diff", f"HEAD..{fb}"])
-                    if rc_d == 0 and not diff_out.strip():
-                        j["fixes_applied"] = True
-                        j["fixes_committed"] = False
-                        j["fix_branch"] = None
-                        run_git(jr_path, ["branch", "-D", fb])
-
+        _prune_stale_active_convs(state)
         state["repos"] = new_repos_state
         save_state(state)
 
@@ -3497,54 +3530,31 @@ def spawn_detached_agent(job: Dict[str, Any]) -> bool:
     target_cwd = Path(job["worktree_path"]) if Path(job["worktree_path"]).exists() else Path(job["repo_path"])
 
     host_mode = resolve_host()
-    env = get_cached_ls_env()
-    agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-    if host_mode in ("antigravity", "auto") and Path(agentapi_bin).exists():
-        if "language_server" in Path(agentapi_bin).name:
-            cmd = [agentapi_bin, "agentapi", "new-conversation", f"--title={title}", prompt]
-        else:
-            cmd = [agentapi_bin, "new-conversation", f"--title={title}", prompt]
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=str(target_cwd),
-                env=env,
-                timeout=10,
-            )
-            with open(log_file, "a", encoding="utf-8") as lf:
-                lf.write(f"\n[{now_iso()}] Dispatched Watchdog via {agentapi_bin} for {job['id']}\n")
-                if proc.stdout:
-                    lf.write(f"STDOUT:\n{proc.stdout}\n")
-                if proc.stderr:
-                    lf.write(f"STDERR:\n{proc.stderr}\n")
-
-            if proc.returncode == 0:
-                conv_id = None
-                try:
-                    data = json.loads(proc.stdout)
-                    conv_id = extract_conversation_id(data)
-                except Exception:
-                    pass
-                if conv_id:
-                    job["conversation_id"] = conv_id
-                    track_active_conversation(conv_id)
-                    with StateLock():
-                        st = load_state()
-                        for j in st.get("jobs", []):
-                            if j["id"] == job["id"]:
-                                j["conversation_id"] = conv_id
-                                break
-                        save_state(st)
-                return True
-        except Exception as exc:
+    if host_mode in ("antigravity", "auto"):
+        proc = invoke_agentapi(
+            ["new-conversation", f"--title={title}", prompt],
+            cwd=target_cwd,
+            timeout=10,
+            log_file=log_file,
+        )
+        if proc is not None and proc.returncode == 0:
+            conv_id = None
             try:
-                with open(log_file, "a", encoding="utf-8") as lf:
-                    lf.write(f"[{now_iso()}] Failed to spawn agentapi: {exc}\n")
+                data = json.loads(proc.stdout)
+                conv_id = extract_conversation_id(data)
             except Exception:
                 pass
+            if conv_id:
+                job["conversation_id"] = conv_id
+                with StateLock():
+                    st = load_state()
+                    _update_active_convs_in_state(st, conv_id, True)
+                    for j in st.get("jobs", []):
+                        if j["id"] == job["id"]:
+                            j["conversation_id"] = conv_id
+                            break
+                    save_state(st)
+            return True
 
     return False
 
@@ -3570,23 +3580,23 @@ def queue_commit(
     msg_full = f"{info['subject']}\n{info.get('body', '')}"
     reconcile_jobs(repo_root)
 
-    if any(tag in msg_full for tag in SKIP_TAGS):
+    if not force and any(tag in msg_full for tag in SKIP_TAGS):
         return None
 
     slug = repo_slug(repo_root)
     job_id = f"{slug}-{short_sha}"
+    repo_key = str(repo_root)
 
+    # Phase 1: Quick state check under lock (no heavy git subprocesses)
     with StateLock():
         state = load_state()
-        repo_key = str(repo_root)
-
-        # Check if an audit is already in progress for this repository to prevent double auditing
-        running_job = None
-        for j in state.get("jobs", []):
-            if is_same_repo_path(j.get("repo_path"), repo_key) and j.get("status") in ("running", "queued"):
-                running_job = j
-                break
-
+        running_job = next(
+            (
+                j for j in state.get("jobs", [])
+                if is_same_repo_path(j.get("repo_path"), repo_key) and j.get("status") in ("running", "queued")
+            ),
+            None,
+        )
         if running_job:
             repo_meta = state.setdefault("repos", {}).setdefault(
                 repo_key,
@@ -3597,78 +3607,110 @@ def queue_commit(
                 repo_meta["pending_base_sha"] = running_job.get("sha")
             repo_meta["updated_at"] = now_iso()
             save_state(state)
+            running_copy = dict(running_job)
+        else:
+            running_copy = None
 
-            comment_to_send = user_comment.strip()
-            if not comment_to_send and running_job.get("id") != job_id:
-                comment_to_send = f"Commit {short_sha} ('{info['subject']}') was made while this audit is in progress."
-            if comment_to_send:
-                send_comment_to_job(running_job, comment_to_send)
+        skip_docs = state.get("skip_docs_only", True)
+        auto_dispatch = state.get("auto_dispatch", True)
+        existing_job = next((dict(j) for j in state.get("jobs", []) if j["id"] == job_id), None)
 
-            running_job["already_running"] = True
-            return running_job
+    if running_copy:
+        comment_to_send = user_comment.strip()
+        if not comment_to_send and running_copy.get("id") != job_id:
+            comment_to_send = f"Commit {short_sha} ('{info['subject']}') was made while this audit is in progress."
+        if comment_to_send:
+            send_comment_to_job(running_copy, comment_to_send)
+        running_copy["already_running"] = True
+        return running_copy
 
-        if not force and state.get("skip_docs_only", True):
-            if is_docs_only_commit(repo_root, full_sha, base_sha or info.get("parent_sha", "")):
+    if existing_job is not None and not force:
+        with StateLock():
+            state = load_state()
+            state.setdefault("repos", {})[repo_key] = {
+                "name": repo_root.name,
+                "baseline_sha": full_sha,
+                "updated_at": now_iso(),
+            }
+            save_state(state)
+        if user_comment:
+            send_comment_to_job(existing_job, user_comment)
+        return existing_job
+
+    # Phase 2: Slow git checks & worktree preparation outside StateLock
+    if not force and skip_docs:
+        if is_docs_only_commit(repo_root, full_sha, base_sha or info.get("parent_sha", "")):
+            with StateLock():
+                state = load_state()
                 state.setdefault("repos", {})[repo_key] = {
                     "name": repo_root.name,
                     "baseline_sha": full_sha,
                     "updated_at": now_iso(),
                 }
                 save_state(state)
-                return None
+            return None
 
-        existing_idx = next((i for i, j in enumerate(state["jobs"]) if j["id"] == job_id), None)
-        if existing_idx is not None and not force:
+    worktree_path, fix_branch, report_path = prepare_worktree(repo_root, full_sha)
+    resolved_base = resolve_base_sha(repo_root, full_sha, base_sha or info.get("parent_sha", ""))
+
+    job: Dict[str, Any] = {
+        "id": job_id,
+        "repo_path": repo_key,
+        "repo_name": repo_root.name,
+        "sha": full_sha,
+        "short_sha": short_sha,
+        "base_sha": resolved_base,
+        "commit_msg": info["subject"],
+        "user_comment": user_comment.strip() if user_comment else None,
+        "author": info["author"],
+        "committed_at": info["committed_at"],
+        "queued_at": now_iso(),
+        "started_at": None,
+        "completed_at": None,
+        "status": "queued",
+        "queued_by": "antigravity",
+        "verdict": "PENDING",
+        "summary": "Queued for code & visual Watchdog review.",
+        "bugs_count": 0,
+        "fixes_committed": False,
+        "fix_branch": fix_branch,
+        "worktree_path": str(worktree_path),
+        "report_path": str(report_path),
+    }
+
+    # Phase 3: Re-check running mutex and commit job under StateLock
+    raced_running: Optional[Dict[str, Any]] = None
+    with StateLock():
+        state = load_state()
+        running_job = next(
+            (
+                j for j in state.get("jobs", [])
+                if is_same_repo_path(j.get("repo_path"), repo_key) and j.get("status") in ("running", "queued")
+            ),
+            None,
+        )
+        if running_job:
+            raced_running = dict(running_job)
+        else:
+            existing_idx = next((i for i, j in enumerate(state["jobs"]) if j["id"] == job_id), None)
+            if existing_idx is not None:
+                state["jobs"].pop(existing_idx)
+            state["jobs"].insert(0, job)
             state.setdefault("repos", {})[repo_key] = {
                 "name": repo_root.name,
                 "baseline_sha": full_sha,
                 "updated_at": now_iso(),
             }
-            if user_comment:
-                send_comment_to_job(state["jobs"][existing_idx], user_comment)
+            auto_dispatch = state.get("auto_dispatch", True)
             save_state(state)
-            return state["jobs"][existing_idx]
 
-        worktree_path, fix_branch, report_path = prepare_worktree(repo_root, full_sha)
-        resolved_base = resolve_base_sha(repo_root, full_sha, base_sha or info.get("parent_sha", ""))
+    if raced_running is not None:
+        if user_comment.strip():
+            send_comment_to_job(raced_running, user_comment.strip())
+        raced_running["already_running"] = True
+        return raced_running
 
-        job: Dict[str, Any] = {
-            "id": job_id,
-            "repo_path": repo_key,
-            "repo_name": repo_root.name,
-            "sha": full_sha,
-            "short_sha": short_sha,
-            "base_sha": resolved_base,
-            "commit_msg": info["subject"],
-            "user_comment": user_comment.strip() if user_comment else None,
-            "author": info["author"],
-            "committed_at": info["committed_at"],
-            "queued_at": now_iso(),
-            "started_at": None,
-            "completed_at": None,
-            "status": "queued",
-            "queued_by": "antigravity",
-            "verdict": "PENDING",
-            "summary": "Queued for code & visual Watchdog review.",
-            "bugs_count": 0,
-            "fixes_committed": False,
-            "fix_branch": fix_branch,
-            "worktree_path": str(worktree_path),
-            "report_path": str(report_path),
-        }
-
-        if existing_idx is not None:
-            state["jobs"].pop(existing_idx)
-        state["jobs"].insert(0, job)
-
-        state.setdefault("repos", {})[repo_key] = {
-            "name": repo_root.name,
-            "baseline_sha": full_sha,
-            "updated_at": now_iso(),
-        }
-        save_state(state)
-
-    should_dispatch = dispatch_now and state.get("auto_dispatch", True)
+    should_dispatch = dispatch_now and auto_dispatch
     if should_dispatch:
         dispatched = spawn_detached_agent(job)
         if dispatched:
@@ -3776,7 +3818,7 @@ def complete_job(
         "fix_branch": fix_branch if has_branch_commits else None,
         "report_path": str(report_md),
     }
-    report_json.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+    atomic_write_json(report_json, result_payload)
 
     next_pending_sha = ""
     next_pending_base = ""
@@ -3794,11 +3836,7 @@ def complete_job(
                 j["fix_branch"] = result_payload["fix_branch"]
                 j["report_path"] = result_payload["report_path"]
                 matched = True
-                conv_id = j.get("conversation_id")
-                if conv_id and "active_watchdog_conversations" in state:
-                    state["active_watchdog_conversations"] = [
-                        c for c in state["active_watchdog_conversations"] if c != conv_id
-                    ]
+                _update_active_convs_in_state(state, j.get("conversation_id") or "", False)
                 break
         if not matched:
             state["jobs"].insert(
@@ -3833,14 +3871,45 @@ def complete_job(
     return result_payload
 
 
+def _update_active_convs_in_state(state: Dict[str, Any], conv_id: str, add: bool) -> bool:
+    if not conv_id:
+        return False
+    active = state.setdefault("active_watchdog_conversations", [])
+    if add:
+        if conv_id not in active:
+            active.append(conv_id)
+            return True
+    elif conv_id in active:
+        state["active_watchdog_conversations"] = [c for c in active if c != conv_id]
+        return True
+    return False
+
+
+def _prune_stale_active_convs(state: Dict[str, Any]) -> bool:
+    active = state.get("active_watchdog_conversations")
+    if not active:
+        return False
+    running_ids = {
+        j.get("conversation_id")
+        for j in state.get("jobs", [])
+        if j.get("status") in ("running", "queued") and j.get("conversation_id")
+    }
+    kept = [
+        c for c in active
+        if c in running_ids or (c != "foreground-agent" and is_conversation_active(c, max_age_seconds=900))
+    ]
+    if len(kept) != len(active):
+        state["active_watchdog_conversations"] = kept
+        return True
+    return False
+
+
 def track_active_conversation(conv_id: str) -> None:
     if not conv_id:
         return
     with StateLock():
         st = load_state()
-        active = st.setdefault("active_watchdog_conversations", [])
-        if conv_id not in active:
-            active.append(conv_id)
+        if _update_active_convs_in_state(st, conv_id, True):
             save_state(st)
 
 
@@ -3849,10 +3918,7 @@ def remove_active_conversation(conv_id: str) -> None:
         return
     with StateLock():
         st = load_state()
-        if "active_watchdog_conversations" in st and conv_id in st["active_watchdog_conversations"]:
-            st["active_watchdog_conversations"] = [
-                c for c in st["active_watchdog_conversations"] if c != conv_id
-            ]
+        if _update_active_convs_in_state(st, conv_id, False):
             save_state(st)
 
 
@@ -3882,7 +3948,7 @@ def find_watchdog_conversation_for_job(job: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-def reconcile_job(j: Dict[str, Any]) -> bool:
+def reconcile_job(j: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> bool:
     """
     Reconcile a job's status by checking if audit reports were produced on disk,
     or if the subagent conversation has terminated / been interrupted.
@@ -3905,6 +3971,16 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
     full_sha = j.get("sha") or short_sha
     if not repo_root.exists() or not short_sha:
         return False
+
+    def _set_conv_active(cid: str, active_flag: bool) -> None:
+        if not cid:
+            return
+        if state is not None:
+            _update_active_convs_in_state(state, cid, active_flag)
+        elif active_flag:
+            track_active_conversation(cid)
+        else:
+            remove_active_conversation(cid)
 
     audits_dir = repo_root / ".antigravity" / "audits"
     report_json = audits_dir / f"review-{short_sha}.json"
@@ -3946,9 +4022,7 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
             j["fix_branch"] = r_data.get("fix_branch") or (f"fix/watchdog-{short_sha}" if has_fixes else None)
             j["completed_at"] = r_data.get("completed_at") or now_iso()
             j["report_path"] = str(report_md) if report_md.exists() else str(report_json)
-            conv_id = j.get("conversation_id")
-            if conv_id:
-                remove_active_conversation(conv_id)
+            _set_conv_active(j.get("conversation_id") or "", False)
             return True
         except Exception:
             pass
@@ -3993,9 +4067,7 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
                 j["fix_branch"] = fix_branch if has_commits else None
                 j["completed_at"] = j.get("completed_at") or now_iso()
                 j["report_path"] = str(report_md)
-                conv_id = j.get("conversation_id")
-                if conv_id:
-                    remove_active_conversation(conv_id)
+                _set_conv_active(j.get("conversation_id") or "", False)
                 return True
         except Exception:
             pass
@@ -4015,7 +4087,7 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
                 j["summary"] = "Autonomous Watchdog review in progress…"
             if not j.get("started_at"):
                 j["started_at"] = now_iso()
-            track_active_conversation(found_id)
+            _set_conv_active(found_id, True)
             modified = True
     elif curr_status == "queued" and conv_id:
         if is_conversation_active(conv_id):
@@ -4053,6 +4125,7 @@ def reconcile_job(j: Dict[str, Any]) -> bool:
             if not is_conversation_active(conv_id, max_age_seconds=900):
                 j["status"] = "interrupted"
                 j["summary"] = "Audit subagent was interrupted before completion. Click Continue Audit to resume."
+                _set_conv_active(conv_id, False)
                 return True
         else:
             started = j.get("started_at") or j.get("queued_at")
@@ -4085,8 +4158,10 @@ def reconcile_jobs(repo_filter: Optional[Path] = None) -> List[Dict[str, Any]]:
                 jr_path = j.get("repo_path")
                 if jr_path and not is_same_repo_path(jr_path, repo_filter):
                     continue
-            if reconcile_job(j):
+            if reconcile_job(j, st):
                 modified = True
+        if _prune_stale_active_convs(st):
+            modified = True
         if modified:
             save_state(st)
         return st.get("jobs", [])
@@ -4153,31 +4228,18 @@ def send_comment_to_job(job: Dict[str, Any], comment: str) -> Dict[str, Any]:
     conv_id = target_j.get("conversation_id") or find_watchdog_conversation_for_job(target_j)
     notified = False
     if conv_id:
-        env = get_cached_ls_env()
-        agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-        if Path(agentapi_bin).exists():
-            msg = f"""[WATCHDOG-USER-COMMENT]
+        msg = f"""[WATCHDOG-USER-COMMENT]
 The user added a comment/instruction for your in-progress audit of commit `{short_sha}`:
 "{clean_comment}"
 
 Please take this into account for your ongoing audit, checks, and testing."""
-            if "language_server" in Path(agentapi_bin).name:
-                cmd = [agentapi_bin, "agentapi", "send-message", conv_id, msg]
-            else:
-                cmd = [agentapi_bin, "send-message", conv_id, msg]
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    cwd=repo_path or str(Path.cwd()),
-                    env=env,
-                    timeout=8,
-                )
-                if proc.returncode == 0:
-                    notified = True
-            except Exception:
-                pass
+        proc = invoke_agentapi(
+            ["send-message", conv_id, msg],
+            cwd=Path(repo_path) if repo_path else None,
+            timeout=8,
+        )
+        if proc is not None and proc.returncode == 0:
+            notified = True
 
     return {
         "ok": True,
@@ -4260,7 +4322,7 @@ def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = 
         if target_root and target_short:
             report_file = target_root / ".antigravity" / "audits" / f"review-{target_short}.md"
             if report_file.exists():
-                reconcile_job(target_job)
+                reconcile_job(target_job, st)
                 save_state(st)
                 return {
                     "ok": True,
@@ -4283,70 +4345,107 @@ def continue_job(repo_root: Optional[Path] = None, sha: str = "", job_id: str = 
         conv_id = target_job.get("conversation_id") or find_watchdog_conversation_for_job(target_job)
         if conv_id:
             target_job["conversation_id"] = conv_id
+            save_state(st)
+        job_snapshot = dict(target_job)
 
-        resumed_chat = False
-        env = get_cached_ls_env()
-        agentapi_bin = env.get("ANTIGRAVITY_AGENTAPI_EXE") or str(AGENTAPI_DEFAULT)
-        ctl_script_path = str(Path(__file__).resolve())
-        r_path = target_job.get("report_path") or f"{target_job['repo_path']}/.antigravity/audits/review-{target_job['short_sha']}.md"
+    # Invoke AgentAPI / spawn outside StateLock so we never block state mutations
+    resumed_chat = False
+    ctl_script_path = str(Path(__file__).resolve())
+    r_path = job_snapshot.get("report_path") or f"{job_snapshot['repo_path']}/.antigravity/audits/review-{job_snapshot['short_sha']}.md"
 
-        continue_msg = f"""[WATCHDOG-CONTINUE]
-Please continue and complete the autonomous Watchdog audit for commit `{target_job['short_sha']}` in worktree `{target_job['worktree_path']}`.
+    continue_msg = f"""[WATCHDOG-CONTINUE]
+Please continue and complete the autonomous Watchdog audit for commit `{job_snapshot['short_sha']}` in worktree `{job_snapshot['worktree_path']}`.
 
 When your checks and visual verification testing are finished:
 1. Write the final audit report markdown to `{r_path}`.
 2. Run the completion command:
-python3 "{ctl_script_path}" complete --repo "{target_job['repo_path']}" --sha "{target_job['sha']}" --verdict <PASS|FIXED_ON_BRANCH|NEEDS_ATTENTION> --summary "<concise summary>" --bugs-count <count> --fixes-committed <true|false>
+python3 "{ctl_script_path}" complete --repo "{job_snapshot['repo_path']}" --sha "{job_snapshot['sha']}" --verdict <PASS|FIXED_ON_BRANCH|NEEDS_ATTENTION> --summary "<concise summary>" --bugs-count <count> --fixes-committed <true|false>
 """
 
-        if conv_id and Path(agentapi_bin).exists():
-            if "language_server" in Path(agentapi_bin).name:
-                cmd = [agentapi_bin, "agentapi", "send-message", conv_id, continue_msg]
-            else:
-                cmd = [agentapi_bin, "send-message", conv_id, continue_msg]
-            try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    cwd=target_job["repo_path"],
-                    env=env,
-                    timeout=8,
-                )
-                if proc.returncode == 0:
-                    resumed_chat = True
-            except Exception:
-                pass
+    if conv_id:
+        proc = invoke_agentapi(
+            ["send-message", conv_id, continue_msg],
+            cwd=Path(job_snapshot["repo_path"]),
+            timeout=8,
+        )
+        if proc is not None and proc.returncode == 0:
+            resumed_chat = True
 
-        if not resumed_chat:
-            spawn_success = False
-            try:
-                spawn_success = spawn_detached_agent(target_job)
-            except OSError as err:
-                target_job["status"] = "failed"
-                target_job["error"] = f"Failed to spawn background agent: {err}"
-                target_job["summary"] = f"Failed to spawn auditor: {err}"
-                save_state(st)
-                return {"ok": False, "error": f"Failed to spawn background agent: {err}"}
+    spawn_error = ""
+    if not resumed_chat:
+        try:
+            spawn_success = spawn_detached_agent(job_snapshot)
             if not spawn_success:
-                target_job["status"] = "failed"
-                target_job["error"] = "Failed to launch background auditor process."
-                target_job["summary"] = "Background auditor failed to start."
-                save_state(st)
-                return {"ok": False, "error": "Failed to launch background auditor process."}
+                spawn_error = "Failed to launch background auditor process."
+        except OSError as err:
+            spawn_error = f"Failed to spawn background agent: {err}"
 
-        target_job["status"] = "running"
-        target_job["started_at"] = now_iso()
-        target_job["summary"] = "Resumed Watchdog review in progress…"
+    final_conv_id = job_snapshot.get("conversation_id") or conv_id
+    with StateLock():
+        st = load_state()
+        for j in st.get("jobs", []):
+            if j.get("id") == job_snapshot.get("id"):
+                if spawn_error:
+                    j["status"] = "failed"
+                    j["error"] = spawn_error
+                    j["summary"] = spawn_error
+                else:
+                    j["status"] = "running"
+                    j["started_at"] = now_iso()
+                    j["summary"] = "Resumed Watchdog review in progress…"
+                    if final_conv_id:
+                        j["conversation_id"] = final_conv_id
+                break
         save_state(st)
 
-        return {
-            "ok": True,
-            "resumed": True,
-            "notifiedChat": resumed_chat,
-            "conversationId": conv_id,
-            "shortSha": target_job.get("short_sha"),
-        }
+    if spawn_error:
+        return {"ok": False, "error": spawn_error}
+
+    return {
+        "ok": True,
+        "resumed": True,
+        "notifiedChat": resumed_chat,
+        "conversationId": final_conv_id,
+        "shortSha": job_snapshot.get("short_sha"),
+    }
+
+
+def _finalize_applied_fix(repo_root: Path, short_sha: str, fix_branch: str) -> None:
+    """Clean up temporary worktree/branch and mark fix applied in state.json."""
+    slug = repo_slug(repo_root)
+    worktree_path = WORKTREES_DIR / f"{slug}-{short_sha}"
+    if worktree_path.exists():
+        run_git(repo_root, ["worktree", "remove", "--force", str(worktree_path)])
+        shutil.rmtree(worktree_path, ignore_errors=True)
+    run_git(repo_root, ["worktree", "prune"])
+    run_git(repo_root, ["branch", "-D", fix_branch])
+    rc_b, _, _ = run_git(repo_root, ["show-ref", "--verify", f"refs/heads/{fix_branch}"])
+    if rc_b == 0:
+        run_git(repo_root, ["worktree", "prune"])
+        run_git(repo_root, ["branch", "-D", fix_branch])
+
+    job_id = f"{slug}-{short_sha}"
+    _, new_head_sha, _ = run_git(repo_root, ["rev-parse", "HEAD"])
+    new_head_sha = new_head_sha.strip()
+    new_short_sha = new_head_sha[:7] if new_head_sha else ""
+
+    with StateLock():
+        state = load_state()
+        for j in state["jobs"]:
+            if j.get("id") == job_id or (j.get("short_sha") == short_sha and is_same_repo_path(j.get("repo_path"), repo_root)):
+                j["fixes_applied"] = True
+                j["fixes_committed"] = False
+                j["fix_branch"] = None
+                if new_head_sha:
+                    j["applied_commit_sha"] = new_head_sha
+                    j["applied_short_sha"] = new_short_sha
+                break
+        matched_repo_key = next((k for k in state.get("repos", {}) if is_same_repo_path(k, repo_root)), None)
+        if matched_repo_key and new_head_sha:
+            state["repos"][matched_repo_key]["baseline_sha"] = new_head_sha
+            state["repos"][matched_repo_key]["youngest_short_sha"] = new_short_sha
+            state["repos"][matched_repo_key]["updated_at"] = now_iso()
+        save_state(state)
 
 
 def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Dict[str, Any]:
@@ -4392,41 +4491,7 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
     # Check if changes on fix_branch are already present in current_branch
     rc_d, diff_out, _ = run_git(repo_root, ["diff", f"{current_branch}..{fix_branch}"])
     if rc_d == 0 and not diff_out.strip():
-        slug = repo_slug(repo_root)
-        worktree_path = WORKTREES_DIR / f"{slug}-{short_sha}"
-        if worktree_path.exists():
-            run_git(repo_root, ["worktree", "remove", "--force", str(worktree_path)])
-            shutil.rmtree(worktree_path, ignore_errors=True)
-        run_git(repo_root, ["worktree", "prune"])
-        run_git(repo_root, ["branch", "-D", fix_branch])
-        rc_b, _, _ = run_git(repo_root, ["show-ref", "--verify", f"refs/heads/{fix_branch}"])
-        if rc_b == 0:
-            run_git(repo_root, ["worktree", "prune"])
-            run_git(repo_root, ["branch", "-D", fix_branch])
-
-        job_id = f"{slug}-{short_sha}"
-        _, new_head_sha, _ = run_git(repo_root, ["rev-parse", "HEAD"])
-        new_head_sha = new_head_sha.strip()
-        new_short_sha = new_head_sha[:7] if new_head_sha else ""
-
-        with StateLock():
-            state = load_state()
-            for j in state["jobs"]:
-                if j.get("id") == job_id or (j.get("short_sha") == short_sha and is_same_repo_path(j.get("repo_path"), repo_root)):
-                    j["fixes_applied"] = True
-                    j["fixes_committed"] = False
-                    j["fix_branch"] = None
-                    if new_head_sha:
-                        j["applied_commit_sha"] = new_head_sha
-                        j["applied_short_sha"] = new_short_sha
-                    break
-            matched_repo_key = next((k for k in state.get("repos", {}) if is_same_repo_path(k, repo_root)), None)
-            if matched_repo_key and new_head_sha:
-                state["repos"][matched_repo_key]["baseline_sha"] = new_head_sha
-                state["repos"][matched_repo_key]["youngest_short_sha"] = new_short_sha
-                state["repos"][matched_repo_key]["updated_at"] = now_iso()
-            save_state(state)
-
+        _finalize_applied_fix(repo_root, short_sha, fix_branch)
         return {
             "ok": True,
             "branch": current_branch,
@@ -4454,42 +4519,8 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
                 "details": err_cp or out_cp,
             }
 
-    # 6. Cleanup worktree and delete the temporary fix branch
-    slug = repo_slug(repo_root)
-    worktree_path = WORKTREES_DIR / f"{slug}-{short_sha}"
-    if worktree_path.exists():
-        run_git(repo_root, ["worktree", "remove", "--force", str(worktree_path)])
-        shutil.rmtree(worktree_path, ignore_errors=True)
-    run_git(repo_root, ["worktree", "prune"])
-    run_git(repo_root, ["branch", "-D", fix_branch])
-    rc_b, _, _ = run_git(repo_root, ["show-ref", "--verify", f"refs/heads/{fix_branch}"])
-    if rc_b == 0:
-        run_git(repo_root, ["worktree", "prune"])
-        run_git(repo_root, ["branch", "-D", fix_branch])
-
-    # 7. Update state.json to mark fixes_applied = True and record applied commit
-    job_id = f"{slug}-{short_sha}"
-    _, new_head_sha, _ = run_git(repo_root, ["rev-parse", "HEAD"])
-    new_head_sha = new_head_sha.strip()
-    new_short_sha = new_head_sha[:7] if new_head_sha else ""
-
-    with StateLock():
-        state = load_state()
-        for j in state["jobs"]:
-            if j.get("id") == job_id or (j.get("short_sha") == short_sha and is_same_repo_path(j.get("repo_path"), repo_root)):
-                j["fixes_applied"] = True
-                j["fixes_committed"] = False
-                j["fix_branch"] = None
-                if new_head_sha:
-                    j["applied_commit_sha"] = new_head_sha
-                    j["applied_short_sha"] = new_short_sha
-                break
-        matched_repo_key = next((k for k in state.get("repos", {}) if is_same_repo_path(k, repo_root)), None)
-        if matched_repo_key and new_head_sha:
-            state["repos"][matched_repo_key]["baseline_sha"] = new_head_sha
-            state["repos"][matched_repo_key]["youngest_short_sha"] = new_short_sha
-            state["repos"][matched_repo_key]["updated_at"] = now_iso()
-        save_state(state)
+    # 6. Cleanup worktree/branch and update state.json
+    _finalize_applied_fix(repo_root, short_sha, fix_branch)
 
     return {
         "ok": True,
@@ -4518,33 +4549,24 @@ def main() -> int:
     p_mark.add_argument("--conversation-id", default="")
     p_mark.add_argument("--failed", default="", help="Why the agent could not start; marks the audit interrupted")
 
-
     p_sync = sub.add_parser(
         "sync",
+        aliases=["git-state", "git_state"],
         help="Scan git history across workspace & nested repos and resolve the youngest commit",
         parents=[p_common],
     )
     p_sync.add_argument("--repo", action="append", default=[], help="Workspace or repository path(s) to sync")
 
-    p_git_state = sub.add_parser(
-        "git-state",
-        help="Scan git history across workspace & nested repos and return git state summary (alias of sync)",
-        parents=[p_common],
-    )
-    p_git_state.add_argument("--repo", action="append", default=[], help="Workspace or repository path(s) to sync")
-
-    p_git_state_alt = sub.add_parser(
-        "git_state",
-        help="Scan git history across workspace & nested repos and return git state summary (alias of sync)",
-        parents=[p_common],
-    )
-    p_git_state_alt.add_argument("--repo", action="append", default=[], help="Workspace or repository path(s) to sync")
-
     p_prep = sub.add_parser("prepare", help="Prepare isolated Git worktree for a commit", parents=[p_common])
     p_prep.add_argument("--repo", required=True)
     p_prep.add_argument("--sha", default="YOUNGEST")
 
-    p_queue = sub.add_parser("queue", help="Queue a commit for Watchdog review", parents=[p_common])
+    p_queue = sub.add_parser(
+        "queue",
+        aliases=["queue-commit"],
+        help="Queue a commit for Watchdog review",
+        parents=[p_common],
+    )
     p_queue.add_argument("--repo", required=True)
     p_queue.add_argument("--sha", default="YOUNGEST")
     p_queue.add_argument("--base-sha", default="")
@@ -4552,15 +4574,6 @@ def main() -> int:
     p_queue.add_argument("--notes", dest="comment", default="", help="Optional user comment or focus note (alias for --comment)")
     p_queue.add_argument("--no-dispatch", action="store_true")
     p_queue.add_argument("--force", action="store_true")
-
-    p_queue_commit = sub.add_parser("queue-commit", help="Queue a commit for Watchdog review (alias of queue)", parents=[p_common])
-    p_queue_commit.add_argument("--repo", required=True)
-    p_queue_commit.add_argument("--sha", default="YOUNGEST")
-    p_queue_commit.add_argument("--base-sha", default="")
-    p_queue_commit.add_argument("--comment", default="", help="Optional user comment or focus note for the audit")
-    p_queue_commit.add_argument("--notes", dest="comment", default="", help="Optional user comment or focus note (alias for --comment)")
-    p_queue_commit.add_argument("--no-dispatch", action="store_true")
-    p_queue_commit.add_argument("--force", action="store_true")
 
     p_comp = sub.add_parser("complete", help="Mark a Watchdog review job complete", parents=[p_common])
     p_comp.add_argument("--repo", required=True)
@@ -4582,13 +4595,14 @@ def main() -> int:
     p_base.add_argument("--repo", required=True)
 
     # Next Steps commands
-    p_ns = sub.add_parser("next-steps", help="Synthesize up to 4 structured /plan proposals for repository", parents=[p_common])
+    p_ns = sub.add_parser(
+        "next-steps",
+        aliases=["synthesize"],
+        help="Synthesize up to 4 structured /plan proposals for repository",
+        parents=[p_common],
+    )
     p_ns.add_argument("--repo", required=True)
     p_ns.add_argument("--force", action="store_true")
-
-    p_synth = sub.add_parser("synthesize", help="Synthesize up to 4 structured /plan proposals for repository (alias of next-steps)", parents=[p_common])
-    p_synth.add_argument("--repo", required=True)
-    p_synth.add_argument("--force", action="store_true")
 
     p_disp_ns = sub.add_parser("dispatch-synthesis", help="Dispatch an on-demand agent to synthesize next steps", parents=[p_common])
     p_disp_ns.add_argument("--repo", required=True)
@@ -4602,23 +4616,18 @@ def main() -> int:
     p_cancel_ns = sub.add_parser("cancel-synthesis", help="Cancel / stop ongoing next steps synthesis", parents=[p_common])
     p_cancel_ns.add_argument("--repo", required=True)
 
-    p_goal = sub.add_parser("goal", help="Get or set project goal", parents=[p_common])
+    p_goal = sub.add_parser(
+        "goal",
+        aliases=["get-goal", "set-goal"],
+        help="Get or set project goal",
+        parents=[p_common],
+    )
     p_goal.add_argument("repo_pos", nargs="?", default="", help="Optional repository path positional")
     p_goal.add_argument("--repo", default="")
     p_goal.add_argument("--set", dest="set_goal", default="")
     p_goal.add_argument("--goal", dest="set_goal", default="", help="Set project goal (alias for --set)")
     p_goal.add_argument("--clear", action="store_true")
     p_goal.add_argument("--refresh", action="store_true", help="Review codebase & update project goal")
-
-    p_get_goal = sub.add_parser("get-goal", help="Get project goal (alias of goal)", parents=[p_common])
-    p_get_goal.add_argument("repo_pos", nargs="?", default="", help="Optional repository path positional")
-    p_get_goal.add_argument("--repo", default="")
-
-    p_set_goal = sub.add_parser("set-goal", help="Set project goal (alias of goal)", parents=[p_common])
-    p_set_goal.add_argument("repo_pos", nargs="?", default="", help="Optional repository path positional")
-    p_set_goal.add_argument("--repo", default="")
-    p_set_goal.add_argument("--goal", dest="set_goal", default="", help="Set project goal")
-    p_set_goal.add_argument("--set", dest="set_goal", default="", help="Set project goal")
 
     p_conv = sub.add_parser("conversations", help="List Antigravity conversations associated with repository", parents=[p_common])
     p_conv.add_argument("--repo", required=True)

@@ -37,19 +37,24 @@ function normalizeWsUri(u) {
   return s.replace(/[\\/]+$/, '').replace(/\\/g, '/');
 }
 
+function pathsOverlap(a, b) {
+  const na = normalizeWsUri(a);
+  const nb = normalizeWsUri(b);
+  if (!na || !nb) return false;
+  return na === nb || na.startsWith(`${nb}/`) || nb.startsWith(`${na}/`);
+}
+
 function selectActiveRepo(data, { selectedRepoPath = '', explicit = false, workspaceUris = [] } = {}) {
   const repos = data?.activeRepos || [];
   if (repos.length === 0) return null;
   if (explicit && selectedRepoPath) {
     const normSelected = normalizeWsUri(selectedRepoPath);
-    const found = repos.find((r) => r.repoPath === selectedRepoPath || r.repoPath === normSelected);
+    const found = repos.find((r) => r.repoPath === selectedRepoPath || normalizeWsUri(r.repoPath) === normSelected);
     if (found) return found;
   }
   if (workspaceUris.length > 0) {
     const normUris = workspaceUris.map(normalizeWsUri).filter(Boolean);
-    const matched = repos.find((r) =>
-      normUris.some((u) => u.includes(r.repoPath) || r.repoPath.includes(u))
-    );
+    const matched = repos.find((r) => normUris.some((u) => pathsOverlap(u, r.repoPath)));
     if (matched) return matched;
   }
   return repos[0];
@@ -63,9 +68,9 @@ function goalText(repo) {
 }
 
 const sameRepo = (job, repo) => {
-  const jp = (job?.repo_path || '').trim().replace(/\/+$/, '');
-  const rp = (repo?.repoPath || '').trim().replace(/\/+$/, '');
-  return !jp || !rp || jp === rp;
+  const jp = normalizeWsUri(job?.repo_path || job?.repo || '');
+  const rp = normalizeWsUri(repo?.repoPath || repo?.repo || '');
+  return Boolean(jp && rp && jp === rp);
 };
 
 function jobView(job) {
@@ -104,11 +109,12 @@ function auditAction(data, repo, comment = '') {
   const matchesSha = (sha, short) => (activeSha && sha === activeSha) || (shortSha && short === shortSha);
 
   const matchingJob = jobs.find((j) => sameRepo(j, repo) && matchesSha((j.sha || '').toLowerCase(), (j.short_sha || '').toLowerCase()));
-  const hasSkipTag = latest.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag));
-  const isAppliedFix = hasSkipTag || jobs.some((j) => sameRepo(j, repo) && matchesSha((j.applied_commit_sha || '').toLowerCase(), (j.applied_short_sha || '').toLowerCase()));
+  const hasSkipTag = Boolean(latest.isAutoReview || SKIP_TAGS.some((tag) => subject.includes(tag)));
+  const isAppliedFix = Boolean(jobs.some((j) => sameRepo(j, repo) && matchesSha((j.applied_commit_sha || '').toLowerCase(), (j.applied_short_sha || '').toLowerCase())));
+  const isAuditSkipped = hasSkipTag && !isAppliedFix;
   const runningJob = jobs.find((j) => sameRepo(j, repo) && (j.status === 'running' || j.status === 'queued'));
 
-  const base = { latest, shortSha, isAppliedFix, runningJob: runningJob || null, matchingJob: matchingJob || null };
+  const base = { latest, shortSha, isAppliedFix, isAuditSkipped, runningJob: runningJob || null, matchingJob: matchingJob || null };
   if (runningJob) {
     const sha = runningJob.short_sha || shortSha;
     if (comment.trim()) {
@@ -124,6 +130,17 @@ function auditAction(data, repo, comment = '') {
   }
   if (isAppliedFix) {
     return { ...base, kind: 'none', disabled: true, tone: 'primary', icon: 'check', label: `Commit ${shortSha} Verified (Fix Applied)`, title: `The latest commit is a verified fix applied to ${repo.branch || 'main'}. Make a new commit to audit again.` };
+  }
+  if (isAuditSkipped) {
+    return {
+      ...base,
+      kind: 'audit',
+      disabled: false,
+      tone: 'warn',
+      icon: 'play',
+      label: `Run Review (${shortSha})`,
+      title: `Commit has skip tags (${subject}). Click to run review manually.`,
+    };
   }
   if (latest.isDocsOnly) {
     return { ...base, kind: 'audit', disabled: false, tone: 'warn', icon: 'warn', label: `Audit Commit ${shortSha} (Docs Only)`, title: `Warning: Commit ${shortSha} only updated documentation/README files. Click to audit anyway.` };
@@ -290,9 +307,11 @@ let activeReportSha = '';
 let activePlanModalData = null;
 let archivedVisibleLimit = 10;
 let isRefreshingProposals = false;
+let refreshingRepoPath = '';
 let isSynthesisCancelled = false;
 let isCancellingSynthesis = false;
 let isSyncing = false;
+let isStartingAudit = false;
 let isExecutingPlan = false;
 
 const ICONS = {
@@ -305,17 +324,20 @@ const ICONS = {
   doc: `<svg class="icon-svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
 };
 
-async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000 } = {}) {
+async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000, _retriedAuth = false } = {}) {
   const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  let raceTimeoutId = null;
   try {
     let token = null;
+    let urlToken = null;
     try {
       if (typeof window !== 'undefined') {
-        token = new URLSearchParams(window.location.search).get('token');
-        if (token) {
-          try { sessionStorage.setItem('watchdog_panel_token', token); } catch {}
-          try { localStorage.setItem('watchdog_panel_token', token); } catch {}
+        urlToken = new URLSearchParams(window.location.search).get('token');
+        if (urlToken) {
+          token = urlToken;
+          try { sessionStorage.setItem('watchdog_panel_token', urlToken); } catch {}
+          try { localStorage.setItem('watchdog_panel_token', urlToken); } catch {}
         } else {
           token = sessionStorage.getItem('watchdog_panel_token') || localStorage.getItem('watchdog_panel_token');
         }
@@ -337,43 +359,60 @@ async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000 } =
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['x-sidecar-token'] = token;
 
-    let res;
-    if (window.sidecar?.fetch) {
-      const fetchPromise = window.sidecar.fetch(effectivePath, {
-        method,
-        headers,
-        body: bodyStr,
-        signal: controller?.signal,
-      });
-      res = await Promise.race([
-        fetchPromise,
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Request timeout (${timeoutMs}ms)`)), timeoutMs)
-        ),
-      ]);
-    } else {
-      const fetchPromise = window.fetch(effectivePath, {
-        method,
-        headers,
-        body: bodyStr,
-        signal: controller?.signal,
-      });
-      res = await Promise.race([
-        fetchPromise,
-        new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Request timeout (${timeoutMs}ms)`)), timeoutMs)
-        ),
-      ]);
-    }
+    const timeoutPromise = new Promise((_, reject) => {
+      raceTimeoutId = setTimeout(() => reject(new Error(`Request timeout (${timeoutMs}ms)`)), timeoutMs);
+    });
+    const fetchPromise = window.sidecar?.fetch
+      ? window.sidecar.fetch(effectivePath, {
+          method,
+          headers,
+          body: bodyStr,
+          signal: controller?.signal,
+        })
+      : window.fetch(effectivePath, {
+          method,
+          headers,
+          body: bodyStr,
+          signal: controller?.signal,
+        });
+    const res = await Promise.race([fetchPromise, timeoutPromise]);
 
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      if (res.status === 401) {
+        let clearedStoredToken = false;
+        try {
+          if (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('watchdog_panel_token')) {
+            sessionStorage.removeItem('watchdog_panel_token');
+            clearedStoredToken = true;
+          }
+          if (typeof localStorage !== 'undefined' && localStorage.getItem('watchdog_panel_token')) {
+            localStorage.removeItem('watchdog_panel_token');
+            clearedStoredToken = true;
+          }
+        } catch {}
+        if (!_retriedAuth && clearedStoredToken && !urlToken) {
+          return callApi(path, { method, body, timeoutMs, _retriedAuth: true });
+        }
+      }
+
       // Safe read endpoints auto-retry via GET if POST encountered 401/405/auth mismatch
       const basePath = path.split('?')[0];
       if ((res.status === 401 || res.status === 405) && method !== 'GET') {
         const safeReadEndpoints = ['/api/dashboard', '/api/sync', '/api/git-state', '/api/git_state', '/api/active-workspace'];
         if (safeReadEndpoints.includes(basePath)) {
-          return callApi(path, { method: 'GET', body, timeoutMs });
+          let getPath = path;
+          if (body && typeof body === 'object') {
+            const params = new URLSearchParams();
+            if (body.repoPath) params.set('repoPath', String(body.repoPath));
+            if (body.repo) params.set('repo', String(body.repo));
+            if (Array.isArray(body.workspaceUris) && body.workspaceUris.length > 0) {
+              params.set('workspaceUris', JSON.stringify(body.workspaceUris));
+            }
+            const qs = params.toString();
+            if (qs) getPath += `${getPath.includes('?') ? '&' : '?'}${qs}`;
+          }
+          return callApi(getPath, { method: 'GET', body: {}, timeoutMs, _retriedAuth: true });
         }
       }
       throw new Error(data.error || `${res.status} ${res.statusText}`);
@@ -381,6 +420,7 @@ async function callApi(path, { method = 'POST', body = {}, timeoutMs = 10000 } =
     return data;
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
+    if (raceTimeoutId) clearTimeout(raceTimeoutId);
   }
 }
 
@@ -406,9 +446,14 @@ function escapeHtml(str) {
 
 function parseInlineMd(text) {
   let s = escapeHtml(text);
+  const codeSpans = [];
+  s = s.replace(/`([^`]+)`/g, (_, code) => {
+    const idx = codeSpans.length;
+    codeSpans.push(`<code>${code}</code>`);
+    return `\uE000CODE${idx}\uE000`;
+  });
   s = s.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, rawUrl) => {
     const cleanUrl = String(rawUrl || '').trim();
     if (/^(https?:\/\/|#|\/)/i.test(cleanUrl)) {
@@ -419,7 +464,7 @@ function parseInlineMd(text) {
     }
     return `${label} (${cleanUrl})`;
   });
-  return s;
+  return s.replace(/\uE000CODE(\d+)\uE000/g, (_, idx) => codeSpans[Number(idx)] || '');
 }
 
 window.handleFileLinkClick = function(event, el) {
@@ -585,6 +630,76 @@ function renderJobBadge(job) {
   return `<span class="tag">${escapeHtml(badge.label)}</span>`;
 }
 
+function resetRunButton(runBtn, runBtnIcon, runBtnText, { icon = 'play', label = 'Audit Latest Commit', disabled = true, title = '' } = {}) {
+  if (!runBtn) return;
+  runBtn.classList.remove('warn-btn', 'accent-btn');
+  delete runBtn.dataset.action;
+  delete runBtn.dataset.jobId;
+  delete runBtn.dataset.repo;
+  delete runBtn.dataset.sha;
+  runBtn.disabled = disabled;
+  runBtn.title = title;
+  if (runBtnIcon) runBtnIcon.innerHTML = ICONS[icon] || ICONS.play;
+  if (runBtnText) runBtnText.textContent = label;
+}
+
+function updateAuditActionUI(data, activeRepo) {
+  const commitTagBadge = $('commit-tag-badge');
+  const runBtn = $('btn-run-audit');
+  const runBtnText = $('btn-run-audit-text');
+  const runBtnIcon = $('btn-run-audit-icon');
+  const commentInput = $('input-audit-comment');
+  const latest = activeRepo ? (activeRepo.youngestCommit || activeRepo.head) : null;
+
+  if (!activeRepo || !latest) {
+    if (commitTagBadge) commitTagBadge.hidden = true;
+    resetRunButton(runBtn, runBtnIcon, runBtnText);
+    return;
+  }
+
+  const activeSha = (latest.sha || '').toLowerCase();
+  const activeShortSha = (latest.shortSha || latest.short_sha || activeSha.slice(0, 7)).toLowerCase();
+  const action = auditAction(data, activeRepo, commentInput ? commentInput.value : '');
+
+  if (commitTagBadge) {
+    if (action.isAuditSkipped) {
+      commitTagBadge.hidden = false;
+      commitTagBadge.className = 'applied-badge small-applied-tag warn-pill';
+      commitTagBadge.textContent = 'Review Skipped';
+    } else if (action.isAppliedFix) {
+      commitTagBadge.hidden = false;
+      commitTagBadge.className = 'applied-badge small-applied-tag';
+      commitTagBadge.textContent = 'Applied Fix';
+    } else {
+      commitTagBadge.hidden = true;
+    }
+  }
+
+  if (commentInput) {
+    commentInput.placeholder = action.runningJob
+      ? `Send comment/guidance to in-progress audit (${action.runningJob.short_sha || activeShortSha})…`
+      : 'Add a comment or focus note for this audit…';
+  }
+
+  if (runBtn) {
+    resetRunButton(runBtn, runBtnIcon, runBtnText, {
+      icon: action.icon,
+      label: action.label,
+      disabled: action.disabled,
+      title: action.title,
+    });
+    if (action.tone === 'accent') runBtn.classList.add('accent-btn');
+    if (action.tone === 'warn') runBtn.classList.add('warn-btn');
+    const actionJob = action.kind === 'send-comment' ? action.runningJob : action.kind === 'continue-audit' ? action.matchingJob : null;
+    if (actionJob) {
+      runBtn.dataset.action = action.kind;
+      runBtn.dataset.jobId = actionJob.id || '';
+      runBtn.dataset.repo = actionJob.repo_path || activeRepo.repoPath || '';
+      runBtn.dataset.sha = actionJob.sha || (action.kind === 'continue-audit' ? activeSha : '') || '';
+    }
+  }
+}
+
 function renderDashboard(data) {
   currentDashboard = data;
 
@@ -609,10 +724,6 @@ function renderDashboard(data) {
   const commitShaEl = $('commit-sha');
   const commitSubjectEl = $('commit-subject');
   const commitTimeEl = $('commit-time');
-  const commitTagBadge = $('commit-tag-badge');
-  const runBtn = $('btn-run-audit');
-  const runBtnText = $('btn-run-audit-text');
-  const runBtnIcon = $('btn-run-audit-icon');
 
   if (activeRepo) {
     if (repoNameEl) repoNameEl.textContent = activeRepo.repoName;
@@ -626,84 +737,12 @@ function renderDashboard(data) {
       if (commitShaEl) commitShaEl.textContent = activeShortSha;
       if (commitSubjectEl) commitSubjectEl.textContent = subject || '(no message)';
       if (commitTimeEl) commitTimeEl.textContent = latest.relativeTime || latest.relative_time || '';
-
-      const commentInput = $('input-audit-comment');
-      const action = auditAction(data, activeRepo, commentInput ? commentInput.value : '');
-
-      if (commitTagBadge) {
-        if (action.isAuditSkipped) {
-          commitTagBadge.hidden = false;
-          commitTagBadge.className = 'applied-badge small-applied-tag warn-pill';
-          commitTagBadge.textContent = 'Review Skipped';
-        } else if (action.isAppliedFix) {
-          commitTagBadge.hidden = false;
-          commitTagBadge.className = 'applied-badge small-applied-tag';
-          commitTagBadge.textContent = 'Applied Fix';
-        } else {
-          commitTagBadge.hidden = true;
-        }
-      }
-
-      if (commentInput) {
-        commentInput.placeholder = action.runningJob
-          ? `Send comment/guidance to in-progress audit (${action.runningJob.short_sha || activeShortSha})…`
-          : 'Add a comment or focus note for this audit…';
-      }
-
-      if (runBtn) {
-        runBtn.classList.remove('warn-btn');
-        runBtn.classList.remove('accent-btn');
-        delete runBtn.dataset.action;
-        delete runBtn.dataset.jobId;
-        delete runBtn.dataset.repo;
-        delete runBtn.dataset.sha;
-
-        runBtn.disabled = action.disabled;
-        if (action.tone === 'accent') runBtn.classList.add('accent-btn');
-        if (action.tone === 'warn') runBtn.classList.add('warn-btn');
-        if (runBtnIcon) runBtnIcon.innerHTML = ICONS[action.icon];
-        if (runBtnText) runBtnText.textContent = action.label;
-        runBtn.title = action.title;
-        const actionJob = action.kind === 'send-comment' ? action.runningJob : action.kind === 'continue-audit' ? action.matchingJob : null;
-        if (actionJob) {
-          runBtn.dataset.action = action.kind;
-          runBtn.dataset.jobId = actionJob.id || '';
-          runBtn.dataset.repo = actionJob.repo_path || activeRepo.repoPath || '';
-          runBtn.dataset.sha = actionJob.sha || (action.kind === 'continue-audit' ? activeSha : '') || '';
-        }
-      }
     } else {
-      if (runBtn) {
-        runBtn.classList.remove('warn-btn');
-        runBtn.classList.remove('accent-btn');
-        delete runBtn.dataset.action;
-        delete runBtn.dataset.jobId;
-        delete runBtn.dataset.repo;
-        delete runBtn.dataset.sha;
-        runBtn.disabled = true;
-        runBtn.title = '';
-        if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
-        if (runBtnText) runBtnText.textContent = 'Audit Latest Commit';
-      }
-      if (commitTagBadge) commitTagBadge.hidden = true;
       if (commitShaEl) commitShaEl.textContent = '–';
       if (commitSubjectEl) commitSubjectEl.textContent = 'No commits found in project';
       if (commitTimeEl) commitTimeEl.textContent = '';
     }
   } else {
-    if (runBtn) {
-      runBtn.classList.remove('warn-btn');
-      runBtn.classList.remove('accent-btn');
-      delete runBtn.dataset.action;
-      delete runBtn.dataset.jobId;
-      delete runBtn.dataset.repo;
-      delete runBtn.dataset.sha;
-      runBtn.disabled = true;
-      runBtn.title = '';
-      if (runBtnIcon) runBtnIcon.innerHTML = ICONS.play;
-      if (runBtnText) runBtnText.textContent = 'Audit Latest Commit';
-    }
-    if (commitTagBadge) commitTagBadge.hidden = true;
     if (repoNameEl) repoNameEl.textContent = 'No repository detected';
     if (repoBranchEl) repoBranchEl.textContent = '–';
     if (commitShaEl) commitShaEl.textContent = '–';
@@ -714,15 +753,17 @@ function renderDashboard(data) {
     if (commitTimeEl) commitTimeEl.textContent = '';
   }
 
+  updateAuditActionUI(data, activeRepo);
+
   // Audits Partition
-  const activeRepoPath = (activeRepo?.repoPath || activeRepo?.repo || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
-  const filteredJobs = (data.jobs || []).filter((j) => {
-    if (!activeRepoPath) return true;
-    const jp = (j.repo_path || j.repo || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
-    return Boolean(jp && jp === activeRepoPath);
-  });
+  const filteredJobs = (data.jobs || []).filter((j) => (!activeRepo ? true : sameRepo(j, activeRepo)));
   const { recent: recentJobs, archived: archivedJobs } = partitionJobs({ ...data, jobs: filteredJobs });
 
+  const auditsTabBadge = $('tab-badge-audits');
+  if (auditsTabBadge) {
+    auditsTabBadge.textContent = String(recentJobs.length);
+    auditsTabBadge.hidden = recentJobs.length === 0;
+  }
   const auditsCountEl = $('audits-count');
   if (auditsCountEl) auditsCountEl.textContent = recentJobs.length;
   const archivedCountEl = $('archived-count');
@@ -757,7 +798,7 @@ function renderDashboard(data) {
           ${isPassed ? `<span class="applied-badge">${ICONS.check} Passed</span>` : ''}
           ${isInterrupted ? `<button type="button" class="btn small-btn accent-btn" data-action="continue-audit" data-job-id="${escapeHtml(job.id)}" data-repo="${escapeHtml(job.repo_path)}" data-sha="${escapeHtml(job.sha)}">${ICONS.play} Continue Audit</button>` : ''}
           ${hasFixToApply ? `<button type="button" class="btn small-btn accent-btn" data-action="apply-fix" data-repo="${escapeHtml(job.repo_path)}" data-sha="${escapeHtml(job.sha)}" title="Merge the bug fix commit into your active branch">Apply Fix to ${escapeHtml(currentBranch)}</button>` : ''}
-          ${hasReport ? `<button type="button" class="icon-btn job-report-btn" data-action="view-report" data-report="${escapeHtml(job.report_path || '')}" data-sha="${escapeHtml(job.short_sha)}" title="View Report" aria-label="View Report">${ICONS.doc}</button>` : ''}
+          ${hasReport && job.report_path ? `<button type="button" class="icon-btn job-report-btn" data-action="view-report" data-report="${escapeHtml(job.report_path)}" data-sha="${escapeHtml(job.short_sha)}" title="View Report" aria-label="View Report">${ICONS.doc}</button>` : ''}
           ${isArchived
             ? `<button type="button" class="icon-btn job-archive-btn" data-action="unarchive" data-job-id="${escapeHtml(job.id)}" title="Restore audit from archive" aria-label="Restore audit from archive">${ICONS.unarchive}</button>`
             : `<button type="button" class="icon-btn job-archive-btn" data-action="archive" data-job-id="${escapeHtml(job.id)}" title="Archive audit" aria-label="Archive audit">${ICONS.archive}</button>`
@@ -809,8 +850,35 @@ function renderDashboard(data) {
   }
 }
 
+function renderSynthesisLoadingHtml() {
+  return `
+    <div class="proposals-loading-state">
+      <div class="loading-label-group">
+        <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
+        <span class="loading-label-sub muted small" id="ns-loading-sub">Synthesizing 4 pragmatic implementation plans</span>
+      </div>
+      <div class="proposals-progress-container">
+        <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
+      </div>
+      <div class="proposals-loading-actions">
+        <button id="btn-cancel-synthesis-card" type="button" class="btn small-btn secondary btn-cancel-action" onclick="cancelNextStepsRefresh()">
+          <svg class="icon-svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+          <span>Stop Refresh</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
 function renderNextSteps(activeRepo) {
-  if (isRefreshingProposals) return;
+  if (
+    isRefreshingProposals &&
+    activeRepo?.repoPath &&
+    refreshingRepoPath &&
+    normalizeWsUri(activeRepo.repoPath) === normalizeWsUri(refreshingRepoPath)
+  ) {
+    return;
+  }
 
   const tabBadge = $('tab-badge-proposals');
   const goalTextEl = $('goal-text') || $('ns-goal-text');
@@ -878,23 +946,7 @@ function renderNextSteps(activeRepo) {
         if (cancelHeaderBtn) cancelHeaderBtn.hidden = false;
         const existingLoading = proposalsList.querySelector('.proposals-loading-state');
         if (!existingLoading) {
-          proposalsList.innerHTML = `
-            <div class="proposals-loading-state">
-              <div class="loading-label-group">
-                <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
-                <span class="loading-label-sub muted small" id="ns-loading-sub">Synthesizing 4 pragmatic implementation plans</span>
-              </div>
-              <div class="proposals-progress-container">
-                <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
-              </div>
-              <div class="proposals-loading-actions">
-                <button id="btn-cancel-synthesis-card" type="button" class="btn small-btn secondary btn-cancel-action" onclick="cancelNextStepsRefresh()">
-                  <svg class="icon-svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-                  <span>Stop Refresh</span>
-                </button>
-              </div>
-            </div>
-          `;
+          proposalsList.innerHTML = renderSynthesisLoadingHtml();
         }
         if (!isRefreshingProposals) {
           setTimeout(() => refreshProposals(true), 50);
@@ -1031,6 +1083,7 @@ async function refreshProposals(skipDispatch = false) {
   const proposalsList = $('proposals-list');
   try {
     isRefreshingProposals = true;
+    refreshingRepoPath = activeRepo.repoPath || '';
     isSynthesisCancelled = false;
     activeRepo.synthesizing = true;
     if (cancelHeaderBtn) {
@@ -1041,23 +1094,7 @@ async function refreshProposals(skipDispatch = false) {
       refreshBtn.classList.add('spinning');
     }
     if (proposalsList && !proposalsList.querySelector('.proposals-loading-state')) {
-      proposalsList.innerHTML = `
-        <div class="proposals-loading-state">
-          <div class="loading-label-group">
-            <span class="loading-label-title">Agent analyzing codebase &amp; goals…</span>
-            <span class="loading-label-sub muted small" id="ns-loading-sub">Synthesizing 4 pragmatic implementation plans</span>
-          </div>
-          <div class="proposals-progress-container">
-            <div class="proposals-progress-bar" id="ns-progress-bar" style="width: 15%;"></div>
-          </div>
-          <div class="proposals-loading-actions">
-            <button id="btn-cancel-synthesis-card" type="button" class="btn small-btn secondary btn-cancel-action" onclick="cancelNextStepsRefresh()">
-              <svg class="icon-svg" width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-              <span>Stop Refresh</span>
-            </button>
-          </div>
-        </div>
-      `;
+      proposalsList.innerHTML = renderSynthesisLoadingHtml();
     }
 
     if (!skipDispatch) {
@@ -1091,8 +1128,9 @@ async function refreshProposals(skipDispatch = false) {
 
     for (let i = 0; i < maxPolls; i++) {
       if (isSynthesisCancelled) break;
-      const progressBar = $('ns-progress-bar');
-      const progressSub = $('ns-loading-sub');
+      const viewingSameRepo = !refreshingRepoPath || normalizeWsUri(getActiveRepo()?.repoPath) === normalizeWsUri(refreshingRepoPath);
+      const progressBar = viewingSameRepo ? $('ns-progress-bar') : null;
+      const progressSub = viewingSameRepo ? $('ns-loading-sub') : null;
 
       let pct = 15;
       if (i < 15) {
@@ -1163,7 +1201,9 @@ async function refreshProposals(skipDispatch = false) {
       toast(`Synthesis error: ${err.message}`, true);
     }
   } finally {
+    const finishedRepoPath = refreshingRepoPath;
     isRefreshingProposals = false;
+    refreshingRepoPath = '';
     if (cancelHeaderBtn) {
       cancelHeaderBtn.hidden = true;
     }
@@ -1171,7 +1211,14 @@ async function refreshProposals(skipDispatch = false) {
       refreshBtn.disabled = false;
       refreshBtn.classList.remove('spinning');
     }
-    renderNextSteps(activeRepo);
+    const targetRepo = getActiveRepo();
+    if (targetRepo && (!finishedRepoPath || normalizeWsUri(targetRepo.repoPath) === normalizeWsUri(finishedRepoPath))) {
+      targetRepo.proposals = activeRepo.proposals;
+      targetRepo.synthesizing = activeRepo.synthesizing;
+      renderNextSteps(targetRepo);
+    } else {
+      renderNextSteps(targetRepo || activeRepo);
+    }
   }
 }
 
@@ -1474,40 +1521,25 @@ async function syncGit({ silent = false } = {}) {
       workspaceUris,
       repoPath: selectedRepoPath || undefined,
     };
-    try {
-      // Use lightweight dashboard endpoint for silent polling; call full Python sync on user click
-      if (silent) {
-        data = await callApi('/api/dashboard', { body, timeoutMs: 30000 });
-      } else {
-        data = await callApi('/api/sync', { body, timeoutMs: 30000 });
-      }
-    } catch {
+    const fallbackChain = silent ? ['/api/dashboard', '/api/git-state'] : ['/api/sync', '/api/dashboard', '/api/git-state'];
+    let lastErr = null;
+    for (const endpoint of fallbackChain) {
       try {
-        data = await callApi('/api/dashboard', { body, timeoutMs: 30000 });
-      } catch {
-        try {
-          data = await callApi('/api/git-state', { body, timeoutMs: 30000 });
-        } catch (innerErr) {
-          if (!currentDashboard) {
-            data = {
-              activeRepos: [],
-              jobs: [],
-              error: innerErr.message,
-            };
-          } else {
-            data = {
-              ...currentDashboard,
-              error: innerErr.message,
-            };
-          }
-        }
+        data = await callApi(endpoint, { body, timeoutMs: 30000 });
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
       }
+    }
+    if (!data) {
+      data = currentDashboard
+        ? { ...currentDashboard, error: lastErr?.message }
+        : { activeRepos: [], jobs: [], error: lastErr?.message };
     }
     if (data) {
       if ((!data.activeRepos || data.activeRepos.length === 0) && currentDashboard?.activeRepos?.length > 0) {
         data.activeRepos = currentDashboard.activeRepos;
-      } else if (data.activeRepos?.length > 0 && (!workspaceUris || workspaceUris.length === 0)) {
-        workspaceUris = data.activeRepos.map((r) => r.repoPath);
       }
       renderDashboard(data);
     }
@@ -1535,49 +1567,51 @@ async function syncGit({ silent = false } = {}) {
 }
 
 async function runAudit() {
-  const runBtn = $('btn-run-audit');
-  if (runBtn && runBtn.dataset.action === 'continue-audit') {
-    const jobId = runBtn.dataset.jobId;
-    const repo = runBtn.dataset.repo;
-    const sha = runBtn.dataset.sha;
-    await continueAudit(jobId, repo, sha);
-    return;
-  }
-
-  const activeRepo = getActiveRepo();
-  if (!activeRepo) {
-    toast('No Git repository detected.', true);
-    return;
-  }
-
-  const commentInput = $('input-audit-comment');
-  const comment = commentInput ? commentInput.value.trim() : '';
-
-  // Prevent double auditing: check if an audit is already running for this repo
-  const activeRunningJob = (currentDashboard?.jobs || []).find(
-    (j) => (!j.repo_path || j.repo_path === activeRepo.repoPath) && (j.status === 'running' || j.status === 'queued')
-  );
-
-  if (activeRunningJob || runBtn?.dataset.action === 'send-comment') {
-    if (comment) {
-      await sendCommentToAuditor(activeRepo.repoPath, comment, activeRunningJob?.id || runBtn?.dataset.jobId);
-      if (commentInput) commentInput.value = '';
+  if (isStartingAudit) return;
+  isStartingAudit = true;
+  try {
+    const runBtn = $('btn-run-audit');
+    if (runBtn && runBtn.dataset.action === 'continue-audit') {
+      const jobId = runBtn.dataset.jobId;
+      const repo = runBtn.dataset.repo;
+      const sha = runBtn.dataset.sha;
+      await continueAudit(jobId, repo, sha);
       return;
     }
-    toast(`An audit for ${activeRunningJob?.short_sha || 'commit'} is already in progress. Type a comment above to send guidance.`, true);
-    return;
-  }
 
-  const action = auditAction(currentDashboard, activeRepo, comment);
-  if (action.isAppliedFix) {
-    toast('The latest commit is an applied fix and cannot be re-audited. Make a new commit first.', true);
-    return;
-  }
-  const latest = activeRepo?.youngestCommit || activeRepo?.head || action?.latest;
-  const sha = latest?.sha || 'YOUNGEST';
-  const repoPath = activeRepo.repoPath;
+    const activeRepo = getActiveRepo();
+    if (!activeRepo) {
+      toast('No Git repository detected.', true);
+      return;
+    }
 
-  try {
+    const commentInput = $('input-audit-comment');
+    const comment = commentInput ? commentInput.value.trim() : '';
+
+    // Prevent double auditing: check if an audit is already running for this repo
+    const activeRunningJob = (currentDashboard?.jobs || []).find(
+      (j) => sameRepo(j, activeRepo) && (j.status === 'running' || j.status === 'queued')
+    );
+
+    if (activeRunningJob || runBtn?.dataset.action === 'send-comment') {
+      if (comment) {
+        await sendCommentToAuditor(activeRepo.repoPath, comment, activeRunningJob?.id || runBtn?.dataset.jobId);
+        if (commentInput) commentInput.value = '';
+        return;
+      }
+      toast(`An audit for ${activeRunningJob?.short_sha || 'commit'} is already in progress. Type a comment above to send guidance.`, true);
+      return;
+    }
+
+    const action = auditAction(currentDashboard, activeRepo, comment);
+    if (action.isAppliedFix) {
+      toast('The latest commit is an applied fix and cannot be re-audited. Make a new commit first.', true);
+      return;
+    }
+    const latest = activeRepo?.youngestCommit || activeRepo?.head || action?.latest;
+    const sha = latest?.sha || 'YOUNGEST';
+    const repoPath = activeRepo.repoPath;
+
     toast('Preparing isolated worktree & dispatching Watchdog…');
     const res = await callApi('/api/trigger', { body: { repoPath, sha, comment } });
     if (res.alreadyRunning) {
@@ -1596,16 +1630,23 @@ async function runAudit() {
     }
 
     const prompt = res.job.prompt;
+    let startedViaSidecar = false;
     if (sidecar?.agent?.startConversation && prompt) {
-      const convRes = await sidecar.agent.startConversation(prompt);
-      const conversationId =
-        convRes?.conversationId ||
-        convRes?.response?.conversationId ||
-        convRes?.response?.newConversation?.conversationId ||
-        null;
-      await callApi('/api/mark-running', { body: { jobId: res.job.id, conversationId } });
-      toast(`Launched Watchdog for ${res.job.repo_name} @ ${res.job.short_sha}`);
-    } else {
+      try {
+        const convRes = await sidecar.agent.startConversation(prompt);
+        const conversationId =
+          convRes?.conversationId ||
+          convRes?.response?.conversationId ||
+          convRes?.response?.newConversation?.conversationId ||
+          null;
+        await callApi('/api/mark-running', { body: { jobId: res.job.id, conversationId } });
+        toast(`Launched Watchdog for ${res.job.repo_name} @ ${res.job.short_sha}`);
+        startedViaSidecar = true;
+      } catch (agentErr) {
+        console.warn('sidecar.agent.startConversation failed, falling back to /api/dispatch:', agentErr);
+      }
+    }
+    if (!startedViaSidecar) {
       try {
         const disp = await callApi('/api/dispatch', { body: { jobId: res.job.id } });
         if (disp.ok) {
@@ -1621,6 +1662,8 @@ async function runAudit() {
     await syncGit({ silent: true });
   } catch (err) {
     toast(`Failed to start audit: ${err.message}`, true);
+  } finally {
+    isStartingAudit = false;
   }
 }
 
@@ -1914,7 +1957,7 @@ async function init() {
       }
     });
     commentInput.addEventListener('input', () => {
-      if (currentDashboard) renderDashboard(currentDashboard);
+      if (currentDashboard) updateAuditActionUI(currentDashboard, getActiveRepo(currentDashboard));
     });
   }
 

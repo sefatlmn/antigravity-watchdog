@@ -3,7 +3,7 @@
 The **Watchdog** plugin runs independent code & visual reviews of commits in isolated Git worktrees when the user asks for one, and formulates up to 4 structured Next Steps implementation plans adhering to the official `/plan` standard.
 
 ## Guidelines for Coding Conversations
-- **Audits and plans run only when the user asks**: never start a Watchdog audit or Next Steps synthesis on your own. Watchdog does not audit commits containing `[auto-review]`, `[watchdog]`, or `[skip-watchdog]`.
+- **Audits and plans run only when the user asks**: never start a Watchdog audit or Next Steps synthesis on your own. Watchdog skips automatic audits for commits containing `[auto-review]`, `[watchdog]`, or `[skip-watchdog]` (unless explicitly forced by the user via `Run Review` or `--force`).
 - **Audit Reports & Fix Branches**:
   - Completed audit reports are saved to `.antigravity/audits/review-<short_sha>.md` (and `.json`).
   - When Watchdog fixes reproducible bugs, it commits them to an isolated branch named `fix/watchdog-<short_sha>` without modifying your active working tree or current branch.

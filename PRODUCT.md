@@ -38,12 +38,12 @@ Zero-friction assurance and intelligent momentum. Unlike static linters, detache
 ## Brand Commitments
 
 - **Tone & Identity:** Professional, trustworthy, modern visual studio tool.
-- **Visual Language:** Dark-mode native palette, calibrated accent colors (emerald for passes/fixes, amber for warnings, blue for milestones/actions), crisp vector SVGs, and zero emoji glyphs.
+- **Visual Language:** Adaptive dark and light mode palette, calibrated accent colors (emerald for passes/fixes, amber for warnings, blue for milestones/actions), crisp vector SVGs, and zero emoji glyphs.
 
 ## Evidence on Hand
 
 - **Core Plugin Codebase:** `plugin.json`, `scripts/watchdog_ctl.py`.
-- **Sidecar Web Panel:** `sidecars/panel/main.mjs`, `index.html`, `app.js`, `styles.css`.
+- **Sidecar Web Panel:** `sidecars/panel/main.mjs`, `standalone_sdk.mjs`, `view-model.js`, `index.html`, `app.js`, `styles.css`.
 - **Skills & Rules:** `skills/watchdog-auditor/SKILL.md`, `skills/next-steps-synthesizer/SKILL.md`, `rules/AGENTS.md`.
 - **Active Repositories & Audits:** Validated in live environments including `elegant-bose` and `halftone` with verified Playwright test suites and audit records in `.antigravity/audits/`.
 
@@ -58,4 +58,4 @@ Zero-friction assurance and intelligent momentum. Unlike static linters, detache
 
 - Keyboard navigability across tabs, buttons, accordion disclosures, and modal dialogs.
 - Clear ARIA roles (`tablist`, `tab`, `tabpanel`, `aria-selected`, `aria-controls`).
-- High-contrast text tokens meeting WCAG AA standards in dark mode.
+- High-contrast text tokens meeting WCAG AA standards across both dark and light modes.

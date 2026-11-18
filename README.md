@@ -13,7 +13,7 @@ Watchdog operates non-intrusively in isolated Git worktrees, ensuring your activ
 - **Native Antigravity Sidecar Panel:** An embedded webview directly inside Antigravity's auxiliary side pane displaying active audits, status badges, diffs, reports, and Next Steps plans.
 - **AgentAPI Background Synthesis:** Directly communicates with Antigravity's AgentAPI to spawn background audits and plan executions.
 - **Next Steps Implementation Engine:** Ingests repository documentation, recent user transcripts, and codebase symbols to formulate 4 structured `/plan` proposals.
-- **Audits Run Only on Demand:** Watchdog never audits without user interaction, and automatically skips commits tagged `[skip-watchdog]`, `[auto-review]`, or `[watchdog]`.
+- **Audits Run Only on Demand:** Watchdog never audits without user interaction, and automatically skips commits tagged `[skip-watchdog]`, `[auto-review]`, or `[watchdog]` unless explicitly forced via `Run Review` in the UI or `--force` on the CLI.
 
 ---
 
@@ -44,19 +44,21 @@ Then open **Settings → Plugins** in Antigravity, verify that **Watchdog** is e
 ## Repository Layout
 
 - `plugin.json`: Antigravity plugin manifest defining the auxiliary webview panel and metadata.
+- `PRODUCT.md` & `DESIGN.md`: Product specification and "The Command Bridge" dual-theme design system tokens and rules.
 - `rules/AGENTS.md`: Project-level agent instructions for Watchdog audits and Next Steps synthesis.
 - `skills/`:
   - `skills/watchdog-auditor/`: Autonomous post-commit code review and visual verification skill.
   - `skills/next-steps-synthesizer/`: Post-commit planning and next-step proposal synthesizer.
 - `sidecars/panel/`: Embedded auxiliary panel webview:
   - `main.mjs`: Node.js sidecar service integrating with Antigravity's `sidecar_sdk` (or bundled fallback).
+  - `standalone_sdk.mjs`: Loopback HTTP server fallback used outside Antigravity with token/cookie authentication and body size guards.
   - `view-model.js`: Reactive UI state, badge computations, and selection logic.
   - `app.js`: Front-end controller, theme synchronizer, and AgentAPI dispatcher.
   - `index.html` & `styles.css`: Impeccable dark/light responsive interface.
 - `scripts/`:
-  - `scripts/watchdog_ctl.py`: Core controller managing SQLite state, Git worktrees, and AgentAPI jobs.
+  - `scripts/watchdog_ctl.py`: Core controller managing JSON state, SQLite conversation discovery, Git worktrees, and AgentAPI jobs.
   - `scripts/run-tests.mjs`: Test suite covering controller logic, panel view-model, and sidecar endpoints.
-- `types/index.d.ts`: Standalone TypeScript definitions for all Watchdog domain types.
+- `tsconfig.json` & `types/index.d.ts`: JSDoc/TypeScript check configuration and type definitions for Watchdog domain models and `sidecar_sdk`.
 
 ---
 
@@ -81,6 +83,7 @@ python3 scripts/watchdog_ctl.py synthesize --repo .
 
 # Set or inspect milestone goal (aliases: goal, get-goal, set-goal)
 python3 scripts/watchdog_ctl.py goal --repo .
+python3 scripts/watchdog_ctl.py get-goal --repo .
 python3 scripts/watchdog_ctl.py goal --repo . --goal "Production release v2"
 python3 scripts/watchdog_ctl.py set-goal --repo . --goal "Production release v2"
 ```

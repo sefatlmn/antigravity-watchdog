@@ -485,39 +485,7 @@ body {
   50% { opacity: 0.4; transform: scale(0.85); }
 }
 
-/* Reusable Loading Spinners & Loading States */
-.spinner {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border: 2px solid color-mix(in srgb, currentColor 22%, transparent);
-  border-top-color: currentColor;
-  border-radius: var(--radius-full, 9999px);
-  animation: spin 0.7s linear infinite;
-  flex-shrink: 0;
-  box-sizing: border-box;
-  vertical-align: middle;
-}
-
-.spinner-sm {
-  width: 11px;
-  height: 11px;
-  border-width: 1.5px;
-}
-
-.spinner-lg {
-  width: 20px;
-  height: 20px;
-  border-width: 2.5px;
-}
-
-.spinner-inline {
-  margin-right: 5px;
-}
-
-.btn.is-loading,
-.btn.loading,
-.icon-btn.is-loading {
+.btn.loading {
   pointer-events: none;
   opacity: 0.8;
   cursor: wait;
@@ -975,25 +943,6 @@ body {
   box-shadow: var(--shadow-sm);
 }
 
-.empty-state-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  background: var(--subtle-overlay);
-  color: var(--text-muted, var(--muted-foreground, #94a3b8));
-  margin-bottom: 2px;
-  transition: color var(--transition-base), background var(--transition-base), transform var(--transition-base);
-}
-
-.empty-state:hover .empty-state-icon {
-  color: var(--accent);
-  background: var(--accent-bg);
-  transform: scale(1.05);
-}
-
 .empty-state p {
   margin: 0;
   font-size: var(--font-size-sm);
@@ -1201,12 +1150,6 @@ body {
   line-height: var(--leading-tight);
   flex-shrink: 0;
   border-radius: 4px;
-}
-
-.docs-tag {
-  color: var(--warning);
-  background: rgba(245, 158, 11, 0.12);
-  border-color: rgba(245, 158, 11, 0.28);
 }
 
 /* Archived Audits Collapsible Section */
@@ -1643,14 +1586,6 @@ body {
   color: var(--danger, #ef4444) !important;
 }
 
-.text-icon-btn {
-  font-size: var(--font-size-xs);
-  padding: 3px 7px;
-  width: auto;
-  height: auto;
-  border-radius: 4px;
-}
-
 /* Proposals Section */
 .proposals-section {
   display: flex;
@@ -1869,25 +1804,6 @@ body {
   color: var(--accent);
   flex-shrink: 0;
   margin-top: 2px;
-}
-
-.proposal-files-row {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  flex-wrap: wrap;
-}
-
-.file-chip {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-xs);
-  font-weight: var(--weight-medium);
-  padding: 2px 6px;
-  border-radius: var(--radius-sm, 4px);
-  background: var(--subtle-overlay);
-  border: 1px solid var(--border-subtle-translucent);
-  color: var(--text-muted, var(--muted-foreground, #94a3b8));
-  font-variant-numeric: tabular-nums;
 }
 
 .proposal-actions {

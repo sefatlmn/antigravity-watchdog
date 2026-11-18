@@ -78,11 +78,11 @@ function isPathInside(parentDir, targetPath) {
       const parentReal = getRealPath(parentResolved);
       const targetReal = getRealPath(targetResolved);
       const relReal = relative(parentReal, targetReal);
-      return relReal === '' || (!relReal.startsWith('..') && !isAbsolute(relReal));
+      return relReal === '' || (relReal !== '..' && !relReal.startsWith('../') && !relReal.startsWith('..\\') && !isAbsolute(relReal));
     }
 
     const rel = relative(parentResolved, targetResolved);
-    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    return rel === '' || (rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\') && !isAbsolute(rel));
   } catch {
     return false;
   }
@@ -95,6 +95,9 @@ function getActiveWorkspacePaths() {
   }
   for (const sw of activeStandaloneWorkspaces) {
     if (sw && existsSync(sw)) ws.add(resolve(sw));
+  }
+  for (const kr of knownDiscoveredRepos) {
+    if (kr && existsSync(kr)) ws.add(resolve(kr));
   }
   try {
     const state = loadState(true);
@@ -161,6 +164,8 @@ const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
 const readLocal = (name) => readFileSync(join(HERE, name), 'utf8');
 
 let activeStandaloneWorkspaces = process.env.WATCHDOG_REPO ? [resolve(process.env.WATCHDOG_REPO)] : [];
+const knownDiscoveredRepos = new Set();
+let cachedIndexHtml = { mtimeKey: '', html: '' };
 
 const STANDALONE_PRELOAD_JS = `// Watchdog Host Bridge (Antigravity Webview / Standalone Browser)
 if (!window.sidecar) {
@@ -201,21 +206,25 @@ if (!window.sidecar) {
 `;
 
 function renderIndexHtml() {
+  const assetFiles = ['index.html', 'styles.css', 'app.js'];
+  const mtimeKey = assetFiles
+    .map((f) => {
+      try {
+        return String(statSync(join(HERE, f)).mtimeMs);
+      } catch {
+        return '0';
+      }
+    })
+    .join(':');
+  if (cachedIndexHtml.html && cachedIndexHtml.mtimeKey === mtimeKey) {
+    return cachedIndexHtml.html;
+  }
+
   let html = readLocal('index.html');
-  try {
-    let preloadContent = '';
-    try {
-      preloadContent = readLocal('preload.js');
-    } catch {
-      preloadContent = STANDALONE_PRELOAD_JS;
-    }
-    if (preloadContent) {
-      html = html.replace(
-        /<script(?:\s+type="module")?\s+src="\/preload\.js[^"]*"><\/script>/,
-        () => `<script>\n${preloadContent}\n</script>`
-      );
-    }
-  } catch {}
+  html = html.replace(
+    /<script(?:\s+type="module")?\s+src="\/preload\.js[^"]*"><\/script>/,
+    () => `<script>\n${STANDALONE_PRELOAD_JS}\n</script>`
+  );
   try {
     const css = readLocal('styles.css');
     html = html.replace(
@@ -230,6 +239,8 @@ function renderIndexHtml() {
       () => `<script>\n${js}\n</script>`
     );
   } catch {}
+
+  cachedIndexHtml = { mtimeKey, html };
   return html;
 }
 
@@ -240,11 +251,12 @@ app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 
 app.page('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }));
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
 app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, host: 'antigravity', pid: process.pid }), 'GET');
-app.api('/api/active-workspace', (data, req) => {
-  if (req && req.method === 'POST' && data?.repoPath) {
+const handleActiveWorkspace = (data) => {
+  if (data?.repoPath) {
     const resolved = resolve(String(data.repoPath).trim());
     if (existsSync(resolved)) {
       activeStandaloneWorkspaces = [resolved, ...activeStandaloneWorkspaces.filter((p) => p !== resolved)].slice(0, 5);
+      knownDiscoveredRepos.add(resolved);
       saveStatePatch({ active_workspace: resolved });
     }
   }
@@ -260,17 +272,9 @@ app.api('/api/active-workspace', (data, req) => {
     uris.push(state.active_workspace);
   }
   return { ok: true, workspaceUris: uris };
-}, 'GET');
-app.api('/api/active-workspace', (data) => {
-  if (data?.repoPath) {
-    const resolved = resolve(String(data.repoPath).trim());
-    if (existsSync(resolved)) {
-      activeStandaloneWorkspaces = [resolved, ...activeStandaloneWorkspaces.filter((p) => p !== resolved)].slice(0, 5);
-      saveStatePatch({ active_workspace: resolved });
-    }
-  }
-  return { ok: true, workspaceUris: activeStandaloneWorkspaces };
-}, 'POST');
+};
+app.api('/api/active-workspace', handleActiveWorkspace, 'GET');
+app.api('/api/active-workspace', handleActiveWorkspace, 'POST');
 
 let resolvedPythonBin = null;
 let resolvedGitBin = null;
@@ -510,7 +514,7 @@ function reconcileJobs(state) {
               }
             }
             const fixBranch = `fix/watchdog-${shortSha}`;
-            const hasFixes = verdict === 'FIXED_ON_BRANCH' || content.includes(fixBranch);
+            const hasFixes = verdict === 'FIXED_ON_BRANCH';
 
             j.status = 'completed';
             j.verdict = verdict;
@@ -567,34 +571,38 @@ function reconcileJobs(state) {
                 const chunk = chunkText.trim().split('\n');
                 for (let i = chunk.length - 1; i >= 0; i--) {
                   const line = chunk[i].trim();
-                  if (line.startsWith('{')) {
-                    const parsed = JSON.parse(line);
-                    if (parsed.status === 'CANCELLED' || parsed.status === 'CANCELED') {
-                      j.status = 'interrupted';
-                      j.summary = 'Audit subagent was cancelled.';
-                      modified = true;
-                      break;
-                    }
-                    if (parsed.status === 'ERROR' && parsed.type !== 'GENERIC') {
-                      j.status = 'interrupted';
-                      j.summary = 'Audit subagent was interrupted or encountered an error.';
-                      modified = true;
-                      break;
-                    }
-                    if (parsed.type === 'PLANNER_RESPONSE' && (!parsed.tool_calls || parsed.tool_calls.length === 0) && age > 600) {
-                      j.status = 'interrupted';
-                      j.summary = 'Audit subagent stopped before generating report.';
-                      modified = true;
-                      break;
-                    }
-                    if (age > 900) {
-                      j.status = 'interrupted';
-                      j.summary = 'Audit conversation timed out with no recent activity.';
-                      modified = true;
-                      break;
-                    }
+                  if (!line.startsWith('{')) continue;
+                  let parsed;
+                  try {
+                    parsed = JSON.parse(line);
+                  } catch {
+                    continue;
+                  }
+                  if (parsed.status === 'CANCELLED' || parsed.status === 'CANCELED') {
+                    j.status = 'interrupted';
+                    j.summary = 'Audit subagent was cancelled.';
+                    modified = true;
                     break;
                   }
+                  if (parsed.status === 'ERROR' && parsed.type !== 'GENERIC') {
+                    j.status = 'interrupted';
+                    j.summary = 'Audit subagent was interrupted or encountered an error.';
+                    modified = true;
+                    break;
+                  }
+                  if (parsed.type === 'PLANNER_RESPONSE' && (!parsed.tool_calls || parsed.tool_calls.length === 0) && age > 600) {
+                    j.status = 'interrupted';
+                    j.summary = 'Audit subagent stopped before generating report.';
+                    modified = true;
+                    break;
+                  }
+                  if (age > 900) {
+                    j.status = 'interrupted';
+                    j.summary = 'Audit conversation timed out with no recent activity.';
+                    modified = true;
+                    break;
+                  }
+                  break;
                 }
               }
             } catch {}
@@ -616,7 +624,17 @@ function reconcileJobs(state) {
 
   if (modified) {
     try {
-      saveStatePatch({ jobs: state.jobs });
+      const reconciledById = new Map(
+        (state.jobs || []).filter((j) => j && j.id).map((j) => [j.id, j])
+      );
+      saveStatePatch((curr) => {
+        const currJobs = Array.isArray(curr.jobs) ? curr.jobs : (state.jobs || []);
+        const merged = currJobs.map((cj) => {
+          const rec = cj?.id ? reconciledById.get(cj.id) : null;
+          return rec ? { ...cj, ...rec } : cj;
+        });
+        return { ...curr, jobs: merged };
+      });
     } catch (err) {
       console.warn('reconcileJobs failed to persist state patch:', err.message);
     }
@@ -624,11 +642,25 @@ function reconcileJobs(state) {
   return state;
 }
 
-function saveStatePatch(patch) {
+function atomicWriteJson(filePath, data) {
+  mkdirSync(dirname(filePath), { recursive: true });
+  const tmpFile = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
+  try {
+    writeFileSync(tmpFile, JSON.stringify(data, null, 2), 'utf8');
+    renameSync(tmpFile, filePath);
+  } catch (err) {
+    try {
+      if (existsSync(tmpFile)) rmSync(tmpFile, { force: true });
+    } catch {}
+    throw err;
+  }
+}
+
+function saveStatePatch(patchOrUpdater) {
   mkdirSync(WATCHDOG_DIR, { recursive: true });
   const lockDir = `${STATE_FILE}.lock`;
   let acquired = false;
-  for (let attempt = 0; attempt < 20; attempt++) {
+  for (let attempt = 0; attempt < 80; attempt++) {
     try {
       mkdirSync(lockDir);
       acquired = true;
@@ -657,7 +689,11 @@ function saveStatePatch(patch) {
             }
           } catch {}
           if (!isAlive) {
-            try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
+            const staleLockDir = `${lockDir}.stale.${process.pid}.${Date.now()}`;
+            try {
+              renameSync(lockDir, staleLockDir);
+              rmSync(staleLockDir, { recursive: true, force: true });
+            } catch {}
             continue;
           }
         }
@@ -679,14 +715,23 @@ function saveStatePatch(patch) {
       } catch {}
       syncSleep(20);
     }
-    const next = { ...current, ...patch };
+    const next = typeof patchOrUpdater === 'function'
+      ? patchOrUpdater(current)
+      : { ...current, ...patchOrUpdater };
     const tmpFile = `${STATE_FILE}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}`;
-    writeFileSync(tmpFile, JSON.stringify(next, null, 2), 'utf8');
-    renameSync(tmpFile, STATE_FILE);
+    try {
+      writeFileSync(tmpFile, JSON.stringify(next, null, 2), 'utf8');
+      renameSync(tmpFile, STATE_FILE);
+    } catch (writeErr) {
+      try {
+        if (existsSync(tmpFile)) rmSync(tmpFile, { force: true });
+      } catch {}
+      throw writeErr;
+    }
     return next;
   } catch (err) {
     console.error('Failed to save state patch:', err);
-    return patch;
+    return typeof patchOrUpdater === 'function' ? {} : patchOrUpdater;
   } finally {
     if (acquired) {
       try { rmSync(lockDir, { recursive: true, force: true }); } catch {}
@@ -730,6 +775,7 @@ async function getRepoRecentCommits(repoPath, limit = 12) {
       isEmptyTree,
       subject,
       isAutoReview,
+      isDocsOnly: false,
     });
   }
 
@@ -741,6 +787,13 @@ async function getRepoRecentCommits(repoPath, limit = 12) {
   });
 
   return commits.slice(0, limit);
+}
+
+const gitRootsCache = new Map();
+const GIT_ROOTS_CACHE_TTL_MS = 15000;
+
+function clearGitRootsCache() {
+  gitRootsCache.clear();
 }
 
 async function discoverCandidateGitRoots(uriOrPath) {
@@ -758,6 +811,12 @@ async function discoverCandidateGitRoots(uriOrPath) {
     return [];
   }
 
+  const resolvedDir = resolve(dir);
+  const cached = gitRootsCache.get(resolvedDir);
+  if (cached && Date.now() - cached.ts < GIT_ROOTS_CACHE_TTL_MS) {
+    return [...cached.roots];
+  }
+
   const candidates = [];
   const seen = new Set();
 
@@ -767,6 +826,14 @@ async function discoverCandidateGitRoots(uriOrPath) {
     if (!resolved.includes('watchdog/worktrees') && !resolved.includes('.antigravity/worktrees')) {
       candidates.push(resolved);
       seen.add(resolved);
+      if (resolved === resolvedDir) {
+        const headTree = await runGit(resolved, ['rev-parse', '--verify', 'HEAD^{tree}']);
+        if (headTree && headTree !== EMPTY_TREE_HASH) {
+          if (gitRootsCache.size > 100) gitRootsCache.clear();
+          gitRootsCache.set(resolvedDir, { ts: Date.now(), roots: candidates });
+          return [...candidates];
+        }
+      }
     }
   }
 
@@ -793,8 +860,10 @@ async function discoverCandidateGitRoots(uriOrPath) {
     }
   };
 
-  scanDir(resolve(dir), 1);
-  return candidates;
+  scanDir(resolvedDir, 1);
+  if (gitRootsCache.size > 100) gitRootsCache.clear();
+  gitRootsCache.set(resolvedDir, { ts: Date.now(), roots: candidates });
+  return [...candidates];
 }
 
 const DOC_EXTS = new Set([
@@ -967,27 +1036,35 @@ async function inspectSingleRepo(topLevel) {
                   chunkText = readFileSync(transcriptPath, 'utf8');
                 }
                 const lines = chunkText.trim().split('\n');
-                let lastLine = '';
                 for (let i = lines.length - 1; i >= 0; i--) {
                   const candidate = lines[i].trim();
-                  if (candidate.startsWith('{')) {
-                    lastLine = candidate;
-                    break;
+                  if (!candidate.startsWith('{')) continue;
+                  let parsed;
+                  try {
+                    parsed = JSON.parse(candidate);
+                  } catch {
+                    continue;
                   }
-                }
-                if (lastLine.startsWith('{')) {
-                  const parsed = JSON.parse(lastLine);
-                  if (parsed.status === 'ERROR' || parsed.status === 'CANCELLED' || parsed.status === 'CANCELED') {
+                  if (
+                    parsed.status === 'CANCELLED' ||
+                    parsed.status === 'CANCELED' ||
+                    (parsed.status === 'ERROR' && parsed.type !== 'GENERIC')
+                  ) {
                     item.status = 'interrupted';
                     item.completedAt = new Date().toISOString();
                     item.summary = 'Agent execution was interrupted or cancelled. Click Continue Execution to resume.';
                     execsModified = true;
-                  } else if (parsed.type === 'PLANNER_RESPONSE' && (!parsed.tool_calls || parsed.tool_calls.length === 0)) {
+                  } else if (
+                    parsed.type === 'PLANNER_RESPONSE' &&
+                    (!parsed.tool_calls || parsed.tool_calls.length === 0) &&
+                    ageSec > 600
+                  ) {
                     item.status = 'completed';
                     item.completedAt = new Date().toISOString();
                     item.summary = 'Plan execution completed by agent.';
                     execsModified = true;
                   }
+                  break;
                 }
               }
             } catch {
@@ -999,7 +1076,7 @@ async function inspectSingleRepo(topLevel) {
     }
     if (execsModified) {
       try {
-        writeFileSync(execFile, JSON.stringify({ executions }, null, 2), 'utf8');
+        atomicWriteJson(execFile, { executions });
       } catch {
         // ignore
       }
@@ -1031,13 +1108,13 @@ async function inspectSingleRepo(topLevel) {
           if (proposalsFresh) {
             synthesizing = false;
             sData.status = 'ready';
-            try { writeFileSync(synthStateFile, JSON.stringify(sData, null, 2), 'utf8'); } catch {}
+            try { atomicWriteJson(synthStateFile, sData); } catch {}
           } else if (elapsed > 15 * 60 * 1000) {
             synthesizing = false;
             sData.status = 'idle';
             sData.error = 'Synthesis timed out after 15 minutes.';
             synthesisError = sData.error;
-            try { writeFileSync(synthStateFile, JSON.stringify(sData, null, 2), 'utf8'); } catch {}
+            try { atomicWriteJson(synthStateFile, sData); } catch {}
           } else {
             synthesizing = true;
           }
@@ -1224,6 +1301,10 @@ async function collectActiveRepos(uris, state, targetRepo = '') {
     }
   }
 
+  for (const r of roots) {
+    if (r && existsSync(r)) knownDiscoveredRepos.add(resolve(r));
+  }
+
   const inspected = await Promise.all(roots.map((r) => inspectSingleRepo(r)));
   let repos = inspected.filter(Boolean);
 
@@ -1308,6 +1389,7 @@ app.api('/api/dashboard', handleDashboard, 'GET');
 // POST /api/sync & /api/git-state & /api/git_state { repoPath?, workspaceUris?, repo? }
 const handleGitState = async (data) => {
   try {
+    clearGitRootsCache();
     const uris = [];
     const targetRepo = data?.repoPath || data?.repo;
     if (targetRepo) {
@@ -1339,7 +1421,7 @@ const handleGitState = async (data) => {
     } catch (pythonErr) {
       console.warn('Python ctl sync warning:', pythonErr.message);
     }
-    const state = loadState();
+    const state = loadState(true);
     const activeRepos = await collectActiveRepos(uris, state, targetRepo);
 
     return {
@@ -1402,10 +1484,10 @@ app.api('/api/trigger', async (data) => {
   }
 
   // Prevent double auditing if an audit is already running for this repo
-  const samePath = (a, b) => !a || !b || a === b || resolve(String(a)) === resolve(String(b));
+  const samePath = (a, b) => Boolean(a && b && (a === b || resolve(String(a)) === resolve(String(b))));
   const state = loadState();
   const running = (state.jobs || []).find(
-    (j) => (!j.repo_path || samePath(j.repo_path, repoPath)) && (j.status === 'running' || j.status === 'queued')
+    (j) => Boolean(j.repo_path && samePath(j.repo_path, repoPath)) && (j.status === 'running' || j.status === 'queued')
   );
 
   if (running) {
@@ -1440,24 +1522,26 @@ app.api('/api/trigger', async (data) => {
 app.api('/api/mark-running', (data) => {
   const jobId = String(data?.jobId || '');
   const convId = data?.conversationId ? String(data.conversationId) : null;
-  const state = loadState();
-  for (const j of state.jobs || []) {
-    if (j.id === jobId) {
-      j.status = 'running';
-      j.started_at = new Date().toISOString();
-      j.summary = 'Autonomous Watchdog review in progress…';
-      if (convId) j.conversation_id = convId;
-      break;
+  saveStatePatch((state) => {
+    const jobs = Array.isArray(state.jobs) ? state.jobs.map((j) => ({ ...j })) : [];
+    for (const j of jobs) {
+      if (j.id === jobId) {
+        j.status = 'running';
+        j.started_at = new Date().toISOString();
+        j.summary = 'Autonomous Watchdog review in progress…';
+        if (convId) j.conversation_id = convId;
+        break;
+      }
     }
-  }
-  const patch = { jobs: state.jobs };
-  if (convId) {
-    const activeWatchdog = Array.isArray(state.active_watchdog_conversations) ? state.active_watchdog_conversations : [];
-    if (!activeWatchdog.includes(convId)) {
-      patch.active_watchdog_conversations = [...activeWatchdog, convId];
+    const next = { ...state, jobs };
+    if (convId) {
+      const activeWatchdog = Array.isArray(state.active_watchdog_conversations) ? state.active_watchdog_conversations : [];
+      if (!activeWatchdog.includes(convId)) {
+        next.active_watchdog_conversations = [...activeWatchdog, convId];
+      }
     }
-  }
-  saveStatePatch(patch);
+    return next;
+  });
   return { ok: true };
 });
 
@@ -1567,18 +1651,10 @@ app.api('/api/archive-job', (data) => {
       contentType: 'application/json',
     });
   }
-  const state = loadState();
-  let found = false;
-  for (const j of state.jobs || []) {
-    if (j.id === jobId) {
-      j.archived = archived;
-      found = true;
-      break;
-    }
-  }
-  if (found) {
-    saveStatePatch({ jobs: state.jobs });
-  }
+  saveStatePatch((state) => {
+    const jobs = Array.isArray(state.jobs) ? state.jobs.map((j) => (j.id === jobId ? { ...j, archived } : j)) : [];
+    return { ...state, jobs };
+  });
   return { ok: true, jobId, archived };
 });
 
@@ -1614,7 +1690,7 @@ app.api('/api/next-steps/refresh', async (data) => {
         const sData = JSON.parse(readFileSync(synthStateFile, 'utf8'));
         sData.status = 'idle';
         sData.error = err.message || 'Synthesis dispatch failed';
-        writeFileSync(synthStateFile, JSON.stringify(sData, null, 2), 'utf8');
+        atomicWriteJson(synthStateFile, sData);
       }
     } catch {}
     return { ok: false, error: err.message || 'Synthesis dispatch failed', status: 'idle' };

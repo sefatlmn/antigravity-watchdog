@@ -101,6 +101,66 @@ async function main() {
     const parts = vmodel.partitionJobs({ jobs: [{ id: 'a', short_sha: '1', archived: false }, { id: 'b', short_sha: '2', archived: true }] });
     assert.equal(parts.recent.length, 1);
     assert.equal(parts.archived.length, 1);
+
+    // pathsOverlap boundary checks
+    assert.equal(vmodel.pathsOverlap('/work/app', '/work/app-v2'), false);
+    assert.equal(vmodel.pathsOverlap('/work/app', '/work/app/sub'), true);
+    assert.equal(vmodel.pathsOverlap('/work/app/', '/work/app'), true);
+
+    // Parity between view-model.js and app.js for shared helper definitions
+    const vmSrc = fs.readFileSync(path.join(rootDir, 'sidecars/panel/view-model.js'), 'utf8');
+    const appSrc = fs.readFileSync(path.join(rootDir, 'sidecars/panel/app.js'), 'utf8');
+    const extractNormalizedDecl = (src, name) => {
+      const re = new RegExp(`(?:^|\\n)(?:export\\s+)?(?:function\\s+${name}\\b|const\\s+${name}\\s*=)`);
+      const m = re.exec(src);
+      assert.ok(m, `Expected declaration for ${name}`);
+      const start = m.index + (m[0].startsWith('\n') ? 1 : 0);
+      let idx = start;
+      if (src.slice(start).includes('=>') && src.slice(start, start + 60).includes(`const ${name}`)) {
+        idx = src.indexOf('=>', start);
+      } else {
+        let p = src.indexOf('(', start);
+        let pDepth = 0;
+        for (; p < src.length; p++) {
+          if (src[p] === '(') pDepth++;
+          else if (src[p] === ')') {
+            pDepth--;
+            if (pDepth === 0) {
+              idx = p + 1;
+              break;
+            }
+          }
+        }
+      }
+      const openBrace = src.indexOf('{', idx);
+      assert.ok(openBrace !== -1, `Expected body brace for ${name}`);
+      let depth = 0;
+      let end = openBrace;
+      for (; end < src.length; end++) {
+        if (src[end] === '{') depth++;
+        else if (src[end] === '}') {
+          depth--;
+          if (depth === 0) {
+            end++;
+            break;
+          }
+        }
+      }
+      if (src[end] === ';') end++;
+      return src
+        .slice(start, end)
+        .replace(/^export\s+/, '')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    };
+    for (const fnName of ['pathsOverlap', 'selectActiveRepo', 'goalText', 'sameRepo', 'jobView', 'auditAction', 'partitionJobs', 'proposalView']) {
+      assert.equal(
+        extractNormalizedDecl(appSrc, fnName),
+        extractNormalizedDecl(vmSrc, fnName),
+        `app.js and view-model.js must match for ${fnName}`
+      );
+    }
   });
 
   // =========================================================================
@@ -214,6 +274,29 @@ async function main() {
         });
         assert.equal(rebindStatus, 401, `Non-loopback Host header (${badHost}) must be rejected with 401`);
       }
+
+      // 8. Valid cookie succeeds even when stale x-sidecar-token header is present
+      const mutResStaleHeaderWithCookie = await fetch(`http://127.0.0.1:${testPort}/api/test-secure`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-sidecar-token': 'stale-token',
+          'Cookie': `sidecar_token=${cookieToken}`,
+        },
+        body: JSON.stringify({}),
+      });
+      assert.equal(mutResStaleHeaderWithCookie.status, 200, 'Valid cookie must authorize even alongside stale header token');
+
+      // 9. Malformed JSON body returns 400
+      const badJsonRes = await fetch(`http://127.0.0.1:${testPort}/api/test-secure`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-sidecar-token': cookieToken,
+        },
+        body: '{bad json',
+      });
+      assert.equal(badJsonRes.status, 400, 'Malformed JSON body must return 400');
     } finally {
       testServer.close();
     }
@@ -525,238 +608,397 @@ from unittest.mock import patch
 sys.path.insert(0, ${JSON.stringify(rootDir)})
 import scripts.watchdog_ctl as ctl
 
-# 1. StateLock Concurrency
-errors = []
-def worker(w_id):
-    try:
-        for _ in range(5):
-            with ctl.StateLock():
-                st = ctl.load_state()
-                st["__test_counter__"] = st.get("__test_counter__", 0) + 1
-                ctl.save_state(st)
-                time.sleep(0.002)
-    except Exception as ex:
-        errors.append(str(ex))
+with tempfile.TemporaryDirectory() as tmp_appdata_str:
+    tmp_appdata = Path(tmp_appdata_str)
+    tmp_wd = tmp_appdata / "watchdog"
+    ctl.APP_DATA_DIR = tmp_appdata
+    ctl.WATCHDOG_DIR = tmp_wd
+    ctl.STATE_FILE = tmp_wd / "state.json"
+    ctl.LOCK_FILE = tmp_wd / "state.lock"
+    ctl.STATE_LOCK_DIR = tmp_wd / "state.json.lock"
+    ctl.WORKTREES_DIR = tmp_wd / "worktrees"
+    ctl.LOGS_DIR = tmp_wd / "logs"
+    ctl.ENV_CACHE_FILE = tmp_wd / "ls_env.json"
 
-threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
-for t in threads: t.start()
-for t in threads: t.join()
-
-if errors:
-    print(f"FAILED StateLock concurrency: {errors}", file=sys.stderr)
-    sys.exit(1)
-
-with ctl.StateLock():
-    final_st = ctl.load_state()
-    final_st.pop("__test_counter__", None)
-    ctl.save_state(final_st)
-
-# Test StateLock explicit TimeoutError on contention
-timed_out_raised = False
-try:
-    ctl.STATE_LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    (ctl.STATE_LOCK_DIR / "pid").write_text(str(os.getpid()), encoding="utf-8")
-    def try_lock():
-        global timed_out_raised
+    # 1. StateLock Concurrency
+    errors = []
+    def worker(w_id):
         try:
-            with ctl.StateLock():
-                pass
-        except TimeoutError:
-            timed_out_raised = True
-    t_lock = threading.Thread(target=try_lock)
-    t_lock.start()
-    t_lock.join()
-finally:
-    shutil.rmtree(ctl.STATE_LOCK_DIR, ignore_errors=True)
-assert timed_out_raised is True, "StateLock must raise TimeoutError on contention timeout"
+            for _ in range(5):
+                with ctl.StateLock():
+                    st = ctl.load_state()
+                    st["__test_counter__"] = st.get("__test_counter__", 0) + 1
+                    ctl.save_state(st)
+                    time.sleep(0.002)
+        except Exception as ex:
+            errors.append(str(ex))
 
-# Test StateLock explicit TimeoutError on file lock contention
-timed_out_file_lock = False
-try:
-    with open(ctl.LOCK_FILE, "a+") as f_held:
-        if ctl.fcntl is not None:
-            ctl.fcntl.flock(f_held.fileno(), ctl.fcntl.LOCK_EX)
-        def try_flock():
-            global timed_out_file_lock
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    if errors:
+        print(f"FAILED StateLock concurrency: {errors}", file=sys.stderr)
+        sys.exit(1)
+
+    with ctl.StateLock():
+        final_st = ctl.load_state()
+        assert final_st.get("__test_counter__") == 20, f"Expected 20, got {final_st.get('__test_counter__')}"
+        final_st.pop("__test_counter__", None)
+        ctl.save_state(final_st)
+
+    # Test StateLock explicit TimeoutError on contention
+    old_max_retries = getattr(ctl.StateLock, "MAX_RETRIES", None)
+    if old_max_retries is not None:
+        ctl.StateLock.MAX_RETRIES = 8
+    timed_out_raised = False
+    try:
+        ctl.STATE_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+        (ctl.STATE_LOCK_DIR / "pid").write_text(str(os.getpid()), encoding="utf-8")
+        def try_lock():
+            global timed_out_raised
             try:
                 with ctl.StateLock():
                     pass
             except TimeoutError:
-                timed_out_file_lock = True
-        t_flock = threading.Thread(target=try_flock)
-        t_flock.start()
-        t_flock.join()
-        if ctl.fcntl is not None:
-            ctl.fcntl.flock(f_held.fileno(), ctl.fcntl.LOCK_UN)
-finally:
-    pass
-assert timed_out_file_lock is True, "StateLock must raise TimeoutError on file lock contention"
-
-# 2. Path normalization & Windows compatibility
-assert ctl.is_same_repo_path("/path/to/repo/", "/path/to/repo") is True
-assert ctl.is_same_repo_path("C:\\\\repo\\\\sub", "C:/repo/sub") is True
-assert ctl.is_same_repo_path(None, "/path") is False
-assert ctl.is_same_repo_path("/path", None) is False
-
-for candidate in ["C:", "C:\\\\", "C:/", "file:///C:/", "file:///C:", "/C:/", "/C:", "file://localhost/C:", "file://localhost/C:/"]:
-    for other in ["C:", "C:\\\\", "C:/", "file:///C:/", "file:///C:", "/C:/", "/C:"]:
-        assert ctl.is_same_repo_path(candidate, other) is True, f"Failed match {candidate} vs {other}"
-
-# 3. Process liveness verification
-assert ctl.is_pid_alive(os.getpid()) is True
-assert ctl.is_pid_alive(99999999) is False
-assert ctl.is_pid_alive(0) is False
-assert ctl.is_pid_alive(-5) is False
-
-# 4. Plan ID '#' stripping
-repo_path = Path(${JSON.stringify(rootDir)})
-rec = ctl.mark_execution_running(repo_path, "#2", "test-conv", "Test Title")
-assert rec["planId"] == "2", f"Expected planId '2', got {rec['planId']}"
-cancelled = ctl.cancel_execution(repo_path, "#2")
-assert cancelled["ok"] is True
-
-# 5. Antigravity Brain Transcript settling & activity checks
-with tempfile.TemporaryDirectory() as tmp_brain:
-    brain_dir = Path(tmp_brain)
-    old_brain = ctl.BRAIN_DIR
-    ctl.BRAIN_DIR = brain_dir
-    try:
-        test_conv_id = "test-conv-active-check"
-        log_dir = brain_dir / test_conv_id / ".system_generated" / "logs"
-        log_dir.mkdir(parents=True)
-        t_file = log_dir / "transcript.jsonl"
-
-        # Recent PLANNER_RESPONSE without tool calls -> active
-        t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []}) + "\\n", encoding="utf-8")
-        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True
-
-        # Tool calls present -> active
-        t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [{"name": "test"}]}) + "\\n", encoding="utf-8")
-        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True
-
-        # GENERIC status ERROR (e.g. failing test output) -> still active
-        t_file.write_text(json.dumps({"type": "GENERIC", "status": "ERROR", "content": "1 test failed"}) + "\\n", encoding="utf-8")
-        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True
-
-        # PLANNER_RESPONSE status ERROR -> inactive
-        t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "ERROR", "tool_calls": []}) + "\\n", encoding="utf-8")
-        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False
-
-        # Status CANCELLED -> inactive
-        t_file.write_text(json.dumps({"type": "GENERIC", "status": "CANCELLED"}) + "\\n", encoding="utf-8")
-        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False
-
-        # Stale PLANNER_RESPONSE (> 600s) -> inactive
-        t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []}) + "\\n", encoding="utf-8")
-        stale_time_dead = time.time() - 650
-        os.utime(t_file, (stale_time_dead, stale_time_dead))
-        assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False
+                timed_out_raised = True
+        t_lock = threading.Thread(target=try_lock)
+        t_lock.start()
+        t_lock.join()
     finally:
+        shutil.rmtree(ctl.STATE_LOCK_DIR, ignore_errors=True)
+    assert timed_out_raised is True, "StateLock must raise TimeoutError on contention timeout"
+
+    # Test StateLock explicit TimeoutError on file lock contention
+    timed_out_file_lock = False
+    try:
+        with open(ctl.LOCK_FILE, "a+") as f_held:
+            if ctl.fcntl is not None:
+                ctl.fcntl.flock(f_held.fileno(), ctl.fcntl.LOCK_EX)
+            def try_flock():
+                global timed_out_file_lock
+                try:
+                    with ctl.StateLock():
+                        pass
+                except TimeoutError:
+                    timed_out_file_lock = True
+            t_flock = threading.Thread(target=try_flock)
+            t_flock.start()
+            t_flock.join()
+            if ctl.fcntl is not None:
+                ctl.fcntl.flock(f_held.fileno(), ctl.fcntl.LOCK_UN)
+    finally:
+        if old_max_retries is not None:
+            ctl.StateLock.MAX_RETRIES = old_max_retries
+    assert timed_out_file_lock is True, "StateLock must raise TimeoutError on file lock contention"
+
+    # 2. Path normalization & Windows compatibility
+    assert ctl.is_same_repo_path("/path/to/repo/", "/path/to/repo") is True
+    assert ctl.is_same_repo_path("C:\\\\repo\\\\sub", "C:/repo/sub") is True
+    assert ctl.is_same_repo_path(None, "/path") is False
+    assert ctl.is_same_repo_path("/path", None) is False
+
+    for candidate in ["C:", "C:\\\\", "C:/", "file:///C:/", "file:///C:", "/C:/", "/C:", "file://localhost/C:", "file://localhost/C:/"]:
+        for other in ["C:", "C:\\\\", "C:/", "file:///C:/", "file:///C:", "/C:/", "/C:"]:
+            assert ctl.is_same_repo_path(candidate, other) is True, f"Failed match {candidate} vs {other}"
+
+    # 3. Process liveness verification
+    assert ctl.is_pid_alive(os.getpid()) is True
+    assert ctl.is_pid_alive(99999999) is False
+    assert ctl.is_pid_alive(0) is False
+    assert ctl.is_pid_alive(-5) is False
+
+    # 4. Plan ID '#' stripping (isolated in temp dir)
+    tmp_plan_repo = tmp_appdata / "plan_repo"
+    tmp_plan_repo.mkdir()
+    rec = ctl.mark_execution_running(tmp_plan_repo, "#2", "test-conv", "Test Title")
+    assert rec["planId"] == "2", f"Expected planId '2', got {rec['planId']}"
+    cancelled = ctl.cancel_execution(tmp_plan_repo, "#2")
+    assert cancelled["ok"] is True
+
+    # 5. Antigravity Brain Transcript settling & activity checks
+    with tempfile.TemporaryDirectory() as tmp_brain:
+        brain_dir = Path(tmp_brain)
+        old_brain = ctl.BRAIN_DIR
+        ctl.BRAIN_DIR = brain_dir
+        try:
+            test_conv_id = "test-conv-active-check"
+            log_dir = brain_dir / test_conv_id / ".system_generated" / "logs"
+            log_dir.mkdir(parents=True)
+            t_file = log_dir / "transcript.jsonl"
+
+            # Recent PLANNER_RESPONSE without tool calls -> active
+            t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []}) + "\\n", encoding="utf-8")
+            assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True
+
+            # Tool calls present -> active
+            t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": [{"name": "test"}]}) + "\\n", encoding="utf-8")
+            assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True
+
+            # GENERIC status ERROR (e.g. failing test output) -> still active
+            t_file.write_text(json.dumps({"type": "GENERIC", "status": "ERROR", "content": "1 test failed"}) + "\\n", encoding="utf-8")
+            assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is True
+
+            # PLANNER_RESPONSE status ERROR -> inactive
+            t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "ERROR", "tool_calls": []}) + "\\n", encoding="utf-8")
+            assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False
+
+            # Status CANCELLED -> inactive
+            t_file.write_text(json.dumps({"type": "GENERIC", "status": "CANCELLED"}) + "\\n", encoding="utf-8")
+            assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False
+
+            # Stale PLANNER_RESPONSE (> 600s) -> inactive
+            t_file.write_text(json.dumps({"type": "PLANNER_RESPONSE", "status": "DONE", "tool_calls": []}) + "\\n", encoding="utf-8")
+            stale_time_dead = time.time() - 650
+            os.utime(t_file, (stale_time_dead, stale_time_dead))
+            assert ctl.is_conversation_active(test_conv_id, max_age_seconds=900) is False
+        finally:
+            ctl.BRAIN_DIR = old_brain
+
+    # 6. Reconcile job finding report in detached worktree
+    with tempfile.TemporaryDirectory() as tmp_repo, tempfile.TemporaryDirectory() as tmp_wt:
+        r_dir = Path(tmp_repo)
+        w_dir = Path(tmp_wt)
+        sha = "1234567890abcdef"
+        short_sha = sha[:7]
+        
+        wt_report = w_dir / f"review-{short_sha}.md"
+        wt_report.write_text(f"# Watchdog Audit Report -- {short_sha}\\n\\n- **Verdict**: PASS\\n\\n## 1. Executive Summary\\nAll tests passed successfully in worktree.", encoding="utf-8")
+        
+        job = {
+            "id": f"test-{short_sha}",
+            "repo_path": str(r_dir),
+            "worktree_path": str(w_dir),
+            "sha": sha,
+            "short_sha": short_sha,
+            "status": "running",
+            "conversation_id": "test-conv-wt"
+        }
+        modified = ctl.reconcile_job(job)
+        assert modified is True
+        assert job["status"] == "completed"
+        assert job["verdict"] == "PASS"
+        assert (r_dir / ".antigravity" / "audits" / f"review-{short_sha}.md").exists()
+
+    # 7. Goal inspection and discovery
+    with tempfile.TemporaryDirectory() as tmp_goal_repo:
+        gr_dir = Path(tmp_goal_repo)
+        (gr_dir / "README.md").write_text("# Project Apollo\\n\\nGoal: Launch rocket into orbit reliably.", encoding="utf-8")
+        g_res = ctl.load_goal(gr_dir)
+        assert "rocket" in g_res.get("goal", "").lower() or len(g_res.get("goal", "")) > 0
+
+        s_res = ctl.save_goal_override(gr_dir, "Land astronauts safely")
+        assert s_res.get("goal") == "Land astronauts safely"
+        assert s_res.get("source") == "User Override"
+
+    # 8. Deep codebase analysis
+    res_codebase = ctl.deep_analyze_codebase(Path(${JSON.stringify(rootDir)}))
+    self_matches = [t for t in res_codebase.get("todos", []) if "watchdog_ctl.py" in t.get("file", "")]
+    assert not self_matches, f"TODO scanner should not self-match: {self_matches}"
+
+    with tempfile.TemporaryDirectory() as tmp_prune:
+        pr_root = Path(tmp_prune)
+        (pr_root / "src").mkdir()
+        (pr_root / "src" / "index.js").write_text("// TODO: legitimate task\\nconsole.log(1)", encoding="utf-8")
+        (pr_root / "node_modules").mkdir()
+        (pr_root / "node_modules" / "bad.js").write_text("// TODO: should be ignored\\n", encoding="utf-8")
+        (pr_root / ".antigravity").mkdir()
+        (pr_root / ".antigravity" / "hidden.js").write_text("// TODO: should be ignored\\n", encoding="utf-8")
+        pr_codebase = ctl.deep_analyze_codebase(pr_root)
+        assert any("src/index.js" in f or "src\\\\index.js" in f for f in pr_codebase["all_source_files"]), "src/index.js must be found"
+        assert not any("node_modules" in f for f in pr_codebase["all_source_files"]), "node_modules must be pruned"
+        assert not any(".antigravity" in f for f in pr_codebase["all_source_files"]), ".antigravity must be pruned"
+
+    # 9. Next Steps Proposal Target Files Integrity (restore next_steps dir after check)
+    real_ns = Path(${JSON.stringify(rootDir)}) / ".antigravity" / "next_steps"
+    ns_backup = tmp_appdata / "next_steps_backup"
+    if real_ns.exists():
+        shutil.copytree(real_ns, ns_backup)
+    try:
+        proposals_res = ctl.synthesize_next_steps(Path(${JSON.stringify(rootDir)}), force=True)
+        assert proposals_res.get("ok") is True
+        for prop in proposals_res.get("proposals", []):
+            for aff in prop.get("affectedFiles", []):
+                aff_p = Path(${JSON.stringify(rootDir)}) / aff
+                assert aff_p.exists(), f"Proposed affected file does not exist: {aff}"
+    finally:
+        if ns_backup.exists():
+            shutil.rmtree(real_ns, ignore_errors=True)
+            shutil.copytree(ns_backup, real_ns)
+
+    # 10. Transcript extraction formats (USER_INPUT, USER, and Task subagent messages)
+    with tempfile.TemporaryDirectory() as tmp_t_dir:
+        t_conv = "test-conv-format-extraction"
+        t_log_dir = Path(tmp_t_dir) / t_conv / ".system_generated" / "logs"
+        t_log_dir.mkdir(parents=True)
+        t_file = t_log_dir / "transcript.jsonl"
+        t_file.write_text(
+            json.dumps({"type": "USER_INPUT", "content": "Direct user input prompt"}) + "\\n" +
+            json.dumps({"type": "USER", "content": "<USER_REQUEST>Tagged user request</USER_REQUEST>"}) + "\\n" +
+            json.dumps({"type": "SYSTEM_MESSAGE", "content": "[Message] content=<original_task>\\nTask: Subagent task prompt\\n</original_task>"}) + "\\n",
+            encoding="utf-8"
+        )
+        old_b = ctl.BRAIN_DIR
+        ctl.BRAIN_DIR = Path(tmp_t_dir)
+        try:
+            reqs = ctl.get_conversation_user_requests(t_conv, limit=10)
+            assert "Direct user input prompt" in reqs
+            assert "Tagged user request" in reqs
+            assert any("Subagent task prompt" in r for r in reqs)
+        finally:
+            ctl.BRAIN_DIR = old_b
+
+    # 11. CLI subcommand aliases (queue-commit, synthesize, get-goal, set-goal)
+    py_bin = sys.executable
+    ctl_script = str(Path(${JSON.stringify(rootDir)}) / "scripts" / "watchdog_ctl.py")
+    cli_env = {**os.environ, "ANTIGRAVITY_APP_DATA_DIR": tmp_appdata_str}
+
+    proc_q = subprocess.run([py_bin, ctl_script, "queue-commit", "--help"], capture_output=True, text=True, env=cli_env)
+    assert proc_q.returncode == 0
+    assert "--notes" in proc_q.stdout
+
+    proc_s = subprocess.run([py_bin, ctl_script, "synthesize", "--help"], capture_output=True, text=True, env=cli_env)
+    assert proc_s.returncode == 0
+
+    proc_g = subprocess.run([py_bin, ctl_script, "get-goal", "--help"], capture_output=True, text=True, env=cli_env)
+    assert proc_g.returncode == 0
+
+    proc_sg = subprocess.run([py_bin, ctl_script, "set-goal", "--help"], capture_output=True, text=True, env=cli_env)
+    assert proc_sg.returncode == 0
+    assert "--goal" in proc_sg.stdout
+
+    def _git(repo_dir, *args):
+        return subprocess.run(["git", *args], cwd=repo_dir, check=True, capture_output=True, text=True)
+
+    cli_goal_repo = tmp_appdata / "cli_goal_repo"
+    cli_goal_repo.mkdir()
+    _git(cli_goal_repo, "init")
+    _git(cli_goal_repo, "checkout", "-B", "main")
+    _git(cli_goal_repo, "config", "user.email", "test@example.com")
+    _git(cli_goal_repo, "config", "user.name", "Test User")
+    (cli_goal_repo / "README.md").write_text("# Test Repo\\n", encoding="utf-8")
+    _git(cli_goal_repo, "add", ".")
+    _git(cli_goal_repo, "commit", "-m", "initial commit")
+
+    proc_set_g = subprocess.run(
+        [py_bin, ctl_script, "set-goal", "--repo", str(cli_goal_repo), "--goal", "Test CLI Goal", "--json"],
+        capture_output=True,
+        text=True,
+        env=cli_env,
+    )
+    assert proc_set_g.returncode == 0, f"set-goal failed: {proc_set_g.stderr}"
+    set_g_json = json.loads(proc_set_g.stdout)
+    assert set_g_json.get("ok") is True
+
+    proc_get_g = subprocess.run(
+        [py_bin, ctl_script, "get-goal", "--repo", str(cli_goal_repo), "--json"],
+        capture_output=True,
+        text=True,
+        env=cli_env,
+    )
+    assert proc_get_g.returncode == 0, f"get-goal failed: {proc_get_g.stderr}"
+    get_g_json = json.loads(proc_get_g.stdout)
+    assert get_g_json.get("ok") is True
+    assert get_g_json.get("goal", {}).get("goal") == "Test CLI Goal"
+
+    # 12. queue_commit [skip-watchdog] force vs non-force, conversation URI boundary & PLANNER_RESPONSE filtering, apply_fix_branch
+    import sqlite3
+
+    skip_repo = tmp_appdata / "skip_repo"
+    skip_repo.mkdir()
+    _git(skip_repo, "init")
+    _git(skip_repo, "checkout", "-B", "main")
+    _git(skip_repo, "config", "user.email", "test@example.com")
+    _git(skip_repo, "config", "user.name", "Test User")
+    (skip_repo / "app.py").write_text("print('hello')\\n", encoding="utf-8")
+    _git(skip_repo, "add", ".")
+    _git(skip_repo, "commit", "-m", "init code")
+    (skip_repo / "app.py").write_text("print('updated')\\n", encoding="utf-8")
+    _git(skip_repo, "add", ".")
+    _git(skip_repo, "commit", "-m", "chore: trivial update [skip-watchdog]")
+
+    skipped_res = ctl.queue_commit(skip_repo, "HEAD", force=False, dispatch_now=False)
+    assert skipped_res is None, f"Expected None when [skip-watchdog] without force, got {skipped_res}"
+    forced_res = ctl.queue_commit(skip_repo, "HEAD", force=True, dispatch_now=False)
+    assert isinstance(forced_res, dict) and forced_res.get("status") == "queued", f"Expected queued job with force=True, got {forced_res}"
+
+    tmp_docs = tmp_appdata / "Documents"
+    tmp_sub_repo = tmp_docs / "Code" / "MyRepo"
+    tmp_sub_repo.mkdir(parents=True)
+    tmp_db = tmp_appdata / "test_conv_summaries.db"
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(
+        "CREATE TABLE conversation_summaries (conversation_id TEXT, title TEXT, preview TEXT, step_count INTEGER, last_modified_time TEXT, project_id TEXT, workspace_uris TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("conv-shared-ancestor", "Shared workspace", "Preview text", 3, "2026-01-01T00:00:00Z", "", json.dumps([tmp_docs.resolve().as_uri()])),
+    )
+    conn.commit()
+    conn.close()
+
+    old_db, old_proj, old_brain = ctl.CONVERSATION_SUMMARIES_DB, ctl.PROJECTS_DIR, ctl.BRAIN_DIR
+    ctl.CONVERSATION_SUMMARIES_DB = tmp_db
+    ctl.PROJECTS_DIR = tmp_appdata / "empty_projects"
+    tmp_brain2 = tmp_appdata / "brain2"
+    ctl.BRAIN_DIR = tmp_brain2
+    try:
+        matched_convs = ctl.get_project_conversations(tmp_sub_repo)
+        assert not any(c.get("id") == "conv-shared-ancestor" for c in matched_convs), f"Shared ancestor should not match: {matched_convs}"
+
+        conv_log_dir = tmp_brain2 / "conv-filter-test" / ".system_generated" / "logs"
+        conv_log_dir.mkdir(parents=True)
+        (conv_log_dir / "transcript.jsonl").write_text(
+            json.dumps({"type": "USER_INPUT", "content": "Valid user prompt"}) + "\\n" +
+            json.dumps({"type": "PLANNER_RESPONSE", "content": "<USER_REQUEST>Should be ignored</USER_REQUEST>"}) + "\\n",
+            encoding="utf-8",
+        )
+        filtered_reqs = ctl.get_conversation_user_requests("conv-filter-test", limit=10)
+        assert filtered_reqs == ["Valid user prompt"], f"Unexpected filtered requests: {filtered_reqs}"
+    finally:
+        ctl.CONVERSATION_SUMMARIES_DB = old_db
+        ctl.PROJECTS_DIR = old_proj
         ctl.BRAIN_DIR = old_brain
 
-# 6. Reconcile job finding report in detached worktree
-with tempfile.TemporaryDirectory() as tmp_repo, tempfile.TemporaryDirectory() as tmp_wt:
-    r_dir = Path(tmp_repo)
-    w_dir = Path(tmp_wt)
-    sha = "1234567890abcdef"
-    short_sha = sha[:7]
-    
-    wt_report = w_dir / f"review-{short_sha}.md"
-    wt_report.write_text(f"# Watchdog Audit Report -- {short_sha}\\n\\n- **Verdict**: PASS\\n\\n## 1. Executive Summary\\nAll tests passed successfully in worktree.", encoding="utf-8")
-    
-    job = {
-        "id": f"test-{short_sha}",
-        "repo_path": str(r_dir),
-        "worktree_path": str(w_dir),
-        "sha": sha,
-        "short_sha": short_sha,
-        "status": "running",
-        "conversation_id": "test-conv-wt"
-    }
-    modified = ctl.reconcile_job(job)
-    assert modified is True
-    assert job["status"] == "completed"
-    assert job["verdict"] == "PASS"
-    assert (r_dir / ".antigravity" / "audits" / f"review-{short_sha}.md").exists()
+    fix_repo = tmp_appdata / "fix_repo"
+    fix_repo.mkdir()
+    _git(fix_repo, "init")
+    _git(fix_repo, "checkout", "-B", "main")
+    _git(fix_repo, "config", "user.email", "test@example.com")
+    _git(fix_repo, "config", "user.name", "Test User")
+    (fix_repo / "base.txt").write_text("base\\n", encoding="utf-8")
+    _git(fix_repo, "add", ".")
+    _git(fix_repo, "commit", "-m", "base commit")
+    base_sha = _git(fix_repo, "rev-parse", "HEAD").stdout.strip()
+    _git(fix_repo, "checkout", "-b", f"fix/watchdog-{base_sha[:7]}")
+    (fix_repo / "fix.txt").write_text("fixed\\n", encoding="utf-8")
+    _git(fix_repo, "add", ".")
+    _git(fix_repo, "commit", "-m", "fix: clean patch")
+    _git(fix_repo, "checkout", "main")
 
-# 7. Goal inspection and discovery
-with tempfile.TemporaryDirectory() as tmp_goal_repo:
-    gr_dir = Path(tmp_goal_repo)
-    (gr_dir / "README.md").write_text("# Project Apollo\\n\\nGoal: Launch rocket into orbit reliably.", encoding="utf-8")
-    g_res = ctl.load_goal(gr_dir)
-    assert "rocket" in g_res.get("goal", "").lower() or len(g_res.get("goal", "")) > 0
+    apply_ok = ctl.apply_fix_branch(fix_repo, base_sha, mode="cherry-pick")
+    assert apply_ok.get("ok") is True, f"Expected apply_fix_branch success, got {apply_ok}"
+    assert (fix_repo / "fix.txt").exists(), "Expected fix.txt to be cherry-picked onto main"
 
-    s_res = ctl.save_goal_override(gr_dir, "Land astronauts safely")
-    assert s_res.get("goal") == "Land astronauts safely"
-    assert s_res.get("source") == "User Override"
+    (fix_repo / "conflict.txt").write_text("line1\\n", encoding="utf-8")
+    _git(fix_repo, "add", ".")
+    _git(fix_repo, "commit", "-m", "conflict base")
+    c_base_sha = _git(fix_repo, "rev-parse", "HEAD").stdout.strip()
+    _git(fix_repo, "checkout", "-b", f"fix/watchdog-{c_base_sha[:7]}")
+    (fix_repo / "conflict.txt").write_text("fix branch line1\\n", encoding="utf-8")
+    _git(fix_repo, "add", ".")
+    _git(fix_repo, "commit", "-m", "fix: conflicting change")
+    _git(fix_repo, "checkout", "main")
+    (fix_repo / "conflict.txt").write_text("main branch line1\\n", encoding="utf-8")
+    _git(fix_repo, "add", ".")
+    _git(fix_repo, "commit", "-m", "main conflicting change")
 
-# 8. Deep codebase analysis
-res_codebase = ctl.deep_analyze_codebase(Path(${JSON.stringify(rootDir)}))
-self_matches = [t for t in res_codebase.get("todos", []) if "watchdog_ctl.py" in t.get("file", "")]
-assert not self_matches, f"TODO scanner should not self-match: {self_matches}"
+    apply_conflict = ctl.apply_fix_branch(fix_repo, c_base_sha, mode="cherry-pick")
+    assert apply_conflict.get("ok") is False, f"Expected conflict failure, got {apply_conflict}"
+    assert _git(fix_repo, "status", "--porcelain").stdout.strip() == "", "Working tree must be clean after conflict abort"
+    assert not (fix_repo / ".git" / "CHERRY_PICK_HEAD").exists(), "CHERRY_PICK_HEAD must be cleared"
 
-with tempfile.TemporaryDirectory() as tmp_prune:
-    pr_root = Path(tmp_prune)
-    (pr_root / "src").mkdir()
-    (pr_root / "src" / "index.js").write_text("// TODO: legitimate task\\nconsole.log(1)", encoding="utf-8")
-    (pr_root / "node_modules").mkdir()
-    (pr_root / "node_modules" / "bad.js").write_text("// TODO: should be ignored\\n", encoding="utf-8")
-    (pr_root / ".antigravity").mkdir()
-    (pr_root / ".antigravity" / "hidden.js").write_text("// TODO: should be ignored\\n", encoding="utf-8")
-    pr_codebase = ctl.deep_analyze_codebase(pr_root)
-    assert any("src/index.js" in f or "src\\\\index.js" in f for f in pr_codebase["all_source_files"]), "src/index.js must be found"
-    assert not any("node_modules" in f for f in pr_codebase["all_source_files"]), "node_modules must be pruned"
-    assert not any(".antigravity" in f for f in pr_codebase["all_source_files"]), ".antigravity must be pruned"
-
-# 9. Next Steps Proposal Target Files Integrity (No deleted files allowed)
-proposals_res = ctl.synthesize_next_steps(Path(${JSON.stringify(rootDir)}), force=True)
-assert proposals_res.get("ok") is True
-for prop in proposals_res.get("proposals", []):
-    for aff in prop.get("affectedFiles", []):
-        aff_p = Path(${JSON.stringify(rootDir)}) / aff
-        assert aff_p.exists(), f"Proposed affected file does not exist: {aff}"
-
-# 10. Transcript extraction formats (USER_INPUT, USER, and Task subagent messages)
-with tempfile.TemporaryDirectory() as tmp_t_dir:
-    t_conv = "test-conv-format-extraction"
-    t_log_dir = Path(tmp_t_dir) / t_conv / ".system_generated" / "logs"
-    t_log_dir.mkdir(parents=True)
-    t_file = t_log_dir / "transcript.jsonl"
-    t_file.write_text(
-        json.dumps({"type": "USER_INPUT", "content": "Direct user input prompt"}) + "\\n" +
-        json.dumps({"type": "USER", "content": "<USER_REQUEST>Tagged user request</USER_REQUEST>"}) + "\\n" +
-        json.dumps({"type": "SYSTEM_MESSAGE", "content": "[Message] content=<original_task>\\nTask: Subagent task prompt\\n</original_task>"}) + "\\n",
-        encoding="utf-8"
-    )
-    old_b = ctl.BRAIN_DIR
-    ctl.BRAIN_DIR = Path(tmp_t_dir)
-    try:
-        reqs = ctl.get_conversation_user_requests(t_conv, limit=10)
-        assert "Direct user input prompt" in reqs
-        assert "Tagged user request" in reqs
-        assert any("Subagent task prompt" in r for r in reqs)
-    finally:
-        ctl.BRAIN_DIR = old_b
-
-# 11. CLI subcommand aliases (queue-commit, synthesize, get-goal, set-goal)
-py_bin = sys.executable
-ctl_script = str(Path(${JSON.stringify(rootDir)}) / "scripts" / "watchdog_ctl.py")
-
-proc_q = subprocess.run([py_bin, ctl_script, "queue-commit", "--help"], capture_output=True, text=True)
-assert proc_q.returncode == 0
-assert "--notes" in proc_q.stdout
-
-proc_s = subprocess.run([py_bin, ctl_script, "synthesize", "--help"], capture_output=True, text=True)
-assert proc_s.returncode == 0
-
-proc_g = subprocess.run([py_bin, ctl_script, "get-goal", "--help"], capture_output=True, text=True)
-assert proc_g.returncode == 0
-
-proc_sg = subprocess.run([py_bin, ctl_script, "set-goal", "--help"], capture_output=True, text=True)
-assert proc_sg.returncode == 0
-assert "--goal" in proc_sg.stdout
-
-print("PYTHON_TESTS_OK")
+    print("PYTHON_TESTS_OK")
       `,
     ], { encoding: 'utf8' });
     assert.ok(pyOutput.includes('PYTHON_TESTS_OK'));

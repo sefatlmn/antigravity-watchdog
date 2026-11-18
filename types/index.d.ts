@@ -2,7 +2,7 @@
 // what the panel server (sidecars/panel/main.mjs) returns from /api/dashboard, and what
 // the shared view model (sidecars/panel/view-model.js) reads.
 
-export type Commit = {
+type Commit = {
   sha: string
   shortSha?: string
   short_sha?: string
@@ -12,7 +12,7 @@ export type Commit = {
   isAutoReview?: boolean
 }
 
-export type Job = {
+type Job = {
   id: string
   repo?: string
   repo_path?: string
@@ -34,9 +34,9 @@ export type Job = {
   archived?: boolean
 }
 
-export type Proposal = { id?: string; title?: string; [field: string]: unknown }
+type Proposal = { id?: string; title?: string; [field: string]: unknown }
 
-export type Repo = {
+type Repo = {
   repo?: string
   repoPath: string
   repoName: string
@@ -49,4 +49,23 @@ export type Repo = {
   synthesizing?: boolean
 }
 
-export type Dashboard = { activeRepos: Repo[]; jobs: Job[]; error?: string }
+type Dashboard = { activeRepos: Repo[]; jobs: Job[]; error?: string }
+
+declare module 'sidecar_sdk' {
+  export class Response {
+    constructor(
+      body: string | Buffer,
+      options?: { contentType?: string; status?: number; headers?: Record<string, string> }
+    );
+    body: string | Buffer;
+    contentType: string;
+    status: number;
+    headers?: Record<string, string>;
+  }
+
+  export class SidecarApp {
+    page(path: string, handler: (req?: any) => string | Response | Promise<string | Response>): void;
+    api(path: string, handler: (data: any, req?: any) => any, method?: string): void;
+    run(): Promise<any>;
+  }
+}

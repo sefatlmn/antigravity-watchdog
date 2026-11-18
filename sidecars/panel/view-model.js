@@ -2,12 +2,6 @@
 // server's data (which repo is active, what each audit card and button shows). Pure
 // functions with no DOM.
 
-/** @typedef {import('../../types/index.d.ts').Dashboard} Dashboard */
-/** @typedef {import('../../types/index.d.ts').Repo} Repo */
-/** @typedef {import('../../types/index.d.ts').Job} Job */
-/** @typedef {import('../../types/index.d.ts').Commit} Commit */
-/** @typedef {import('../../types/index.d.ts').Proposal} Proposal */
-
 export const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
 
 /** @param {unknown} str @returns {string} */
@@ -50,6 +44,18 @@ export function normalizeWsUri(u) {
 }
 
 /**
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function pathsOverlap(a, b) {
+  const na = normalizeWsUri(a);
+  const nb = normalizeWsUri(b);
+  if (!na || !nb) return false;
+  return na === nb || na.startsWith(`${nb}/`) || nb.startsWith(`${na}/`);
+}
+
+/**
  * @param {Dashboard | null | undefined} data
  * @param {{ selectedRepoPath?: string, explicit?: boolean, workspaceUris?: string[] }} [options]
  * @returns {Repo | null}
@@ -59,14 +65,12 @@ export function selectActiveRepo(data, { selectedRepoPath = '', explicit = false
   if (repos.length === 0) return null;
   if (explicit && selectedRepoPath) {
     const normSelected = normalizeWsUri(selectedRepoPath);
-    const found = repos.find((r) => r.repoPath === selectedRepoPath || r.repoPath === normSelected);
+    const found = repos.find((r) => r.repoPath === selectedRepoPath || normalizeWsUri(r.repoPath) === normSelected);
     if (found) return found;
   }
   if (workspaceUris.length > 0) {
     const normUris = workspaceUris.map(normalizeWsUri).filter(Boolean);
-    const matched = repos.find((r) =>
-      normUris.some((u) => u.includes(r.repoPath) || r.repoPath.includes(u))
-    );
+    const matched = repos.find((r) => normUris.some((u) => pathsOverlap(u, r.repoPath)));
     if (matched) return matched;
   }
   return repos[0];
@@ -81,11 +85,10 @@ export function goalText(repo) {
 }
 
 /** @param {Job} job @param {Repo} repo */
-const sameRepo = (job, repo) => {
-  const jp = (job?.repo_path || job?.repo || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
-  const rp = (repo?.repoPath || repo?.repo || '').trim().replace(/\\/g, '/').replace(/\/+$/, '');
-  if (!jp || !rp) return false;
-  return jp === rp;
+export const sameRepo = (job, repo) => {
+  const jp = normalizeWsUri(job?.repo_path || job?.repo || '');
+  const rp = normalizeWsUri(repo?.repoPath || repo?.repo || '');
+  return Boolean(jp && rp && jp === rp);
 };
 
 // What one audit card shows. `badge` is the corner tag: null, or { kind: 'fix' | 'warn' | 'plain', label }.

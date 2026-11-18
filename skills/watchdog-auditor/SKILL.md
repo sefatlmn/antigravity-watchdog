@@ -88,7 +88,7 @@ When the repository contains a web frontend or full-stack application:
 
 ## 5. Phase 4: Write the Audit Deliverables
 
-Write two files to `<REPO_PATH>/.antigravity/audits/`:
+Complete the two audit deliverables:
 
 1. **Markdown Report (`<REPO_PATH>/.antigravity/audits/review-<short_sha>.md`)**:
    ```markdown
