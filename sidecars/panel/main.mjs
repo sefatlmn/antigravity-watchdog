@@ -1,5 +1,5 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
-import { closeSync, copyFileSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -100,7 +100,7 @@ function getActiveWorkspacePaths() {
     if (kr && existsSync(kr)) ws.add(resolve(kr));
   }
   try {
-    const state = loadState(true);
+    const state = loadState();
     if (state.active_workspace && existsSync(state.active_workspace)) {
       ws.add(resolve(state.active_workspace));
     }
@@ -272,7 +272,7 @@ const handleActiveWorkspace = (data, method = 'GET') => {
       saveStatePatch({ active_workspace: resolved });
     }
   }
-  const state = loadState(true);
+  const state = loadState();
   const uris = [];
   for (const pw of discoverActiveProjectWorkspaces()) {
     if (!uris.includes(pw)) uris.push(pw);
@@ -372,7 +372,7 @@ async function runGit(repoPath, args) {
   }
 }
 
-function loadState(skipReconcile = false) {
+function loadState() {
   mkdirSync(WATCHDOG_DIR, { recursive: true });
   if (!existsSync(STATE_FILE)) {
     return {
@@ -401,266 +401,31 @@ function loadState(skipReconcile = false) {
       jobs: [],
     };
   }
-  if (!skipReconcile) {
-    state = reconcileJobs(state);
-  }
   return state;
 }
 
-function findWatchdogConversationForJob(j) {
-  const shortSha = j.short_sha || (j.sha ? j.sha.slice(0, 7) : '');
-  if (!shortSha) return null;
-  const brainDir = join(homedir(), '.gemini', 'antigravity', 'brain');
-  if (!existsSync(brainDir)) return null;
-  try {
-    const entries = readdirSync(brainDir, { withFileTypes: true });
-    const dirs = entries
-      .filter(e => e.isDirectory() && e.name !== 'tempmediaStorage')
-      .map(e => {
-        try {
-          return { name: e.name, mtime: statSync(join(brainDir, e.name)).mtimeMs };
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.mtime - a.mtime);
-
-    for (const d of dirs.slice(0, 60)) {
-      const tFile = join(brainDir, d.name, '.system_generated', 'logs', 'transcript.jsonl');
-      if (!existsSync(tFile)) continue;
-      try {
-        const fd = openSync(tFile, 'r');
-        try {
-          const buf = Buffer.alloc(32768);
-          const bytesRead = readSync(fd, buf, 0, 32768, 0);
-          const header = buf.toString('utf8', 0, bytesRead);
-          if (header.includes('[WATCHDOG-SESSION]') && header.includes(shortSha)) {
-            return d.name;
-          }
-        } finally {
-          closeSync(fd);
-        }
-      } catch {}
-    }
-  } catch {}
-  return null;
-}
-
-function reconcileJobs(state) {
-  let modified = false;
-  const jobs = Array.isArray(state?.jobs) ? state.jobs : [];
-  for (const j of jobs) {
-    const isUnfinished = j.status === 'running' || j.status === 'interrupted' || j.status === 'queued' || j.status === 'failed';
-    const isStaleCompleted =
-      j.status === 'completed' &&
-      !j.fixes_applied &&
-      (!j.fixes_committed && (j.verdict === 'FIXED_ON_BRANCH' || (j.summary && j.summary.includes('in progress'))));
-    if (isUnfinished || isStaleCompleted) {
-      const repoPath = j.repo_path;
-      const shortSha = j.short_sha || (j.sha ? j.sha.slice(0, 7) : '');
-      if (!repoPath || !shortSha) continue;
-
-      const auditsDir = join(repoPath, '.antigravity', 'audits');
-      const jsonReport = join(auditsDir, `review-${shortSha}.json`);
-      const mdReport = join(auditsDir, `review-${shortSha}.md`);
-
-      const wtPath = j.worktree_path;
-      if (wtPath && existsSync(wtPath)) {
-        if (!existsSync(jsonReport)) {
-          for (const cand of [join(wtPath, '.antigravity', 'audits', `review-${shortSha}.json`), join(wtPath, `review-${shortSha}.json`)]) {
-            if (existsSync(cand)) {
-              try {
-                mkdirSync(auditsDir, { recursive: true });
-                copyFileSync(cand, jsonReport);
-                break;
-              } catch {}
-            }
-          }
-        }
-        if (!existsSync(mdReport)) {
-          for (const cand of [join(wtPath, '.antigravity', 'audits', `review-${shortSha}.md`), join(wtPath, `review-${shortSha}.md`)]) {
-            if (existsSync(cand)) {
-              try {
-                mkdirSync(auditsDir, { recursive: true });
-                copyFileSync(cand, mdReport);
-                break;
-              } catch {}
-            }
-          }
-        }
-      }
-
-      // 1. JSON report exists -> mark completed
-      if (existsSync(jsonReport)) {
-        try {
-          const rData = JSON.parse(readFileSync(jsonReport, 'utf8'));
-          j.status = 'completed';
-          j.verdict = rData.verdict || 'PASS';
-          j.summary = rData.summary || j.summary || 'Audit completed.';
-          j.bugs_count = typeof rData.bugs_count === 'number' ? rData.bugs_count : (j.bugs_count || 0);
-          const isApplied = Boolean(j.fixes_applied || rData.fixes_applied);
-          const hasFixes = !isApplied && Boolean(rData.fixes_committed || j.verdict === 'FIXED_ON_BRANCH');
-          j.fixes_applied = isApplied;
-          j.fixes_committed = hasFixes;
-          j.fix_branch = hasFixes ? (rData.fix_branch || `fix/watchdog-${shortSha}`) : null;
-          j.completed_at = rData.completed_at || j.completed_at || new Date().toISOString();
-          j.report_path = existsSync(mdReport) ? mdReport : jsonReport;
-          modified = true;
-          continue;
-        } catch {}
-      }
-
-      // 2. Markdown report exists -> mark completed
-      if (existsSync(mdReport)) {
-        try {
-          const content = readFileSync(mdReport, 'utf8');
-          if (content.length > 80) {
-            let verdict = 'PASS';
-            const vMatch = content.match(/\*\*Verdict\*\*:\s*`?([A-Za-z0-9_]+)`?/i);
-            if (vMatch && vMatch[1]) {
-              verdict = vMatch[1].toUpperCase();
-            }
-            let summary = j.summary;
-            if (!summary || summary.includes('in progress')) {
-              const sMatch = content.match(/##\s*1\.\s*Executive Summary\s*\n+([^\n#]+)/i);
-              if (sMatch && sMatch[1]) {
-                summary = sMatch[1].trim();
-              } else {
-                summary = 'Audit completed.';
-              }
-            }
-            const fixBranch = `fix/watchdog-${shortSha}`;
-            const isApplied = Boolean(j.fixes_applied);
-            const hasFixes = !isApplied && verdict === 'FIXED_ON_BRANCH';
-
-            j.status = 'completed';
-            j.verdict = verdict;
-            j.summary = summary;
-            j.fixes_applied = isApplied;
-            j.fixes_committed = Boolean(hasFixes);
-            j.fix_branch = hasFixes ? fixBranch : null;
-            j.completed_at = j.completed_at || new Date().toISOString();
-            j.report_path = mdReport;
-            modified = true;
-            continue;
-          }
-        } catch {}
-      }
-
-      // 3. Link active Antigravity session if missing before checking interruption
-      if (!j.conversation_id) {
-        const found = findWatchdogConversationForJob(j);
-        if (found) {
-          j.conversation_id = found;
-          if (j.status === 'queued') {
-            j.status = 'running';
-            j.summary = 'Autonomous Watchdog review in progress…';
-          }
-          if (!j.started_at) {
-            j.started_at = new Date().toISOString();
-          }
-          modified = true;
-        }
-      }
-
-      // 4. Check for interruption if no report exists and status is 'running'
-      if (j.status === 'running') {
-        const convId = j.conversation_id;
-        if (convId) {
-          const tFile = join(homedir(), '.gemini', 'antigravity', 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
-          if (existsSync(tFile)) {
-            try {
-              const stat = statSync(tFile);
-              const age = (Date.now() - stat.mtimeMs) / 1000;
-              if (age > 180) {
-                let chunkText = '';
-                if (stat.size > 65536) {
-                  const fd = openSync(tFile, 'r');
-                  try {
-                    const buffer = Buffer.alloc(65536);
-                    readSync(fd, buffer, 0, 65536, stat.size - 65536);
-                    chunkText = buffer.toString('utf8');
-                  } finally {
-                    closeSync(fd);
-                  }
-                } else {
-                  chunkText = readFileSync(tFile, 'utf8');
-                }
-                const chunk = chunkText.trim().split('\n');
-                for (let i = chunk.length - 1; i >= 0; i--) {
-                  const line = chunk[i].trim();
-                  if (!line.startsWith('{')) continue;
-                  let parsed;
-                  try {
-                    parsed = JSON.parse(line);
-                  } catch {
-                    continue;
-                  }
-                  if (parsed.status === 'CANCELLED' || parsed.status === 'CANCELED') {
-                    j.status = 'interrupted';
-                    j.summary = 'Audit subagent was cancelled.';
-                    modified = true;
-                    break;
-                  }
-                  if (parsed.status === 'ERROR' && parsed.type !== 'GENERIC') {
-                    j.status = 'interrupted';
-                    j.summary = 'Audit subagent was interrupted or encountered an error.';
-                    modified = true;
-                    break;
-                  }
-                  if (parsed.type === 'PLANNER_RESPONSE' && (!parsed.tool_calls || parsed.tool_calls.length === 0) && age > 600) {
-                    j.status = 'interrupted';
-                    j.summary = 'Audit subagent stopped before generating report.';
-                    modified = true;
-                    break;
-                  }
-                  if (age > 900) {
-                    j.status = 'interrupted';
-                    j.summary = 'Audit conversation timed out with no recent activity.';
-                    modified = true;
-                    break;
-                  }
-                  break;
-                }
-              }
-            } catch {}
-          }
-        } else {
-          const since = j.started_at || j.queued_at;
-          if (since) {
-            const elapsed = (Date.now() - new Date(since).getTime()) / 1000;
-            if (elapsed > 1800) {
-              j.status = 'interrupted';
-              j.summary = 'Audit process stopped with no report produced.';
-              modified = true;
-            }
-          }
-        }
-      }
-    }
-  }
-
-  if (modified) {
+// All job / execution / synthesis state transitions live in watchdog_ctl.py. The panel only
+// asks it to reconcile (throttled, one run at a time) and then reads the files it wrote.
+const RECONCILE_MIN_INTERVAL_MS = 4000;
+let reconcileInFlight = null;
+let lastReconcileAt = 0;
+async function reconcileViaPython(repoPaths = [], { force = false } = {}) {
+  if (reconcileInFlight) return reconcileInFlight;
+  if (!force && Date.now() - lastReconcileAt < RECONCILE_MIN_INTERVAL_MS) return null;
+  reconcileInFlight = (async () => {
     try {
-      const reconciledById = new Map(
-        (state.jobs || []).filter((j) => j && j.id).map((j) => [j.id, j])
-      );
-      saveStatePatch((curr) => {
-        const currJobs = Array.isArray(curr.jobs) ? curr.jobs : (state.jobs || []);
-        const merged = currJobs.map((cj) => {
-          const rec = cj?.id ? reconciledById.get(cj.id) : null;
-          if (!rec) return cj;
-          if (cj.fixes_applied && !rec.fixes_applied) return cj;
-          return { ...cj, ...rec };
-        });
-        return { ...curr, jobs: merged };
-      });
-    } catch (err) {
-      console.warn('reconcileJobs failed to persist state patch:', err.message);
+      const jobs = [runPythonCtl(['reconcile-jobs'])];
+      for (const repo of repoPaths) {
+        jobs.push(runPythonCtl(['reconcile-executions', '--repo', repo]));
+        jobs.push(runPythonCtl(['check-synthesis', '--repo', repo]));
+      }
+      await Promise.allSettled(jobs);
+    } finally {
+      lastReconcileAt = Date.now();
+      reconcileInFlight = null;
     }
-  }
-  return state;
+  })();
+  return reconcileInFlight;
 }
 
 function atomicWriteJson(filePath, data) {
@@ -731,7 +496,7 @@ function saveStatePatch(patchOrUpdater) {
     let current = {};
     for (let r = 0; r < 5; r++) {
       try {
-        current = loadState(true);
+        current = loadState();
         if (current && typeof current === 'object' && Object.keys(current).length > 0) break;
       } catch {}
       syncSleep(20);
@@ -1000,114 +765,12 @@ async function inspectSingleRepo(topLevel) {
       }
     }
 
-    // Reconcile executions: check running items against git commits or transcript
-    let execsModified = false;
-    const brainDir = join(homedir(), '.gemini', 'antigravity', 'brain');
-    const latestSha = recentCommits.length > 0 ? recentCommits[0].sha : '';
-
-    for (const [id, item] of Object.entries(executions)) {
-      if (!item || typeof item !== 'object') continue;
-      if (item.status === 'running') {
-        const initSha = item.initialHeadSha;
-        if (latestSha && initSha && latestSha !== initSha) {
-          let isAncestor = false;
-          try {
-            const gitBin = getGitBin();
-            await execFileAsync(gitBin, ['-C', topLevel, 'merge-base', '--is-ancestor', initSha, latestSha], {
-              timeout: 5000,
-              env: {
-                ...process.env,
-                PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ''}`,
-              },
-            });
-            isAncestor = true;
-          } catch {
-            isAncestor = false;
-          }
-
-          if (isAncestor) {
-            item.status = 'completed';
-            item.completedAt = new Date().toISOString();
-            item.summary = 'Plan execution completed (changes committed to repository).';
-            item.completedSha = latestSha.slice(0, 7);
-            execsModified = true;
-            continue;
-          }
-        }
-
-        const convId = item.conversationId;
-        if (convId && convId !== 'foreground-agent') {
-          const transcriptPath = join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
-          if (existsSync(transcriptPath)) {
-            try {
-              const stat = statSync(transcriptPath);
-              const ageSec = (Date.now() - stat.mtimeMs) / 1000;
-              if (ageSec > 120) {
-                let chunkText = '';
-                if (stat.size > 65536) {
-                  const fd = openSync(transcriptPath, 'r');
-                  try {
-                    const buffer = Buffer.alloc(65536);
-                    readSync(fd, buffer, 0, 65536, stat.size - 65536);
-                    chunkText = buffer.toString('utf8');
-                  } finally {
-                    closeSync(fd);
-                  }
-                } else {
-                  chunkText = readFileSync(transcriptPath, 'utf8');
-                }
-                const lines = chunkText.trim().split('\n');
-                for (let i = lines.length - 1; i >= 0; i--) {
-                  const candidate = lines[i].trim();
-                  if (!candidate.startsWith('{')) continue;
-                  let parsed;
-                  try {
-                    parsed = JSON.parse(candidate);
-                  } catch {
-                    continue;
-                  }
-                  if (
-                    parsed.status === 'CANCELLED' ||
-                    parsed.status === 'CANCELED' ||
-                    (parsed.status === 'ERROR' && parsed.type !== 'GENERIC')
-                  ) {
-                    item.status = 'interrupted';
-                    item.completedAt = new Date().toISOString();
-                    item.summary = 'Agent execution was interrupted or cancelled. Click Continue Execution to resume.';
-                    execsModified = true;
-                  } else if (
-                    parsed.type === 'PLANNER_RESPONSE' &&
-                    (!parsed.tool_calls || parsed.tool_calls.length === 0) &&
-                    ageSec > 600
-                  ) {
-                    item.status = 'completed';
-                    item.completedAt = new Date().toISOString();
-                    item.summary = 'Plan execution completed by agent.';
-                    execsModified = true;
-                  }
-                  break;
-                }
-              }
-            } catch {
-              // ignore
-            }
-          }
-        }
-      }
-    }
-    if (execsModified) {
-      try {
-        atomicWriteJson(execFile, { executions });
-      } catch {
-        // ignore
-      }
-    }
-
     for (const p of proposals) {
       if (p.id && executions[p.id]) {
         p.execution = executions[p.id];
       }
     }
+    // State transitions (timeouts, completion) are owned by watchdog_ctl.py; read the result only.
     let synthesizing = false;
     let synthesisError = null;
     const synthStateFile = join(nextStepsDir, 'synthesis_state.json');
@@ -1115,33 +778,8 @@ async function inspectSingleRepo(topLevel) {
       try {
         const sData = JSON.parse(readFileSync(synthStateFile, 'utf8'));
         if (sData.error) synthesisError = sData.error;
-        if (sData.status === 'synthesizing') {
-          const startedTs = sData.startedAt ? new Date(sData.startedAt).getTime() : 0;
-          const elapsed = startedTs ? Date.now() - startedTs : 0;
-          const propFile = join(nextStepsDir, 'proposals.json');
-          let proposalsFresh = false;
-          if (existsSync(propFile) && startedTs) {
-            const mtime = statSync(propFile).mtimeMs;
-            if (mtime >= startedTs - 2000) {
-              proposalsFresh = true;
-            }
-          }
-          if (proposalsFresh) {
-            synthesizing = false;
-            sData.status = 'ready';
-            try { atomicWriteJson(synthStateFile, sData); } catch {}
-          } else if (elapsed > 15 * 60 * 1000) {
-            synthesizing = false;
-            sData.status = 'idle';
-            sData.error = 'Synthesis timed out after 15 minutes.';
-            synthesisError = sData.error;
-            try { atomicWriteJson(synthStateFile, sData); } catch {}
-          } else {
-            synthesizing = true;
-          }
-        }
+        synthesizing = sData.status === 'synthesizing';
       } catch (err) {
-        synthesizing = false;
         synthesisError = err.message || 'Synthesis state read error';
       }
     }
@@ -1367,7 +1005,6 @@ async function collectActiveRepos(uris, state, targetRepo = '') {
 // POST /api/dashboard { workspaceUris?, repoPath?, repo? }
 const handleDashboard = async (data) => {
   try {
-    const state = loadState();
     const uris = [];
     const targetRepo = data?.repoPath || data?.repo;
     if (targetRepo) {
@@ -1388,6 +1025,8 @@ const handleDashboard = async (data) => {
         if (norm && !uris.includes(norm)) uris.push(norm);
       }
     }
+    await reconcileViaPython([...new Set([...knownDiscoveredRepos, ...uris])]);
+    const state = loadState();
     const activeRepos = await collectActiveRepos(uris, state, targetRepo);
 
     return {
@@ -1447,7 +1086,7 @@ const handleGitState = async (data) => {
     } catch (pythonErr) {
       console.warn('Python ctl sync warning:', pythonErr.message);
     }
-    const state = loadState(true);
+    const state = loadState();
     const activeRepos = await collectActiveRepos(uris, state, targetRepo);
 
     return {
@@ -1464,7 +1103,7 @@ const handleGitState = async (data) => {
     console.error('Error in /api/sync or /api/git-state:', err);
     let state = { auto_dispatch: true, skip_docs_only: true, jobs: [] };
     try {
-      state = loadState(true);
+      state = loadState();
     } catch {}
     return {
       ok: false,
@@ -1510,6 +1149,7 @@ app.api('/api/trigger', async (data) => {
   }
 
   // Prevent double auditing if an audit is already running for this repo
+  await reconcileViaPython([], { force: true });
   const samePath = (a, b) => Boolean(a && b && (a === b || resolve(String(a)) === resolve(String(b))));
   const state = loadState();
   const running = (state.jobs || []).find(

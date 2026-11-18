@@ -1068,10 +1068,233 @@ with tempfile.TemporaryDirectory() as tmp_appdata_str:
     assert f"Target Audit Report Path**: \`{expected_report}\`" in q_prompt, f"Prompt missing concrete report path: {q_prompt}"
     assert "Target Audit Report Path**: \`None\`" not in q_prompt, "Prompt must never instruct writing report to None"
 
+    # 13. Job lifecycle: complete_job, pending chain, sync_git_history, continue_job
+    life = tmp_appdata / "life_repo"
+    life.mkdir()
+    _git(life, "init")
+    _git(life, "checkout", "-B", "main")
+    _git(life, "config", "user.email", "test@example.com")
+    _git(life, "config", "user.name", "Test User")
+    (life / "a.py").write_text("x = 1\\n", encoding="utf-8")
+    _git(life, "add", ".")
+    _git(life, "commit", "-m", "life one")
+    life_sha1 = _git(life, "rev-parse", "HEAD").stdout.strip()
+    (life / "a.py").write_text("x = 2\\n", encoding="utf-8")
+    _git(life, "add", ".")
+    _git(life, "commit", "-m", "life two")
+    life_sha2 = _git(life, "rev-parse", "HEAD").stdout.strip()
+
+    def _job(short):
+        return next(j for j in ctl.load_state()["jobs"] if j["short_sha"] == short)
+
+    # 13a. complete_job PASS with no fix commits: report written, worktree and fix branch cleaned up
+    q1 = ctl.queue_commit(life, life_sha1, dispatch_now=False, force=True)
+    assert q1 and q1["status"] == "queued"
+    wt1 = Path(q1["worktree_path"])
+    assert wt1.exists(), "queue_commit must prepare the isolated worktree"
+    res1 = ctl.complete_job(life, life_sha1, "PASS", "all good")
+    assert res1["verdict"] == "PASS" and res1["fixes_committed"] is False
+    j1 = _job(life_sha1[:7])
+    assert j1["status"] == "completed" and j1["verdict"] == "PASS" and j1["fix_branch"] is None
+    assert (life / ".antigravity" / "audits" / f"review-{life_sha1[:7]}.md").exists()
+    assert (life / ".antigravity" / "audits" / f"review-{life_sha1[:7]}.json").exists()
+    assert not wt1.exists(), "worktree must be removed when no fixes were committed"
+    assert _git(life, "branch", "--list", f"fix/watchdog-{life_sha1[:7]}").stdout.strip() == ""
+
+    # 13b. complete_job reporting PASS while the worktree has commits upgrades to FIXED_ON_BRANCH
+    q2 = ctl.queue_commit(life, life_sha2, dispatch_now=False, force=True)
+    wt2 = Path(q2["worktree_path"])
+    _git(wt2, "config", "user.email", "test@example.com")
+    _git(wt2, "config", "user.name", "Test User")
+    (wt2 / "a.py").write_text("x = 3\\n", encoding="utf-8")
+    _git(wt2, "add", ".")
+    _git(wt2, "commit", "-m", "fix: audit fix [auto-review]")
+
+    # a commit arriving mid-audit is remembered as pending
+    with ctl.StateLock():
+        st_p = ctl.load_state()
+        st_p["repos"].setdefault(str(life), {})["pending_sha"] = life_sha1
+        st_p["repos"][str(life)]["pending_base_sha"] = life_sha2
+        ctl.save_state(st_p)
+
+    # sync_git_history must not erase the pending marker (even across /var vs /private/var symlink paths)
+    ctl.sync_git_history([str(life)])
+    synced_life_meta = next(v for k, v in ctl.load_state()["repos"].items() if ctl.is_same_repo_path(k, life))
+    assert synced_life_meta.get("pending_sha") == life_sha1, "sync_git_history dropped pending_sha"
+
+    with patch.object(ctl, "spawn_detached_agent", return_value=False):
+        res2 = ctl.complete_job(life, life_sha2, "PASS", "fixed something")
+    assert res2["verdict"] == "FIXED_ON_BRANCH" and res2["fixes_committed"] is True, res2
+    j2 = _job(life_sha2[:7])
+    assert j2["fix_branch"] == f"fix/watchdog-{life_sha2[:7]}"
+    assert _git(life, "branch", "--list", j2["fix_branch"]).stdout.strip() != ""
+    after_life_meta = next(v for k, v in ctl.load_state()["repos"].items() if ctl.is_same_repo_path(k, life))
+    assert "pending_sha" not in after_life_meta, "complete_job must consume pending_sha"
+
+    # 13c. continue_job: failed spawn stays retryable (interrupted), successful spawn runs
+    with ctl.StateLock():
+        st_c = ctl.load_state()
+        st_c["jobs"].insert(0, {
+            "id": "continue-me",
+            "repo_path": str(life),
+            "repo_name": "life_repo",
+            "sha": "c" * 40,
+            "short_sha": "ccccccc",
+            "status": "interrupted",
+            "verdict": "PENDING",
+            "worktree_path": str(tmp_appdata / "nowhere"),
+            "fix_branch": "fix/watchdog-ccccccc",
+            "report_path": None,
+        })
+        ctl.save_state(st_c)
+    with patch.object(ctl, "spawn_detached_agent", return_value=False):
+        cont_fail = ctl.continue_job(life, job_id="continue-me")
+    assert cont_fail.get("ok") is False, cont_fail
+    assert next(j for j in ctl.load_state()["jobs"] if j["id"] == "continue-me")["status"] == "interrupted"
+    with patch.object(ctl, "spawn_detached_agent", return_value=True):
+        cont_ok = ctl.continue_job(life, job_id="continue-me")
+    assert cont_ok.get("ok") is True, cont_ok
+    assert next(j for j in ctl.load_state()["jobs"] if j["id"] == "continue-me")["status"] == "running"
+
     print("PYTHON_TESTS_OK")
       `,
     ], { encoding: 'utf8' });
     assert.ok(pyOutput.includes('PYTHON_TESTS_OK'));
+  });
+
+  // =========================================================================
+  // 7. Real server integration: spawn main.mjs and hit its HTTP routes
+  // =========================================================================
+  await runTest('sidecars/panel/main.mjs: live HTTP routes (auth, confinement, trigger mutex, reconcile ownership)', async () => {
+    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wd-int-'));
+    const appData = path.join(tmpRoot, 'appdata');
+    const fakeHome = path.join(tmpRoot, 'home');
+    const repo = path.join(tmpRoot, 'repo');
+    const wdDir = path.join(appData, 'watchdog');
+    for (const d of [appData, fakeHome, repo, wdDir]) fs.mkdirSync(d, { recursive: true });
+    const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
+    git('init');
+    git('checkout', '-B', 'main');
+    git('config', 'user.email', 't@example.com');
+    git('config', 'user.name', 'T');
+    fs.writeFileSync(path.join(repo, 'app.js'), 'console.log(1)\n');
+    git('add', '.');
+    git('commit', '-m', 'init');
+    const realRepo = fs.realpathSync(repo);
+    const headSha = git('rev-parse', 'HEAD').trim();
+
+    // Seed a queued job that never started (must be interrupted by the Python reconciler)
+    // and a completed, already-applied fix (must NOT be reverted by any reconciler).
+    fs.mkdirSync(path.join(realRepo, '.antigravity', 'audits'), { recursive: true });
+    fs.writeFileSync(
+      path.join(realRepo, '.antigravity', 'audits', 'review-aaaaaaa.json'),
+      JSON.stringify({ verdict: 'FIXED_ON_BRANCH', fixes_committed: true, fix_branch: 'fix/watchdog-aaaaaaa' })
+    );
+    const oldIso = new Date(Date.now() - 3600_000).toISOString();
+    fs.writeFileSync(path.join(wdDir, 'state.json'), JSON.stringify({
+      auto_dispatch: true,
+      skip_docs_only: true,
+      repos: {},
+      jobs: [
+        { id: 'stale-queued', repo_path: realRepo, short_sha: 'bbbbbbb', sha: 'b'.repeat(40), status: 'queued', queued_at: oldIso, verdict: 'PENDING' },
+        { id: 'applied', repo_path: realRepo, short_sha: 'aaaaaaa', sha: 'a'.repeat(40), status: 'completed', verdict: 'FIXED_ON_BRANCH', fixes_applied: true, fixes_committed: false, fix_branch: null },
+      ],
+    }));
+    fs.writeFileSync(path.join(wdDir, 'ls_env.json'), '{"ANTIGRAVITY_CSRF_TOKEN":"secret"}');
+    fs.writeFileSync(path.join(wdDir, 'public-note.md'), '# note');
+
+    const token = 'int-test-token';
+    const child = spawn(process.execPath, [path.join(rootDir, 'sidecars/panel/main.mjs')], {
+      env: {
+        ...process.env,
+        HOME: fakeHome,
+        ANTIGRAVITY_APP_DATA_DIR: appData,
+        WATCHDOG_PANEL_TOKEN: token,
+        WATCHDOG_PANEL_PORT: '0',
+        WATCHDOG_REPO: realRepo,
+        ANTIGRAVITY_SIDECAR_WEB_PORT: '',
+        PYTHONDONTWRITEBYTECODE: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      const baseUrl = await new Promise((resolve, reject) => {
+        let buf = '';
+        const timer = setTimeout(() => reject(new Error(`server did not start: ${buf}`)), 15000);
+        child.stdout.on('data', (d) => {
+          buf += d;
+          const m = buf.match(/WATCHDOG_PANEL_URL=(http:\/\/127\.0\.0\.1:\d+)\//);
+          if (m) { clearTimeout(timer); resolve(m[1]); }
+        });
+        child.on('exit', (code) => reject(new Error(`server exited early (${code}): ${buf}`)));
+      });
+      const call = async (route, body = {}, { auth = true, method = 'POST' } = {}) => {
+        const res = await fetch(`${baseUrl}${route}`, {
+          method,
+          headers: { 'Content-Type': 'application/json', ...(auth ? { 'x-sidecar-token': token } : {}) },
+          body: method === 'GET' ? undefined : JSON.stringify(body),
+        });
+        let json = {};
+        try { json = await res.json(); } catch {}
+        return { status: res.status, json };
+      };
+      const readState = () => JSON.parse(fs.readFileSync(path.join(wdDir, 'state.json'), 'utf8'));
+
+      // health
+      const health = await call('/api/health', {}, { auth: false, method: 'GET' });
+      assert.equal(health.status, 200);
+      assert.equal(health.json.host, 'antigravity');
+
+      // dashboard: discovers the repo and the Python reconciler owns job transitions
+      const dash = await call('/api/dashboard', { repoPath: realRepo }, { auth: false });
+      assert.equal(dash.status, 200);
+      assert.equal(dash.json.ok, true);
+      assert.equal(dash.json.activeRepos[0].repoPath, realRepo);
+      assert.equal(dash.json.activeRepos[0].head.sha, headSha);
+      const jobsAfter = readState().jobs;
+      assert.equal(jobsAfter.find((j) => j.id === 'stale-queued').status, 'interrupted', 'stale queued job must be interrupted by the Python reconciler');
+      const applied = jobsAfter.find((j) => j.id === 'applied');
+      assert.equal(applied.fixes_applied, true, 'applied fix must stay applied after reconcile');
+      assert.equal(applied.fixes_committed, false, 'applied fix must not regain fixes_committed');
+      assert.equal(applied.fix_branch, null, 'applied fix must not regain a deleted fix branch');
+
+      // auth: mutating routes need a token
+      assert.equal((await call('/api/archive-job', { jobId: 'applied' }, { auth: false })).status, 401);
+      const arch = await call('/api/archive-job', { jobId: 'applied', archived: true });
+      assert.equal(arch.status, 200);
+      assert.equal(readState().jobs.find((j) => j.id === 'applied').archived, true);
+
+      // confinement: credentials cache and state are never served; watchdog artifacts are
+      const env = await call('/api/report', { reportPath: path.join(wdDir, 'ls_env.json') });
+      assert.equal(env.json.exists, false, 'ls_env.json must not be readable');
+      const st = await call('/api/report', { reportPath: path.join(wdDir, 'state.json') });
+      assert.equal(st.json.exists, false, 'state.json must not be readable');
+      const note = await call('/api/report', { reportPath: path.join(wdDir, 'public-note.md') });
+      assert.equal(note.json.exists, true);
+
+      // workspace poisoning: root is rejected even with a valid token
+      await call('/api/active-workspace', { repoPath: '/' });
+      const ws = await call('/api/active-workspace', {}, { method: 'GET', auth: false });
+      assert.ok(!ws.json.workspaceUris.includes('/'), 'root must never become an active workspace');
+
+      // trigger -> queued job, second trigger must not double-audit
+      const trig = await call('/api/trigger', { repoPath: realRepo, sha: 'HEAD' });
+      assert.equal(trig.status, 200);
+      assert.equal(trig.json.ok, true, JSON.stringify(trig.json));
+      assert.equal(trig.json.job.status, 'queued');
+      assert.equal(trig.json.job.report_path ?? null, null, 'queued job has no report yet');
+      const trig2 = await call('/api/trigger', { repoPath: realRepo, sha: 'HEAD' });
+      assert.equal(trig2.json.alreadyRunning, true, 'second trigger must hit the running mutex');
+
+      // mark-running persists status and conversation id
+      await call('/api/mark-running', { jobId: trig.json.job.id, conversationId: 'conv-int-1' });
+      const marked = readState().jobs.find((j) => j.id === trig.json.job.id);
+      assert.equal(marked.status, 'running');
+      assert.equal(marked.conversation_id, 'conv-int-1');
+    } finally {
+      child.kill();
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
   });
 
   // =========================================================================

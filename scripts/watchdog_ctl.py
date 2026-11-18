@@ -3227,7 +3227,10 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
         prev_repos = state.get("repos", {})
         if isinstance(prev_repos, dict):
             for rpath, entry in new_repos_state.items():
-                prev_entry = prev_repos.get(rpath)
+                prev_entry = prev_repos.get(rpath) or next(
+                    (v for k, v in prev_repos.items() if is_same_repo_path(k, rpath)),
+                    None,
+                )
                 if isinstance(prev_entry, dict):
                     if prev_entry.get("pending_sha"):
                         entry["pending_sha"] = prev_entry["pending_sha"]
