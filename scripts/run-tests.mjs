@@ -1059,6 +1059,15 @@ with tempfile.TemporaryDirectory() as tmp_appdata_str:
     assert _git(fix_repo, "status", "--porcelain").stdout.strip() == "", "Working tree must be clean after conflict abort"
     assert not (fix_repo / ".git" / "CHERRY_PICK_HEAD").exists(), "CHERRY_PICK_HEAD must be cleared"
 
+    # Regression test: build_watchdog_prompt must resolve a concrete audit report path even when report_path is None
+    q_job = ctl.queue_commit(fix_repo, sha="HEAD", dispatch_now=False, force=True)
+    assert q_job is not None, "Expected queue_commit to return job"
+    assert q_job.get("report_path") is None, "New queued job should have report_path=None until report exists"
+    q_prompt = ctl.build_watchdog_prompt(q_job)
+    expected_report = str(fix_repo / ".antigravity" / "audits" / f"review-{q_job['short_sha']}.md")
+    assert f"Target Audit Report Path**: \`{expected_report}\`" in q_prompt, f"Prompt missing concrete report path: {q_prompt}"
+    assert "Target Audit Report Path**: \`None\`" not in q_prompt, "Prompt must never instruct writing report to None"
+
     print("PYTHON_TESTS_OK")
       `,
     ], { encoding: 'utf8' });

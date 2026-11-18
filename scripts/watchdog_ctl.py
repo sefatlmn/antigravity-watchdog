@@ -3484,7 +3484,9 @@ def build_watchdog_prompt(job: Dict[str, Any]) -> str:
     commit_msg = job.get("commit_msg", "")
     worktree_path = job["worktree_path"]
     fix_branch = job["fix_branch"]
-    report_path = job["report_path"]
+    report_path = job.get("report_path") or str(
+        Path(repo_path) / ".antigravity" / "audits" / f"review-{short_sha}.md"
+    )
     user_comment = (job.get("user_comment") or "").strip()
     comment_block = ""
     if user_comment:
