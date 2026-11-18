@@ -463,8 +463,6 @@ body {
 .tag.running .dot,
 .pill.running .dot {
   background: var(--accent, #38bdf8);
-  box-shadow: 0 0 6px var(--accent);
-  animation: pulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
 .loading-dots {
@@ -472,17 +470,6 @@ body {
   letter-spacing: 0.15em;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  animation: dots-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes dots-pulse {
-  0%, 100% { opacity: 0.35; transform: scale(0.95); }
-  50% { opacity: 1; transform: scale(1.05); }
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.85); }
 }
 
 .btn.loading {
@@ -1119,8 +1106,6 @@ body {
   height: 6px;
   border-radius: 50%;
   background: var(--accent, #38bdf8);
-  box-shadow: 0 0 6px var(--accent);
-  animation: pulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   flex-shrink: 0;
 }
 
@@ -1136,8 +1121,6 @@ body {
   height: 6px;
   border-radius: 50%;
   background: var(--warning, #f59e0b);
-  box-shadow: 0 0 6px var(--warning);
-  animation: pulse 1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   flex-shrink: 0;
 }
 

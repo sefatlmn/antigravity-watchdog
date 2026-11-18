@@ -92,6 +92,9 @@ async function main() {
     const jvNeeds = vmodel.jobView({ id: '3', short_sha: 'ghi9012', status: 'completed', verdict: 'NEEDS_ATTENTION' });
     assert.deepEqual(jvNeeds.badge, { kind: 'warn', label: 'Issues' });
 
+    const jvQueuedWithReport = vmodel.jobView({ id: '4', short_sha: 'jkl3456', status: 'queued', verdict: 'PENDING', report_path: '/tmp/future-report.md' });
+    assert.equal(jvQueuedWithReport.hasReport, false, 'jobView must not expose report button before completion');
+
     // stripEmojis & timeAgo
     assert.equal(vmodel.stripEmojis('🚀 Ship it! ✨'), 'Ship it!');
     assert.equal(vmodel.timeAgo('invalid-date'), '');
@@ -154,7 +157,7 @@ async function main() {
         .replace(/\s+/g, ' ')
         .trim();
     };
-    for (const fnName of ['pathsOverlap', 'selectActiveRepo', 'goalText', 'sameRepo', 'jobView', 'auditAction', 'partitionJobs', 'proposalView']) {
+    for (const fnName of ['stripEmojis', 'stripEmojiChars', 'timeAgo', 'normalizeWsUri', 'pathsOverlap', 'selectActiveRepo', 'goalText', 'sameRepo', 'jobView', 'auditAction', 'partitionJobs', 'proposalView']) {
       assert.equal(
         extractNormalizedDecl(appSrc, fnName),
         extractNormalizedDecl(vmSrc, fnName),
@@ -297,6 +300,24 @@ async function main() {
         body: '{bad json',
       });
       assert.equal(badJsonRes.status, 400, 'Malformed JSON body must return 400');
+
+      // 10. Cross-origin Origin header rejected with 403
+      const corsEvilRes = await fetch(`http://127.0.0.1:${testPort}/api/dashboard`, {
+        method: 'GET',
+        headers: { 'Origin': 'http://evil.example' },
+      });
+      assert.equal(corsEvilRes.status, 403, 'Cross-origin Origin header must be rejected with 403');
+
+      // 11. Non-application/json POST with body rejected with 415
+      const textPostRes = await fetch(`http://127.0.0.1:${testPort}/api/test-secure`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+          'x-sidecar-token': cookieToken,
+        },
+        body: JSON.stringify({}),
+      });
+      assert.equal(textPostRes.status, 415, 'Non-application/json POST body must return 415');
     } finally {
       testServer.close();
     }
@@ -394,6 +415,8 @@ async function main() {
     assert.equal(testIsAllowedArtifactPath(path.join(mockWorkspace, 'src', 'fake.md')), false, 'Workspace outside .antigravity must be disallowed');
     assert.equal(testIsAllowedArtifactPath('/arbitrary/path/with/.antigravity/fake.md'), false, 'Arbitrary path with .antigravity substring must be disallowed');
     assert.equal(testIsAllowedArtifactPath(path.join(mockWorkspace, '.antigravity', 'evil.sh')), false, 'Non-md/json must be disallowed');
+    assert.equal(testIsAllowedArtifactPath(path.join(mockWatchdogDir, 'ls_env.json')), false, 'ls_env.json must be disallowed');
+    assert.equal(testIsAllowedArtifactPath(path.join(mockWatchdogDir, 'state.json')), false, 'state.json must be disallowed');
   });
 
   // =========================================================================
@@ -901,6 +924,15 @@ with tempfile.TemporaryDirectory() as tmp_appdata_str:
     assert get_g_json.get("ok") is True
     assert get_g_json.get("goal", {}).get("goal") == "Test CLI Goal"
 
+    proc_pre_json = subprocess.run(
+        [py_bin, ctl_script, "--json", "get-goal", "--repo", str(cli_goal_repo)],
+        capture_output=True,
+        text=True,
+        env=cli_env,
+    )
+    assert proc_pre_json.returncode == 0, f"pre-subcommand --json get-goal failed: {proc_pre_json.stderr}"
+    assert json.loads(proc_pre_json.stdout).get("ok") is True
+
     # 12. queue_commit [skip-watchdog] force vs non-force, conversation URI boundary & PLANNER_RESPONSE filtering, apply_fix_branch
     import sqlite3
 
@@ -976,9 +1008,38 @@ with tempfile.TemporaryDirectory() as tmp_appdata_str:
     _git(fix_repo, "commit", "-m", "fix: clean patch")
     _git(fix_repo, "checkout", "main")
 
+    base_short = base_sha[:7]
+    fix_audits_dir = fix_repo / ".antigravity" / "audits"
+    fix_audits_dir.mkdir(parents=True, exist_ok=True)
+    (fix_audits_dir / f"review-{base_short}.json").write_text(
+        json.dumps({"verdict": "FIXED_ON_BRANCH", "fixes_committed": True, "fix_branch": f"fix/watchdog-{base_short}"}),
+        encoding="utf-8",
+    )
+    with ctl.StateLock():
+        st_fix = ctl.load_state()
+        st_fix.setdefault("jobs", []).insert(0, {
+            "id": f"{ctl.repo_slug(fix_repo)}-{base_short}",
+            "repo_path": str(fix_repo),
+            "sha": base_sha,
+            "short_sha": base_short,
+            "status": "completed",
+            "verdict": "FIXED_ON_BRANCH",
+            "fixes_committed": True,
+            "fixes_applied": False,
+            "fix_branch": f"fix/watchdog-{base_short}",
+        })
+        ctl.save_state(st_fix)
+
     apply_ok = ctl.apply_fix_branch(fix_repo, base_sha, mode="cherry-pick")
     assert apply_ok.get("ok") is True, f"Expected apply_fix_branch success, got {apply_ok}"
     assert (fix_repo / "fix.txt").exists(), "Expected fix.txt to be cherry-picked onto main"
+
+    st_after_fix = ctl.load_state()
+    applied_job = next(j for j in st_after_fix["jobs"] if j["short_sha"] == base_short)
+    ctl.reconcile_job(applied_job, st_after_fix)
+    assert applied_job.get("fixes_applied") is True, f"reconcile_job must preserve fixes_applied=True: {applied_job}"
+    assert applied_job.get("fixes_committed") is False, f"reconcile_job must keep fixes_committed=False: {applied_job}"
+    assert applied_job.get("fix_branch") is None, f"reconcile_job must keep fix_branch=None: {applied_job}"
 
     (fix_repo / "conflict.txt").write_text("line1\\n", encoding="utf-8")
     _git(fix_repo, "add", ".")

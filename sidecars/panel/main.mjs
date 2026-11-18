@@ -251,10 +251,22 @@ app.api('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 
 app.page('/preload.js', () => new Response(STANDALONE_PRELOAD_JS, { contentType: 'application/javascript' }));
 app.api('/styles.css', () => new Response(readLocal('styles.css'), { contentType: 'text/css' }), 'GET');
 app.api('/api/health', () => ({ ok: true, standalone: isStandaloneMode, host: 'antigravity', pid: process.pid }), 'GET');
-const handleActiveWorkspace = (data) => {
-  if (data?.repoPath) {
-    const resolved = resolve(String(data.repoPath).trim());
-    if (existsSync(resolved)) {
+const isGitRepoDir = (dirPath) => {
+  if (!dirPath || dirPath === '/' || /^[a-zA-Z]:[/\\]*$/.test(dirPath)) return false;
+  let cur = dirPath;
+  while (cur && cur !== '/' && !/^[a-zA-Z]:[/\\]*$/.test(cur)) {
+    if (existsSync(join(cur, '.git'))) return true;
+    const parent = dirname(cur);
+    if (!parent || parent === cur) break;
+    cur = parent;
+  }
+  return false;
+};
+
+const handleActiveWorkspace = (data, method = 'GET') => {
+  if (method === 'POST' && data?.repoPath) {
+    const resolved = resolve(normalizeFsPath(String(data.repoPath)));
+    if (resolved && existsSync(resolved) && isGitRepoDir(resolved)) {
       activeStandaloneWorkspaces = [resolved, ...activeStandaloneWorkspaces.filter((p) => p !== resolved)].slice(0, 5);
       knownDiscoveredRepos.add(resolved);
       saveStatePatch({ active_workspace: resolved });
@@ -273,8 +285,8 @@ const handleActiveWorkspace = (data) => {
   }
   return { ok: true, workspaceUris: uris };
 };
-app.api('/api/active-workspace', handleActiveWorkspace, 'GET');
-app.api('/api/active-workspace', handleActiveWorkspace, 'POST');
+app.api('/api/active-workspace', (data) => handleActiveWorkspace(data, 'GET'), 'GET');
+app.api('/api/active-workspace', (data) => handleActiveWorkspace(data, 'POST'), 'POST');
 
 let resolvedPythonBin = null;
 let resolvedGitBin = null;
@@ -439,8 +451,11 @@ function reconcileJobs(state) {
   let modified = false;
   const jobs = Array.isArray(state?.jobs) ? state.jobs : [];
   for (const j of jobs) {
-    const isUnfinished = j.status === 'running' || j.status === 'interrupted' || j.status === 'queued';
-    const isStaleCompleted = j.status === 'completed' && (!j.fixes_committed && (j.verdict === 'FIXED_ON_BRANCH' || (j.summary && j.summary.includes('in progress'))));
+    const isUnfinished = j.status === 'running' || j.status === 'interrupted' || j.status === 'queued' || j.status === 'failed';
+    const isStaleCompleted =
+      j.status === 'completed' &&
+      !j.fixes_applied &&
+      (!j.fixes_committed && (j.verdict === 'FIXED_ON_BRANCH' || (j.summary && j.summary.includes('in progress'))));
     if (isUnfinished || isStaleCompleted) {
       const repoPath = j.repo_path;
       const shortSha = j.short_sha || (j.sha ? j.sha.slice(0, 7) : '');
@@ -484,9 +499,11 @@ function reconcileJobs(state) {
           j.verdict = rData.verdict || 'PASS';
           j.summary = rData.summary || j.summary || 'Audit completed.';
           j.bugs_count = typeof rData.bugs_count === 'number' ? rData.bugs_count : (j.bugs_count || 0);
-          const hasFixes = Boolean(rData.fixes_committed || j.verdict === 'FIXED_ON_BRANCH');
+          const isApplied = Boolean(j.fixes_applied || rData.fixes_applied);
+          const hasFixes = !isApplied && Boolean(rData.fixes_committed || j.verdict === 'FIXED_ON_BRANCH');
+          j.fixes_applied = isApplied;
           j.fixes_committed = hasFixes;
-          j.fix_branch = rData.fix_branch || (hasFixes ? `fix/watchdog-${shortSha}` : null);
+          j.fix_branch = hasFixes ? (rData.fix_branch || `fix/watchdog-${shortSha}`) : null;
           j.completed_at = rData.completed_at || j.completed_at || new Date().toISOString();
           j.report_path = existsSync(mdReport) ? mdReport : jsonReport;
           modified = true;
@@ -514,11 +531,13 @@ function reconcileJobs(state) {
               }
             }
             const fixBranch = `fix/watchdog-${shortSha}`;
-            const hasFixes = verdict === 'FIXED_ON_BRANCH';
+            const isApplied = Boolean(j.fixes_applied);
+            const hasFixes = !isApplied && verdict === 'FIXED_ON_BRANCH';
 
             j.status = 'completed';
             j.verdict = verdict;
             j.summary = summary;
+            j.fixes_applied = isApplied;
             j.fixes_committed = Boolean(hasFixes);
             j.fix_branch = hasFixes ? fixBranch : null;
             j.completed_at = j.completed_at || new Date().toISOString();
@@ -631,7 +650,9 @@ function reconcileJobs(state) {
         const currJobs = Array.isArray(curr.jobs) ? curr.jobs : (state.jobs || []);
         const merged = currJobs.map((cj) => {
           const rec = cj?.id ? reconciledById.get(cj.id) : null;
-          return rec ? { ...cj, ...rec } : cj;
+          if (!rec) return cj;
+          if (cj.fixes_applied && !rec.fixes_applied) return cj;
+          return { ...cj, ...rec };
         });
         return { ...curr, jobs: merged };
       });
@@ -660,7 +681,7 @@ function saveStatePatch(patchOrUpdater) {
   mkdirSync(WATCHDOG_DIR, { recursive: true });
   const lockDir = `${STATE_FILE}.lock`;
   let acquired = false;
-  for (let attempt = 0; attempt < 80; attempt++) {
+  for (let attempt = 0; attempt < 120; attempt++) {
     try {
       mkdirSync(lockDir);
       acquired = true;
@@ -671,7 +692,7 @@ function saveStatePatch(patchOrUpdater) {
     } catch {
       try {
         const stats = statSync(lockDir);
-        if (Date.now() - stats.mtimeMs > 5000) {
+        if (Date.now() - stats.mtimeMs > 1500) {
           const pidFile = join(lockDir, 'pid');
           let isAlive = false;
           try {
@@ -1316,17 +1337,22 @@ async function collectActiveRepos(uris, state, targetRepo = '') {
 
   const normUris = effectiveUris.map(normalizeFsPath).filter(Boolean);
   const normTarget = targetRepo ? normalizeFsPath(targetRepo) : '';
+  const pathsOverlapFs = (a, b) => {
+    const na = String(a || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    const nb = String(b || '').replace(/\\/g, '/').replace(/\/+$/, '');
+    return Boolean(na && nb && (na === nb || na.startsWith(`${nb}/`) || nb.startsWith(`${na}/`)));
+  };
 
   // Sort: explicit target repo first, workspace repos first, non-empty tree first, youngest commit timestamp DESC
   repos.sort((a, b) => {
     if (normTarget) {
-      const matchA = (a.repoPath === normTarget || normTarget.includes(a.repoPath) || a.repoPath.includes(normTarget)) ? 1 : 0;
-      const matchB = (b.repoPath === normTarget || normTarget.includes(b.repoPath) || b.repoPath.includes(normTarget)) ? 1 : 0;
+      const matchA = pathsOverlapFs(normTarget, a.repoPath) ? 1 : 0;
+      const matchB = pathsOverlapFs(normTarget, b.repoPath) ? 1 : 0;
       if (matchA !== matchB) return matchB - matchA;
     }
 
-    const inWsA = normUris.length > 0 && normUris.some((u) => u.includes(a.repoPath) || a.repoPath.includes(u)) ? 1 : 0;
-    const inWsB = normUris.length > 0 && normUris.some((u) => u.includes(b.repoPath) || b.repoPath.includes(u)) ? 1 : 0;
+    const inWsA = normUris.length > 0 && normUris.some((u) => pathsOverlapFs(u, a.repoPath)) ? 1 : 0;
+    const inWsB = normUris.length > 0 && normUris.some((u) => pathsOverlapFs(u, b.repoPath)) ? 1 : 0;
     if (inWsA !== inWsB) return inWsB - inWsA;
 
     const neA = a.head?.isEmptyTree ? 0 : 1;
@@ -1596,6 +1622,15 @@ function isAllowedArtifactPath(filePath) {
   if (!resolved.endsWith('.md') && !resolved.endsWith('.json')) {
     return false;
   }
+  const baseName = resolved.split(/[\\/]/).pop()?.toLowerCase() || '';
+  if (
+    baseName === 'ls_env.json' ||
+    baseName === 'state.json' ||
+    baseName.startsWith('state.json.') ||
+    baseName === 'state.lock'
+  ) {
+    return false;
+  }
   if (isPathInside(WATCHDOG_DIR, resolved)) {
     return true;
   }
@@ -1841,19 +1876,28 @@ const DANGEROUS_OPEN_EXTENSIONS = new Set([
   '.wsh', '.scr', '.pif', '.cpl', '.command', '.tool',
   '.bash', '.zsh', '.csh', '.fish', '.desktop',
   '.jar', '.hta', '.reg', '.scpt', '.applescript',
-  '.psm1', '.psd1', '.inf', '.ins', '.isp', '.msc'
+  '.psm1', '.psd1', '.inf', '.ins', '.isp', '.msc',
+  '.lnk', '.url', '.js', '.jse', '.mjs', '.cjs',
+  '.py', '.pyw', '.chm', '.library-ms', '.scf'
 ]);
 
 // POST /api/open-file { uri | path }
 app.api('/api/open-file', (data) => {
   const uri = String(data?.uri || data?.path || '').trim();
   if (!uri) return { ok: false, error: 'No URI provided' };
-  let filePath = uri.replace(/^file:\/\/(localhost)?/i, '').replace(/#.*$/, '');
+  const isFileUri = /^file:\/\//i.test(uri);
+  let filePath = uri.replace(/^file:\/\/(localhost)?/i, '');
+  if (isFileUri) {
+    filePath = filePath.replace(/#.*$/, '');
+  }
   try {
     filePath = decodeURIComponent(filePath);
   } catch {}
   if (/^\/[a-zA-Z]:([\\/]|$)/.test(filePath)) {
     filePath = filePath.slice(1);
+  }
+  if (!isFileUri && !existsSync(resolve(filePath)) && /#L\d+(?:-L?\d+)?$/i.test(filePath)) {
+    filePath = filePath.replace(/#L\d+(?:-L?\d+)?$/i, '');
   }
   const resolved = resolve(filePath);
   if (!existsSync(resolved)) {
@@ -1875,7 +1919,7 @@ app.api('/api/open-file', (data) => {
   try {
     let child;
     if (process.platform === 'win32') {
-      child = spawn('cmd.exe', ['/c', 'start', '""', resolved], { detached: true, stdio: 'ignore' });
+      child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', resolved], { detached: true, stdio: 'ignore' });
     } else {
       const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
       child = spawn(opener, [resolved], { detached: true, stdio: 'ignore' });

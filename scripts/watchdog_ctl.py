@@ -119,7 +119,7 @@ def is_pid_alive(pid: int) -> bool:
 
 
 class StateLock:
-    MAX_RETRIES: int = 80
+    MAX_RETRIES: int = 120
     _depth: int = 0
     _fp: Optional[Any] = None
     _thread_lock = threading.RLock()
@@ -187,7 +187,7 @@ class StateLock:
                     except FileExistsError:
                         try:
                             mtime = STATE_LOCK_DIR.stat().st_mtime
-                            if time.time() - mtime > 5.0:
+                            if time.time() - mtime > 1.5:
                                 pid_file = STATE_LOCK_DIR / "pid"
                                 is_alive = False
                                 if pid_file.exists():
@@ -754,18 +754,30 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
         else None
     )
 
+    repo_escape_candidates = [re.escape(s.replace("\\", "/")) for s in dict.fromkeys([repo_str, repo_norm]) if s]
+    fallback4_re = (
+        re.compile(
+            r"(?:^|[^A-Za-z0-9_.-])(?:" + "|".join(repo_escape_candidates) + r")(?:[/\"'\s,}\]]|$)",
+            re.IGNORECASE,
+        )
+        if repo_escape_candidates
+        else None
+    )
+
     try:
         conn = sqlite3.connect(str(CONVERSATION_SUMMARIES_DB))
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT conversation_id, title, preview, step_count, last_modified_time, project_id, workspace_uris
-            FROM conversation_summaries
-            ORDER BY last_modified_time DESC
-            """
-        )
-        rows = cur.fetchall()
-        conn.close()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                SELECT conversation_id, title, preview, step_count, last_modified_time, project_id, workspace_uris
+                FROM conversation_summaries
+                ORDER BY last_modified_time DESC
+                """
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
 
         transcript_scans = 0
         for row in rows:
@@ -793,14 +805,14 @@ def get_project_conversations(repo_root: Path) -> List[Dict[str, Any]]:
                     matches = True
 
             # 4. Deep fallback (bounded, blank workspace_uris only): inspect transcript header/cwd
-            if not matches and not parsed_uris and transcript_scans < 25:
+            if not matches and not parsed_uris and transcript_scans < 25 and fallback4_re is not None:
                 t_file = BRAIN_DIR / cid / ".system_generated" / "logs" / "transcript.jsonl"
                 if t_file.exists():
                     transcript_scans += 1
                     try:
                         with open(t_file, "r", encoding="utf-8", errors="ignore") as tf:
                             for lines_checked, line in enumerate(tf):
-                                if repo_str in line or (repo_norm and repo_norm in line):
+                                if fallback4_re.search(line.replace("\\", "/")):
                                     matches = True
                                     break
                                 if lines_checked >= 60:
@@ -2955,7 +2967,7 @@ def execute_plan_in_agent(repo_root: Path, plan_id: str, spawn_agent: bool = Tru
         conv_id = spawn_plan_agent(repo_root, title, plan_content) if spawn_agent else "foreground-agent"
         prompt_text = f"[NEXT-STEPS-SESSION]\nImplement the approved plan '{title}':\n\n{plan_content}"
 
-        exec_record = mark_execution_running(repo_root, clean_id, conv_id, title) if spawn_agent else None
+        exec_record = mark_execution_running(repo_root, clean_id, conv_id, title) if (spawn_agent and conv_id) else None
         if exec_record and exec_record.get("conversationId") and not conv_id:
             conv_id = exec_record["conversationId"]
 
@@ -3212,6 +3224,15 @@ def sync_git_history(workspace_paths: List[str]) -> Dict[str, Any]:
                 j["fix_branch"] = None
 
         _prune_stale_active_convs(state)
+        prev_repos = state.get("repos", {})
+        if isinstance(prev_repos, dict):
+            for rpath, entry in new_repos_state.items():
+                prev_entry = prev_repos.get(rpath)
+                if isinstance(prev_entry, dict):
+                    if prev_entry.get("pending_sha"):
+                        entry["pending_sha"] = prev_entry["pending_sha"]
+                    if prev_entry.get("pending_base_sha"):
+                        entry["pending_base_sha"] = prev_entry["pending_base_sha"]
         state["repos"] = new_repos_state
         save_state(state)
 
@@ -3675,7 +3696,7 @@ def queue_commit(
         "fixes_committed": False,
         "fix_branch": fix_branch,
         "worktree_path": str(worktree_path),
-        "report_path": str(report_path),
+        "report_path": str(report_path) if report_path.exists() else None,
     }
 
     # Phase 3: Re-check running mutex and commit job under StateLock
@@ -3955,10 +3976,14 @@ def reconcile_job(j: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> 
     Returns True if the job was modified.
     """
     curr_status = j.get("status", "queued")
-    is_unfinished = curr_status in ("running", "queued", "interrupted")
-    is_stale_completed = curr_status == "completed" and (
-        (not j.get("fixes_committed") and (j.get("verdict") == "FIXED_ON_BRANCH" or j.get("fix_branch")))
-        or "in progress" in j.get("summary", "").lower()
+    is_unfinished = curr_status in ("running", "queued", "interrupted", "failed")
+    is_stale_completed = (
+        curr_status == "completed"
+        and not j.get("fixes_applied")
+        and (
+            (not j.get("fixes_committed") and (j.get("verdict") == "FIXED_ON_BRANCH" or j.get("fix_branch")))
+            or "in progress" in j.get("summary", "").lower()
+        )
     )
     if not (is_unfinished or is_stale_completed):
         return False
@@ -4017,9 +4042,11 @@ def reconcile_job(j: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> 
             j["verdict"] = r_data.get("verdict") or "PASS"
             j["summary"] = r_data.get("summary") or j.get("summary") or "Audit completed."
             j["bugs_count"] = r_data.get("bugs_count", 0)
-            has_fixes = bool(r_data.get("fixes_committed", False)) or j["verdict"] == "FIXED_ON_BRANCH"
+            is_applied = bool(j.get("fixes_applied") or r_data.get("fixes_applied"))
+            has_fixes = (not is_applied) and (bool(r_data.get("fixes_committed", False)) or j["verdict"] == "FIXED_ON_BRANCH")
+            j["fixes_applied"] = is_applied
             j["fixes_committed"] = has_fixes
-            j["fix_branch"] = r_data.get("fix_branch") or (f"fix/watchdog-{short_sha}" if has_fixes else None)
+            j["fix_branch"] = (r_data.get("fix_branch") or f"fix/watchdog-{short_sha}") if has_fixes else None
             j["completed_at"] = r_data.get("completed_at") or now_iso()
             j["report_path"] = str(report_md) if report_md.exists() else str(report_json)
             _set_conv_active(j.get("conversation_id") or "", False)
@@ -4060,11 +4087,14 @@ def reconcile_job(j: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> 
                 if has_commits and verdict == "PASS":
                     verdict = "FIXED_ON_BRANCH"
 
+                is_applied = bool(j.get("fixes_applied"))
+                has_fixes = (not is_applied) and has_commits
                 j["status"] = "completed"
                 j["verdict"] = verdict
                 j["summary"] = summary
-                j["fixes_committed"] = has_commits
-                j["fix_branch"] = fix_branch if has_commits else None
+                j["fixes_applied"] = is_applied
+                j["fixes_committed"] = has_fixes
+                j["fix_branch"] = fix_branch if has_fixes else None
                 j["completed_at"] = j.get("completed_at") or now_iso()
                 j["report_path"] = str(report_md)
                 _set_conv_active(j.get("conversation_id") or "", False)
@@ -4386,7 +4416,7 @@ python3 "{ctl_script_path}" complete --repo "{job_snapshot['repo_path']}" --sha 
         for j in st.get("jobs", []):
             if j.get("id") == job_snapshot.get("id"):
                 if spawn_error:
-                    j["status"] = "failed"
+                    j["status"] = "interrupted"
                     j["error"] = spawn_error
                     j["summary"] = spawn_error
                 else:
@@ -4446,6 +4476,21 @@ def _finalize_applied_fix(repo_root: Path, short_sha: str, fix_branch: str) -> N
             state["repos"][matched_repo_key]["youngest_short_sha"] = new_short_sha
             state["repos"][matched_repo_key]["updated_at"] = now_iso()
         save_state(state)
+
+    report_json = repo_root / ".antigravity" / "audits" / f"review-{short_sha}.json"
+    if report_json.exists():
+        try:
+            r_data = json.loads(report_json.read_text(encoding="utf-8"))
+            if isinstance(r_data, dict):
+                r_data["fixes_applied"] = True
+                r_data["fixes_committed"] = False
+                r_data["fix_branch"] = None
+                if new_head_sha:
+                    r_data["applied_commit_sha"] = new_head_sha
+                    r_data["applied_short_sha"] = new_short_sha
+                atomic_write_json(report_json, r_data)
+        except Exception:
+            pass
 
 
 def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Dict[str, Any]:
@@ -4535,10 +4580,11 @@ def apply_fix_branch(repo_root: Path, sha: str, mode: str = "cherry-pick") -> Di
 def main() -> int:
     cache_ls_env()
     p_common = argparse.ArgumentParser(add_help=False)
-    p_common.add_argument("--json", action="store_true", help="Output JSON")
-    p_common.add_argument("--host", default="antigravity", choices=["", "auto", "antigravity"], help="Host environment")
+    p_common.add_argument("--json", action="store_true", default=argparse.SUPPRESS, help="Output JSON")
+    p_common.add_argument("--host", default=argparse.SUPPRESS, choices=["", "auto", "antigravity"], help="Host environment")
 
     parser = argparse.ArgumentParser(description="Antigravity Watchdog Controller", parents=[p_common])
+    parser.set_defaults(json=False, host="antigravity")
     sub = parser.add_subparsers(dest="cmd")
 
     p_status = sub.add_parser("status", help="Show Watchdog status and jobs", parents=[p_common])
@@ -4866,7 +4912,7 @@ def main() -> int:
                 state = load_state()
                 for j in state.get("jobs", []):
                     if j.get("id") == job["id"]:
-                        j["status"] = "failed"
+                        j["status"] = "interrupted"
                         j["error"] = "Failed to launch background auditor process."
                         j["summary"] = "Background auditor failed to start."
                         break

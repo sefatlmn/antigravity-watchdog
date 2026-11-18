@@ -18,7 +18,7 @@ Your job is to perform a rigorous, two-part **Codebase + Live Visual/Functional 
 ## 1. Worktree & Branch Isolation Rule (CRITICAL)
 
 1. **Never modify files in the user's primary repository checkout (`REPO_PATH`)** except writing audit reports to `<REPO_PATH>/.antigravity/audits/`.
-2. Perform all code edits, test runs, builds, and bug fixes exclusively inside the isolated Git worktree (`WORKTREE_PATH`, located at `~/.gemini/antigravity/watchdog/worktrees/<repo>-<short_sha>`) on branch `fix/watchdog-<short_sha>`.
+2. Perform all code edits, test runs, builds, and bug fixes exclusively inside the isolated Git worktree (`WORKTREE_PATH`, located at `~/.gemini/antigravity/watchdog/worktrees/<repo_slug>-<short_sha>`) on branch `fix/watchdog-<short_sha>`.
 3. If the isolated worktree does not exist yet for the target commit `<SHA>`, create it using the controller (`<PLUGIN_ROOT>` is the Watchdog plugin folder, two levels above this `SKILL.md`; the dispatch prompt gives its exact path):
    ```bash
    python3 "<PLUGIN_ROOT>/scripts/watchdog_ctl.py" prepare --repo "<REPO_PATH>" --sha "<SHA>"

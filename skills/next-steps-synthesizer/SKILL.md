@@ -1,6 +1,6 @@
 ---
 name: next-steps-synthesizer
-description: Autonomous post-commit planning and next-step proposer. Ingests project handoffs, specifications, package manifests, full codebase trees, AST symbols, and all Antigravity chat transcripts to formulate 4 project-grounded implementation plans adhering to the /plan methodology.
+description: Autonomous post-commit planning and next-step proposer. Ingests project handoffs, specifications, package manifests, full codebase layers/markers, and all Antigravity chat transcripts to formulate 4 project-grounded implementation plans adhering to the /plan methodology.
 ---
 
 # Next Steps Planner
@@ -18,7 +18,7 @@ This skill empowers Antigravity agents to inspect codebases and project history 
    - Parses package manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`) to extract dependencies, project descriptions, scripts, and exact test runner commands (`npm test`, `pytest`, `cargo test`, etc.).
    - Parses the complete `README.md` (overview, features, architecture, roadmap, and current status).
 
-3. **Pillar 3: Deep Codebase & AST/Symbol Traversal**
+3. **Pillar 3: Deep Codebase Layer & Marker Traversal**
    - Scans the repository tree to classify architecture layers: entry points, UI components, backend/logic modules, test files, and configuration files.
    - Collects active `TODO`, `FIXME`, and `BUG` markers with exact file paths and line numbers.
    - Evaluates the velocity and trajectory of the last 15 commits and uncommitted dirty working-tree files.

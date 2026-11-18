@@ -2,13 +2,13 @@
 
 const SKIP_TAGS = ['[auto-review]', '[watchdog]', '[skip-watchdog]'];
 
+function stripEmojis(str) {
+  return stripEmojiChars(str).replace(/\s+/g, ' ').trim();
+}
+
 function stripEmojiChars(str) {
   if (!str) return '';
   return String(str).replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{25A0}-\u{25FF}\u{2B50}-\u{2B55}\u{2300}-\u{23FF}]/gu, '');
-}
-
-function stripEmojis(str) {
-  return stripEmojiChars(str).replace(/\s+/g, ' ').trim();
 }
 
 function timeAgo(iso, now = Date.now()) {
@@ -78,13 +78,13 @@ function jobView(job) {
   const verdict = (job.verdict || 'PENDING').toUpperCase();
   const isRunning = status === 'running';
   const isQueued = status === 'queued';
-  const isInterrupted = status === 'interrupted';
+  const isInterrupted = status === 'interrupted' || status === 'failed';
   const isFixedOnBranch = verdict === 'FIXED_ON_BRANCH';
   const fixBranch = job.fix_branch || (isFixedOnBranch ? `fix/watchdog-${job.short_sha}` : null);
   const hasFixToApply = Boolean((job.fixes_committed || isFixedOnBranch) && fixBranch && !job.fixes_applied);
   const isApplied = Boolean(job.fixes_applied);
   const isPassed = verdict === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued && !isInterrupted;
-  const hasReport = Boolean(job.report_path || status === 'completed');
+  const hasReport = Boolean(job.report_path && status === 'completed');
 
   let badge = null;
   if (!(isRunning || isQueued || isInterrupted) && !(isApplied || verdict === 'PASS')) {
@@ -123,7 +123,7 @@ function auditAction(data, repo, comment = '') {
     return { ...base, kind: 'none', disabled: true, tone: 'primary', icon: 'dots', label: `Auditing ${sha}…`, title: `An audit is currently running for commit ${sha}. Type a comment above to send guidance.` };
   }
   if (matchingJob) {
-    if (matchingJob.status === 'interrupted') {
+    if (matchingJob.status === 'interrupted' || matchingJob.status === 'failed') {
       return { ...base, kind: 'continue-audit', disabled: false, tone: 'accent', icon: 'play', label: `Continue Audit (${shortSha})`, title: `The previous audit for ${shortSha} was interrupted. Click to continue audit.` };
     }
     return { ...base, kind: 'none', disabled: true, tone: 'primary', icon: 'check', label: `Commit ${shortSha} Audited`, title: `Commit ${shortSha} has already been audited. Make a new commit to audit again.` };
@@ -195,10 +195,6 @@ function proposalView(p, repo) {
 
 const sidecar = typeof window !== 'undefined' ? window.sidecar : null;
 function getHostMode() {
-  try {
-    const fromUrl = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('host') : null;
-    if (fromUrl) return fromUrl;
-  } catch {}
   return 'antigravity';
 }
 const hostMode = getHostMode();
@@ -452,18 +448,24 @@ function parseInlineMd(text) {
     codeSpans.push(`<code>${code}</code>`);
     return `\uE000CODE${idx}\uE000`;
   });
-  s = s.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+  const linkSpans = [];
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, rawUrl) => {
     const cleanUrl = String(rawUrl || '').trim();
+    let rendered;
     if (/^(https?:\/\/|#|\/)/i.test(cleanUrl)) {
-      return `<a href="${cleanUrl}" target="_blank" rel="noopener">${label}</a>`;
+      rendered = `<a href="${cleanUrl}" target="_blank" rel="noopener">${label}</a>`;
+    } else if (/^file:\/\//i.test(cleanUrl)) {
+      rendered = `<a href="${cleanUrl}" class="file-link" data-file-url="${cleanUrl}" onclick="window.handleFileLinkClick?.(event, this)">${label}</a>`;
+    } else {
+      rendered = `${label} (${cleanUrl})`;
     }
-    if (/^file:\/\//i.test(cleanUrl)) {
-      return `<a href="${cleanUrl}" class="file-link" data-file-url="${cleanUrl}" onclick="window.handleFileLinkClick?.(event, this)">${label}</a>`;
-    }
-    return `${label} (${cleanUrl})`;
+    const idx = linkSpans.length;
+    linkSpans.push(rendered);
+    return `\uE000LINK${idx}\uE000`;
   });
+  s = s.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*]+)\*(?!\*)/g, '$1<em>$2</em>');
+  s = s.replace(/\uE000LINK(\d+)\uE000/g, (_, idx) => linkSpans[Number(idx)] || '');
   return s.replace(/\uE000CODE(\d+)\uE000/g, (_, idx) => codeSpans[Number(idx)] || '');
 }
 
@@ -471,9 +473,6 @@ window.handleFileLinkClick = function(event, el) {
   event.preventDefault();
   const url = el?.dataset?.fileUrl || el?.getAttribute('href') || '';
   if (!url) return;
-  if (window.vscode && typeof window.vscode.postMessage === 'function') {
-    window.vscode.postMessage({ command: 'openFile', uri: url });
-  }
   if (typeof callApi === 'function') {
     callApi('/api/open-file', { body: { uri: url } }).catch(() => {});
   }
@@ -1176,7 +1175,7 @@ async function refreshProposals(skipDispatch = false) {
               activeRepo.synthesizing = false;
               toast(check.error || 'Synthesis ended without generating proposals.', true);
               break;
-            } else if (check.status === 'cancelled') {
+            } else {
               activeRepo.synthesizing = false;
               break;
             }
@@ -1202,6 +1201,9 @@ async function refreshProposals(skipDispatch = false) {
     }
   } finally {
     const finishedRepoPath = refreshingRepoPath;
+    if (isSynthesisCancelled) {
+      activeRepo.synthesizing = false;
+    }
     isRefreshingProposals = false;
     refreshingRepoPath = '';
     if (cancelHeaderBtn) {
@@ -1634,14 +1636,18 @@ async function runAudit() {
     if (sidecar?.agent?.startConversation && prompt) {
       try {
         const convRes = await sidecar.agent.startConversation(prompt);
+        startedViaSidecar = true;
         const conversationId =
           convRes?.conversationId ||
           convRes?.response?.conversationId ||
           convRes?.response?.newConversation?.conversationId ||
           null;
-        await callApi('/api/mark-running', { body: { jobId: res.job.id, conversationId } });
+        try {
+          await callApi('/api/mark-running', { body: { jobId: res.job.id, conversationId } });
+        } catch (markErr) {
+          console.warn('mark-running failed after startConversation:', markErr);
+        }
         toast(`Launched Watchdog for ${res.job.repo_name} @ ${res.job.short_sha}`);
-        startedViaSidecar = true;
       } catch (agentErr) {
         console.warn('sidecar.agent.startConversation failed, falling back to /api/dispatch:', agentErr);
       }
@@ -1687,6 +1693,25 @@ async function continueAudit(jobId, repoPath, sha) {
     toast('Resuming Watchdog audit…');
     const res = await callApi('/api/continue-audit', { body: { jobId, repoPath, sha } });
     if (!res.ok) {
+      if (sidecar?.agent?.startConversation) {
+        const prompt = `Continue Watchdog review for repository ${repoPath || 'current'} on commit ${sha || 'HEAD'}.\nInspect existing worktree/diff, verify changes, write the report under .antigravity/audits/, and finalize with watchdog_ctl.py complete.`;
+        try {
+          const convRes = await sidecar.agent.startConversation(prompt);
+          const convId =
+            convRes?.conversationId ||
+            convRes?.response?.conversationId ||
+            convRes?.response?.newConversation?.conversationId ||
+            null;
+          if (jobId) {
+            try {
+              await callApi('/api/mark-running', { body: { jobId, conversationId: convId } });
+            } catch {}
+          }
+          toast(`Launched Watchdog continuation for ${(sha || '').slice(0, 7) || 'commit'}`);
+          await syncGit({ silent: true });
+          return;
+        } catch {}
+      }
       toast(res.error || 'Could not continue audit.', true);
       return;
     }

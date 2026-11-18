@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 
 const BIND_HOST = '127.0.0.1';
+const LOOPBACK_HOST_RE = /^(?:127(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}|localhost|\[::1\])(?::\d+)?$/i;
 
 export class Response {
   /**
@@ -49,7 +50,6 @@ export class SidecarApp {
         const headerToken = Array.isArray(rawHeaderToken) ? rawHeaderToken[0] : rawHeaderToken;
         const queryToken = url.searchParams.get('token');
         const candidates = [headerToken, queryToken, cookieToken, bearerToken].filter(Boolean);
-        const provided = candidates[0] || null;
 
       const remoteIp = req.socket?.remoteAddress || '';
       const isRemoteLoopback =
@@ -59,7 +59,7 @@ export class SidecarApp {
         remoteIp.startsWith('127.') ||
         remoteIp.startsWith('::ffff:127.');
       const hostHeader = typeof req.headers.host === 'string' ? req.headers.host.trim() : '';
-      const isHostLoopback = /^(?:127(?:\.\d+){3}|localhost|\[::1\])(?::\d+)?$/i.test(hostHeader);
+      const isHostLoopback = LOOPBACK_HOST_RE.test(hostHeader);
       const isLoopback = isRemoteLoopback && isHostLoopback;
 
       // Reject non-loopback requests unconditionally (prevents DNS rebinding and host spoofing)
@@ -69,13 +69,31 @@ export class SidecarApp {
         return;
       }
 
+      const secFetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+      if (secFetchSite === 'cross-site') {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'forbidden: cross-origin access denied' }));
+        return;
+      }
+      const originHeader = req.headers.origin;
+      if (originHeader) {
+        let isOriginLoopback = false;
+        try {
+          const originUrl = new URL(originHeader);
+          isOriginLoopback = LOOPBACK_HOST_RE.test(originUrl.host);
+        } catch {}
+        if (!isOriginLoopback) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'forbidden: cross-origin access denied' }));
+          return;
+        }
+      }
+
       const isSafeEndpoint = req.method === 'GET' || [
         '/api/dashboard',
-        '/api/sync',
         '/api/git-state',
         '/api/git_state',
         '/api/health',
-        '/api/active-workspace',
       ].includes(url.pathname);
 
       // Like the real SDK, non-GET mutating calls need the token; reads and status queries are open on loopback.
@@ -87,7 +105,7 @@ export class SidecarApp {
 
       if (req.method === 'GET' && this.#pages.has(url.pathname)) {
         const content = await this.#pages.get(url.pathname)();
-        const cookieHeaderVal = `sidecar_token=${this.#token}; Path=/; SameSite=Lax`;
+        const cookieHeaderVal = `sidecar_token=${this.#token}; Path=/; HttpOnly; SameSite=Strict`;
         if (content instanceof Response) {
           res.writeHead(content.status || 200, {
             'Content-Type': content.contentType,
@@ -145,6 +163,12 @@ export class SidecarApp {
               if (key.toLowerCase() !== 'token') data[key] = value;
             }
             if (body) {
+              const contentType = String(req.headers['content-type'] || '').toLowerCase();
+              if (!contentType.includes('application/json')) {
+                res.writeHead(415, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: 'Unsupported Media Type: application/json required' }));
+                return;
+              }
               let parsed;
               try {
                 parsed = JSON.parse(body);

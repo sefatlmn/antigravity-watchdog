@@ -98,13 +98,13 @@ export function jobView(job) {
   const verdict = (job.verdict || 'PENDING').toUpperCase();
   const isRunning = status === 'running';
   const isQueued = status === 'queued';
-  const isInterrupted = status === 'interrupted';
+  const isInterrupted = status === 'interrupted' || status === 'failed';
   const isFixedOnBranch = verdict === 'FIXED_ON_BRANCH';
   const fixBranch = job.fix_branch || (isFixedOnBranch ? `fix/watchdog-${job.short_sha}` : null);
   const hasFixToApply = Boolean((job.fixes_committed || isFixedOnBranch) && fixBranch && !job.fixes_applied);
   const isApplied = Boolean(job.fixes_applied);
   const isPassed = verdict === 'PASS' && !isApplied && !hasFixToApply && !isRunning && !isQueued && !isInterrupted;
-  const hasReport = Boolean(job.report_path || status === 'completed');
+  const hasReport = Boolean(job.report_path && status === 'completed');
 
   let badge = null;
   if (!(isRunning || isQueued || isInterrupted) && !(isApplied || verdict === 'PASS')) {
@@ -151,7 +151,7 @@ export function auditAction(data, repo, comment = '') {
     return { ...base, kind: 'none', disabled: true, tone: 'primary', icon: 'dots', label: `Auditing ${sha}…`, title: `An audit is currently running for commit ${sha}. Type a comment above to send guidance.` };
   }
   if (matchingJob) {
-    if (matchingJob.status === 'interrupted') {
+    if (matchingJob.status === 'interrupted' || matchingJob.status === 'failed') {
       return { ...base, kind: 'continue-audit', disabled: false, tone: 'accent', icon: 'play', label: `Continue Audit (${shortSha})`, title: `The previous audit for ${shortSha} was interrupted. Click to continue audit.` };
     }
     return { ...base, kind: 'none', disabled: true, tone: 'primary', icon: 'check', label: `Commit ${shortSha} Audited`, title: `Commit ${shortSha} has already been audited. Make a new commit to audit again.` };

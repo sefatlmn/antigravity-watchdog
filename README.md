@@ -12,7 +12,7 @@ Watchdog operates non-intrusively in isolated Git worktrees, ensuring your activ
 - **Automated Fix Branches:** Confirmed bug fixes are automatically committed to `fix/watchdog-<short_sha>` for one-click cherry-picking.
 - **Native Antigravity Sidecar Panel:** An embedded webview directly inside Antigravity's auxiliary side pane displaying active audits, status badges, diffs, reports, and Next Steps plans.
 - **AgentAPI Background Synthesis:** Directly communicates with Antigravity's AgentAPI to spawn background audits and plan executions.
-- **Next Steps Implementation Engine:** Ingests repository documentation, recent user transcripts, and codebase symbols to formulate 4 structured `/plan` proposals.
+- **Next Steps Implementation Engine:** Ingests repository documentation, recent user transcripts, codebase layers, and markers (`TODO`/`FIXME`/`BUG`/`HACK`) to formulate 4 structured `/plan` proposals.
 - **Audits Run Only on Demand:** Watchdog never audits without user interaction, and automatically skips commits tagged `[skip-watchdog]`, `[auto-review]`, or `[watchdog]` unless explicitly forced via `Run Review` in the UI or `--force` on the CLI.
 
 ---
@@ -50,6 +50,7 @@ Then open **Settings → Plugins** in Antigravity, verify that **Watchdog** is e
   - `skills/watchdog-auditor/`: Autonomous post-commit code review and visual verification skill.
   - `skills/next-steps-synthesizer/`: Post-commit planning and next-step proposal synthesizer.
 - `sidecars/panel/`: Embedded auxiliary panel webview:
+  - `sidecar.json`: Antigravity auxiliary pane sidecar manifest and launch configuration.
   - `main.mjs`: Node.js sidecar service integrating with Antigravity's `sidecar_sdk` (or bundled fallback).
   - `standalone_sdk.mjs`: Loopback HTTP server fallback used outside Antigravity with token/cookie authentication and body size guards.
   - `view-model.js`: Reactive UI state, badge computations, and selection logic.
